@@ -1,0 +1,51 @@
+# A throwaway local PostgreSQL for tests, development and CI (ADR 0002,
+# ADR 0022 §3). Start it with `podman-compose up -d` (or `docker compose up -d`).
+#
+# - The major version matches production: PostgreSQL 18. The image is pinned
+#   by the digest of its multi-arch index; a bump changes tag and digest
+#   together.
+# - The credentials are local throwaway values, not secrets. POSTGRES_USER is
+#   the image's bootstrap superuser, so it may CREATE DATABASE for Loco's
+#   per-test databases (`_loco_test_<random>_<timestamp>`).
+# - All three local databases exist from the first start: backend3_test
+#   (POSTGRES_DB), and backend3_development and backend3_e2e from the init
+#   script below. They cannot come from `backend3-cli db create`: loco-rs
+#   1.2.0's CLI connects to the configured database before it runs any
+#   subcommand, so `db create` fails when that database does not exist yet.
+# - The port is published on loopback only. The data lives in a tmpfs, so
+#   every start begins empty and nothing is left on disk.
+services:
+  postgres:
+    image: docker.io/library/postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+    environment:
+      POSTGRES_USER: loco
+      POSTGRES_PASSWORD: loco
+      POSTGRES_DB: backend3_test
+    # The image runs every file in /docker-entrypoint-initdb.d once, when the
+    # data directory is initialised (here: on every start, because of the
+    # tmpfs). Write the script, then hand over to the image's own entrypoint
+    # with its default command.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        printf '%s\n' \
+          'CREATE DATABASE backend3_development;' \
+          'CREATE DATABASE backend3_e2e;' \
+          > /docker-entrypoint-initdb.d/10-backend3-databases.sql
+        exec docker-entrypoint.sh postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    tmpfs:
+      # PostgreSQL 18 images keep their data below /var/lib/postgresql.
+      - /var/lib/postgresql
+    healthcheck:
+      # Over TCP on purpose: during initialisation the image runs a temporary
+      # server that listens on the Unix socket only, so a socket check could
+      # report healthy before the init script has run and the final server is
+      # up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U loco -d backend3_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s

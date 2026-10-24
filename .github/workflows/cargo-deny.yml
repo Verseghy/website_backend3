@@ -1,0 +1,92 @@
+# cargo-deny checks of the Rust dependency graph (ADR 0022 sections 3 and 4).
+#
+# Two jobs, two contexts:
+#   - "cargo-deny check bans licenses sources" (required): the licence
+#     allow-list compatible with AGPL-3.0-only, the openssl ban and the source
+#     rules of deny.toml. It fails only when the repository changes.
+#   - "cargo-deny check advisories" (not required): RustSec advisories. A new
+#     advisory can fail it with no change in the repository, so it must not
+#     block unrelated PRs. The fix for a new advisory is a dedicated PR.
+#
+# The advisories job also runs weekly on master from the schedule below.
+# GitHub sends the failure notification only to the user who last changed the
+# cron line, and in a public repository it disables the schedule after 60 days
+# without repository activity; the runbook checks that this workflow is still
+# enabled.
+#
+# Both jobs pass --all-features so optional dependencies (for example the
+# importer's MySQL driver behind `import-mysql`) are checked too. cargo-deny
+# comes from taiki-e/install-action as a checksummed release binary, and the
+# Rust toolchain from rust-toolchain.toml, because cargo-deny runs
+# `cargo metadata`. The ground rules of ci.yml apply here as well.
+name: cargo-deny
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    # Mondays 05:17 UTC, off the top of the hour when GitHub's scheduler is busiest.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bans-licenses-sources:
+    name: cargo-deny check bans licenses sources
+    # The scheduled run is for advisories only.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: registry
+          cache-targets: "false"
+          save-if: "false"
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+      - name: cargo deny check bans licenses sources
+        run: cargo deny --locked --workspace --all-features check bans licenses sources
+
+  advisories:
+    name: cargo-deny check advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: registry
+          cache-targets: "false"
+          save-if: "false"
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+      - name: cargo deny check advisories
+        # Fetches the RustSec advisory database over the network.
+        run: cargo deny --locked --workspace --all-features check advisories

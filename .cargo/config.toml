@@ -1,0 +1,7 @@
+# Cargo aliases from Loco's generated app (loco 1.2.0 base template).
+#
+# `cargo loco <command>` runs the package's default binary, `backend3-cli`, so
+# it goes through the same CLI pre-check as the binary itself (ADR 0024 §4).
+[alias]
+loco = "run --"
+loco-tool = "run --"

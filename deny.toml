@@ -1,0 +1,134 @@
+# cargo-deny policy of website_backend3 (ADR 0022 §4), starting from
+# website_backend2's policy.
+#
+# CI runs two jobs (ADR 0022 §3):
+#   `cargo deny check bans licenses sources`  required
+#   `cargo deny check advisories`             not required; also weekly
+#
+# Changing this file: adding a license, a ban exception or an advisory ignore
+# needs a PR that states the reason, and every entry below carries that reason
+# as a comment.
+
+[graph]
+# Resolve the graph with every feature of the workspace crates enabled, so an
+# optional dependency (for example the importer's MySQL driver, which the
+# importer slice puts behind the `import-mysql` feature, ADR 0022 §2) cannot
+# slip a license, a banned crate or an advisory past the policy. CI passes
+# `--all-features` as well; this setting makes a local `cargo deny check` see
+# the same graph. `targets` is left unset, so the graph of every target
+# platform is checked, not only the build host's.
+all-features = true
+
+[advisories]
+version = 2
+# Every ignore entry needs a comment with the reason and a linked issue
+# (ADR 0022 §4). Each entry is removed by the PR that removes its cause,
+# normally a Loco bump (ADR 0024 §3). All three below have no patched release
+# that loco-rs 1.2.0's dependency tree can use, and come in through
+# non-optional dependencies of loco-rs 1.2.0. The links are the upstream
+# issues and pull requests that track each cause; the backend3 tracking
+# issues are opened with the bootstrap PR, and their links are added here.
+ignore = [
+  # rsa 0.9: Marvin attack, timing side channel in RSA private-key
+  # operations. Pulled in by jsonwebtoken's `rust_crypto` backend, which
+  # loco-rs enables with its `auth` feature. backend3 signs and verifies
+  # only HS512 tokens (ADR 0006) and holds no RSA key, so the affected code
+  # never runs.
+  # Upstream: https://github.com/RustCrypto/RSA/issues/626 (the fix) and
+  # https://github.com/Keats/jsonwebtoken/issues/495 (jsonwebtoken moving to
+  # rsa 0.10).
+  { id = "RUSTSEC-2023-0071", reason = "RSA is unused: backend3 uses HS512 JWTs only (ADR 0006); no patched rsa release" },
+  # crypto-bigint 0.5: timing variability in constant-time operations, fixed
+  # in 0.7.6. Pulled in through elliptic-curve 0.13 by jsonwebtoken's p256
+  # and p384 0.13 (the same `rust_crypto` backend). backend3 does no ECDSA
+  # operation, as above. No upstream issue tracks jsonwebtoken's move to the
+  # 0.14 curves yet, so the backend3 tracking issue carries it.
+  # Upstream fix: https://github.com/RustCrypto/crypto-bigint/pull/1365
+  { id = "RUSTSEC-2026-0387", reason = "ECDSA is unused: backend3 uses HS512 JWTs only (ADR 0006); no patched 0.5 release" },
+  # unsafe-libyaml is unmaintained (informational, no known vulnerability).
+  # Pulled in by serde_yaml_ng (Loco's config loader) and serde_yaml (loco-gen
+  # via rrgen). It only parses the repository's own config/*.yaml and seed
+  # fixtures, never request input.
+  # Upstream: https://github.com/loco-rs/loco/issues/1859
+  { id = "RUSTSEC-2024-0449", reason = "unmaintained, no vulnerability; parses only committed config and fixtures; required by loco-rs 1.2.0" },
+]
+
+[licenses]
+version = 2
+# Only exact license matches count; a license text that is merely similar to
+# an allowed one is not accepted.
+confidence-threshold = 1.0
+# website_backend3 is AGPL-3.0-only (ADR 0012). Every license below may be
+# combined with it. The reasoning per entry follows the FSF's list of
+# GPL-3.0-compatible free software licenses
+# (https://www.gnu.org/licenses/license-list.html), which applies to AGPL-3.0
+# as well, because AGPL-3.0 section 13 and GPL-3.0 section 13 allow combining
+# the two.
+allow = [
+  # Expat/MIT: FSF list, "GPL-compatible free software license".
+  "MIT",
+  # Apache-2.0: FSF list, compatible with GPL-3.0 (not with GPL-2.0).
+  "Apache-2.0",
+  # ISC: FSF list, "GPL-compatible", equivalent to the two-clause BSD license.
+  "ISC",
+  # FreeBSD (two-clause) license: FSF list, GPL-compatible.
+  "BSD-2-Clause",
+  # Modified (three-clause) BSD license: FSF list, GPL-compatible.
+  "BSD-3-Clause",
+  # zlib license: FSF list, GPL-compatible.
+  "Zlib",
+  # Boost Software License 1.0: FSF list, GPL-compatible.
+  "BSL-1.0",
+  # MPL-2.0: FSF list, compatible with GPL-3.0 through its secondary-license
+  # clause (MPL-2.0 section 3.3). The "Incompatible With Secondary Licenses"
+  # variant has its own SPDX id, MPL-2.0-no-copyleft-exception, which is not
+  # on this list and is therefore denied.
+  "MPL-2.0",
+  # Unicode-3.0: not named on the FSF list. It is a short permissive notice
+  # license (keep the copyright and permission notice; no further
+  # conditions), so it adds no restriction that conflicts with AGPL-3.0.
+  # Used by the ICU4X crates that url and idna depend on.
+  "Unicode-3.0",
+]
+exceptions = [
+  # CDLA-Permissive-2.0: not named on the FSF list. It is a short permissive
+  # data license (keep the license text with the data; no restriction on
+  # results), so it adds no condition that conflicts with AGPL-3.0. Allowed
+  # for the Mozilla CA root data in webpki-roots only (ADR 0022 §4).
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+  # CC0-1.0: the FSF list names CC0 a GPL-compatible public domain dedication
+  # with a lax permissive fallback license. (The FSF advises against CC0 for
+  # one's own programs because it grants no patent license; that concerns
+  # choosing a license, not combining with code under it.) Allowed for the
+  # file watcher notify only, a non-optional dependency of loco-rs 1.2.0.
+  { allow = ["CC0-1.0"], crate = "notify" },
+  # 0BSD (Zero-Clause BSD): the FSF list names it ("Zero-clause BSD
+  # license") among the GPL-compatible free software licenses. It grants
+  # every permission with no condition at all, less than ISC asks, so it adds
+  # nothing that conflicts with AGPL-3.0. Allowed for quoted_printable only,
+  # which loco-rs 1.2.0 pulls in through its non-optional lettre dependency.
+  { allow = ["0BSD"], crate = "quoted_printable" },
+]
+
+[licenses.private]
+# backend3's own crates (backend3, migration) are unpublished and
+# AGPL-3.0-only; they are not checked against the allow-list.
+ignore = true
+
+[bans]
+# Several versions of one crate cost build time but are not an error; the
+# warnings show where a bump would help.
+multiple-versions = "warn"
+wildcards = "allow"
+deny = [
+  # TLS goes through rustls everywhere; OpenSSL would add a C dependency and
+  # a second TLS stack to the image (ADR 0022 §4).
+  { crate = "openssl", reason = "use rustls" },
+  { crate = "openssl-sys", reason = "use rustls" },
+]
+
+[sources]
+# Only crates.io; no other registry and no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

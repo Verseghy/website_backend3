@@ -1,0 +1,96 @@
+# Loco configuration of the `production` environment: the backend3 image on
+# the edge node, its CronJobs, and staging on the hub (ADR 0014, ADR 0016).
+#
+# Only this file reads the environment, through `get_env` (ADR 0008,
+# ADR 0023 §11). A secret or an address takes no default: `get_env` without a
+# default fails at startup when the variable is unset, which is safer than
+# falling back to a development value. Required variables:
+#
+#   DATABASE_URL  postgres://website_backend3:<password>@postgres:5432/verseghy
+#                 (built by the Deployment from the backend-secrets key,
+#                 ADR 0002, ADR 0023 §11)
+#   HOST          https://backend3.microshift.verseghy-gimnazium.net (ADR 0014)
+#
+# Optional: LOG_LEVEL, DB_AUTO_MIGRATE (default false: boot runs no
+# migration, so backend3 also boots against a read-only database, ADR 0003),
+# DB_MAX_CONNECTIONS, DB_CONNECT_TIMEOUT, DB_IDLE_TIMEOUT.
+#
+# Safety (ADR 0024 §4, layer 3): `App::load_config` refuses
+# dangerously_truncate, dangerously_recreate and queue.dangerously_flush here,
+# and backend3-cli refuses `db reset`, `db truncate` and `db seed --reset`.
+
+logger:
+  enable: true
+  pretty_backtrace: false
+  level: <%= get_env(name="LOG_LEVEL", default="info") %>
+  # JSON to stdout, read with `oc logs` (ADR 0023 §9).
+  format: json
+
+server:
+  port: 5150
+  # All interfaces: the pod is reached through its Service.
+  binding: 0.0.0.0
+  host: <%= get_env(name="HOST") %>
+  middlewares:
+    # ADR 0004 §3: the /admin router replaces Loco's static middleware, and
+    # the development welcome fallback is off.
+    static:
+      enable: false
+    fallback:
+      enable: false
+    compression:
+      enable: true
+    # ADR 0023 §6: HSTS, nosniff, X-Frame-Options and the rest of the github
+    # preset on every response, and a deny-all CSP for the JSON API. /admin
+    # sets its own CSP and admin headers, which win because secure_headers
+    # never overwrites a header that is already present.
+    secure_headers:
+      enable: true
+      preset: github
+      overrides:
+        Content-Security-Policy: "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        Referrer-Policy: "strict-origin-when-cross-origin"
+
+# ADR 0016 §3: durable jobs on the Postgres queue, processed inside the web
+# process (`start --server-and-worker`, the image's default command).
+workers:
+  mode: BackgroundQueue
+
+queue:
+  kind: Postgres
+  uri: <%= get_env(name="DATABASE_URL") %>
+  max_connections: 2
+  min_connections: 1
+  num_workers: 1
+  poll_interval_sec: 5
+  dangerously_flush: false
+  reaper:
+    age_minutes: 30
+    interval_seconds: 300
+
+# ADR 0016 §2: set explicitly, never the 1.2.0 default of 33,554,432 entries.
+cache:
+  kind: InMem
+  max_capacity: 1000
+
+database:
+  uri: <%= get_env(name="DATABASE_URL") %>
+  enable_logging: false
+  connect_timeout: <%= get_env(name="DB_CONNECT_TIMEOUT", default="5000") %>
+  # Pool sizes are starting values for a small edge node; revisit them once
+  # its real capacity is known (ADR 0016, follow-up work). Idle connections
+  # are kept for ten minutes, the sqlx default, instead of the template's
+  # 500 ms, so bursts do not reconnect on every request.
+  idle_timeout: <%= get_env(name="DB_IDLE_TIMEOUT", default="600000") %>
+  min_connections: 1
+  max_connections: <%= get_env(name="DB_MAX_CONNECTIONS", default="5") %>
+  auto_migrate: <%= get_env(name="DB_AUTO_MIGRATE", default="false") %>
+  dangerously_truncate: false
+  dangerously_recreate: false
+
+settings:
+  admin_ui:
+    # Where the runtime stage of the Containerfile copies admin/dist
+    # (ADR 0004 §2). The server refuses to start when it or its index.html
+    # is missing.
+    dist_dir: /app/admin/dist

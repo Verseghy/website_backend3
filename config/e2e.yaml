@@ -1,0 +1,59 @@
+# Loco configuration of the `e2e` environment: the E2E CI job, which builds
+# admin/dist and a debug backend3, starts it with LOCO_ENV=e2e, waits for
+# GET http://localhost:5150/_ping and runs Playwright against
+# http://localhost:5150/admin (ADR 0022 §3).
+#
+# Safety (ADR 0024 §4, layer 3): like test and development, e2e may only use
+# a local database; `App::load_config` refuses anything else.
+
+logger:
+  enable: true
+  pretty_backtrace: true
+  level: <%= get_env(name="LOG_LEVEL", default="info") %>
+  format: compact
+
+server:
+  port: 5150
+  binding: localhost
+  host: http://localhost:5150
+  middlewares:
+    # ADR 0004 §3: no static middleware, no welcome fallback.
+    static:
+      enable: false
+    fallback:
+      enable: false
+    compression:
+      enable: true
+    # ADR 0023 §6: the same headers as production, so the CSP-violation check
+    # of the E2E run tests what production sends.
+    secure_headers:
+      enable: true
+      preset: github
+      overrides:
+        Content-Security-Policy: "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        Referrer-Policy: "strict-origin-when-cross-origin"
+
+# Jobs run inline, so a test sees their effect without a worker process.
+workers:
+  mode: ForegroundBlocking
+
+cache:
+  kind: InMem
+  max_capacity: 1000
+
+database:
+  uri: <%= get_env(name="DATABASE_URL", default="postgres://loco:loco@localhost:5432/backend3_e2e") %>
+  enable_logging: false
+  connect_timeout: <%= get_env(name="DB_CONNECT_TIMEOUT", default="5000") %>
+  idle_timeout: <%= get_env(name="DB_IDLE_TIMEOUT", default="500") %>
+  min_connections: 1
+  max_connections: 5
+  auto_migrate: true
+  dangerously_truncate: false
+  dangerously_recreate: false
+
+settings:
+  admin_ui:
+    # The admin build of the same CI run, relative to the repository root
+    # where the job starts the server.
+    dist_dir: admin/dist

@@ -1,0 +1,26 @@
+//! Pure logic of backend3 (ADR 0008).
+//!
+//! Loco's doctrine puts logic on models. backend3 overrides it in one narrow
+//! place: logic that needs neither the database nor any other external system
+//! lives here, where it is tested directly, without a database, by unit tests
+//! and proptest properties.
+//!
+//! The rules for everything under `src/domain/` (ADR 0008, rule 1):
+//!
+//! - No I/O, no `AppContext`, no `async`. Nothing here reads files, the
+//!   network, the database, environment variables, the clock or a random
+//!   number generator; "now", "today", random input and environment values
+//!   are function arguments.
+//! - Nothing here names another module of this crate. Callers outside
+//!   (controllers, `app.rs`, `bin/main.rs`) translate framework types into the
+//!   plain values these functions take.
+//! - Every public function has unit tests, and every function with a
+//!   non-trivial input space (strings, collections, integers, ...) also has at
+//!   least one proptest property.
+//!
+//! `tests/architecture.rs` enforces the mechanical part of these rules.
+
+pub mod admin_path;
+pub mod api_path;
+pub mod cli_guard;
+pub mod database_target;

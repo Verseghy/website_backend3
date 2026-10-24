@@ -1,0 +1,15 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "transcript.jsonl",
+  "cwd": ".",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cargo nextest run --locked --workspace --all-targets",
+    "description": "Run the test suite",
+    "timeout": 120000,
+    "run_in_background": false
+  },
+  "tool_use_id": "toolu_test"
+}

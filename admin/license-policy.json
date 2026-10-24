@@ -1,0 +1,49 @@
+{
+  "$comment": "Licence policy of the admin's production npm dependencies, checked by `npm run licenses` (the `Admin licenses` CI job, ADR 0022 §4, ADR 0012 §4). It follows deny.toml's rule: only licences that may be combined with AGPL-3.0-only, each with its reason. The list holds the licences of the real production tree at bootstrap; adding one needs a PR that states the reason. `exceptions` allow a licence for one package only, like deny.toml's CDLA-Permissive-2.0 exception for webpki-roots. FSF = https://www.gnu.org/licenses/license-list.html.",
+  "allow": [
+    {
+      "license": "MIT",
+      "reason": "The Expat licence: on the FSF list of GPL-compatible free software licences, so it combines with AGPL-3.0-only. Also on deny.toml's list."
+    },
+    {
+      "license": "ISC",
+      "reason": "On the FSF list of GPL-compatible free software licences. Also on deny.toml's list."
+    },
+    {
+      "license": "BSD-2-Clause",
+      "reason": "The FreeBSD licence: on the FSF list of GPL-compatible free software licences. Also on deny.toml's list."
+    },
+    {
+      "license": "BSD-3-Clause",
+      "reason": "The Modified BSD licence: on the FSF list of GPL-compatible free software licences. Also on deny.toml's list."
+    },
+    {
+      "license": "Apache-2.0",
+      "reason": "FSF: compatible with GPL version 3, and therefore combinable with AGPL-3.0-only. Also on deny.toml's list."
+    },
+    {
+      "license": "MPL-2.0",
+      "reason": "FSF: GPL-compatible through its secondary-licence clause (MPL-2.0 §3.3). The 'Incompatible With Secondary Licenses' variant has its own SPDX id, MPL-2.0-no-copyleft-exception, which is not allowed. Brought in by lightningcss, the CSS compiler of Vite and Tailwind. Also on deny.toml's list."
+    },
+    {
+      "license": "0BSD",
+      "reason": "The Zero-clause BSD licence: on the FSF list of GPL-compatible free software licences; it grants every permission without conditions. Used by tslib, which ships in the bundle through cmdk's dialog."
+    },
+    {
+      "license": "BlueOak-1.0.0",
+      "reason": "The Blue Oak Model License 1.0.0, an OSI-approved permissive licence that the FSF list does not name. It grants copyright and patent permission on one condition, that recipients get the licence text or a link to it, the same notice duty as MIT, so nothing in it conflicts with AGPL-3.0-only. Used by isexe and minimatch, build tooling of the shadcn package."
+    }
+  ],
+  "exceptions": [
+    {
+      "package": "@fontsource-variable/inter",
+      "license": "OFL-1.1",
+      "reason": "The Inter variable font that the shadcn base-vega preset imports; its font files ship in admin/dist. FSF lists the SIL Open Font License 1.1 as a free licence for fonts. The font files are separate works served beside the program, an aggregate under AGPL-3.0 §5, not combined with it. Scoped to this package so that no code can arrive under a font licence."
+    },
+    {
+      "package": "caniuse-lite",
+      "license": "CC-BY-4.0",
+      "reason": "Browser-support data that browserslist reads at build time (through the shadcn package's tooling); none of it is bundled. FSF: CC BY 4.0 is compatible with all versions of the GNU GPL. It is a licence for data, not software, so it is scoped to this package."
+    }
+  ]
+}

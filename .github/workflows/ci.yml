@@ -1,0 +1,390 @@
+# PR checks for website_backend3 (ADR 0022 section 3).
+#
+# The job *names* are branch-protection contexts. website_k8s
+# (prow/configmaps.yaml) and any GitHub ruleset list them, so renaming a job
+# blocks merging until that configuration changes in step.
+# scripts/tests/test-check-workflow-policy.sh fails if the job names across
+# .github/workflows/ stop matching ADR 0022's table.
+#
+# Ground rules (ADR 0022 section 1; checked by the "Workflow policy" job with
+# scripts/ci/check-workflow-policy.sh):
+#   - GitHub Actions never builds or pushes an image; Pipelines-as-Code does,
+#     from master only (.tekton/push.yaml).
+#   - `permissions: contents: read`, no secrets, no registry login, no
+#     `pull_request_target`, no `packages: write`, no `id-token: write`.
+#   - Every action is pinned to a full commit SHA with a version comment;
+#     Dependabot (ci(deploy) prefix) bumps both.
+#
+# There are no path filters on purpose: a required context whose workflow is
+# skipped never reports, and the PR could not merge.
+#
+# The Rust toolchain comes from rust-toolchain.toml: `rustup toolchain install`
+# with no argument installs exactly the pinned release with its components
+# and profile, never the moving `stable`.
+#
+# Cargo caching (Swatinem/rust-cache): caches are saved only from master, so
+# PR runs restore master's state and cannot evict it from the 10 GB budget.
+# Test, Contract and E2E share the `debug` cache (saved by Test); Clippy keeps
+# its own, because check-mode metadata differs from a build; Loco skill and
+# the cargo-deny jobs need only the registry (`registry`, no target/).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# One run per PR (or per branch on push). A new push to a PR cancels the run
+# it supersedes; runs on master are queued instead, so every master commit
+# keeps a complete set of results.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are useless on a fresh runner and bloat the cache.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+  # insta: never write .snap.new files and fail on any mismatch or new
+  # snapshot (ADR 0022 section 3). CI=true alone implies this; INSTA_UPDATE
+  # makes it explicit.
+  CI: "true"
+  INSTA_UPDATE: "no"
+
+defaults:
+  run:
+    # An explicit `bash` gives `bash --noprofile --norc -eo pipefail {0}`.
+    shell: bash
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: clippy
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: cargo clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: debug
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest@0.9.149
+          # Only the checksummed release binary; never build from source or
+          # fall back to another installer.
+          fallback: none
+      - name: Start PostgreSQL (compose.yaml)
+        # The throwaway database of compose.yaml: the same PostgreSQL major as
+        # production (ADR 0002), a superuser role that can create the
+        # per-test databases, published on localhost:5432.
+        run: docker compose up --detach --wait --wait-timeout 120 postgres
+      - name: Script tests (scripts/tests)
+        run: bash scripts/tests/run-all.sh
+      - name: cargo nextest
+        run: cargo nextest run --locked --workspace --all-targets
+      - name: Doc tests
+        # nextest does not run doctests.
+        run: cargo test --locked --workspace --doc
+      - name: PostgreSQL log
+        if: failure()
+        run: docker compose logs postgres
+
+  contract:
+    name: Contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: debug
+          save-if: "false"
+      - name: Start PostgreSQL (compose.yaml)
+        # The served-document request test boots the app, which needs a database.
+        run: docker compose up --detach --wait --wait-timeout 120 postgres
+      - name: Regenerate the bindings and the OpenAPI snapshot
+        # ADR 0005 section 4. ts-rs names its export tests `export_bindings_<type>`
+        # (ts-rs-macros 12); the OpenAPI snapshot tests carry `openapi` in their
+        # path. libtest takes several filters and passes when a binary has no
+        # match, so this works before any such test exists.
+        # `cargo test` rather than nextest on purpose: ts-rs 12 tracks the files
+        # it has written in an in-process mutex and merges types that share a
+        # file; nextest runs every test in its own process, which defeats that.
+        run: cargo test --locked --workspace --all-targets -- export_bindings_ openapi
+      - name: Fail on contract drift
+        run: bash scripts/ci/check-contract-drift.sh
+
+  toolchain:
+    name: Toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: yq version
+        run: yq --version
+      - name: rust-toolchain.toml, Containerfile and admin/.node-version agree
+        run: bash scripts/ci/check-toolchain.sh
+
+  admin-lint:
+    name: Admin lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: admin/.node-version
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+
+  admin-typecheck:
+    name: Admin typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: admin/.node-version
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+      # `tsc -b --noEmit` (the typecheck script) also type-checks the committed
+      # ts-rs bindings (ADR 0005). `-b` is needed because admin/tsconfig.json
+      # only references the app, node and e2e projects.
+      - run: npm run typecheck
+
+  admin-test:
+    name: Admin test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: admin/.node-version
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  admin-licenses:
+    name: Admin licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: admin/.node-version
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      # The check reads the installed tree, so install it first (ADR 0022 section 4).
+      - run: npm ci
+      - run: npm run licenses
+
+  e2e:
+    name: E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # config/e2e.yaml: database backend3_e2e on the compose Postgres,
+      # auto-migrate, admin/dist served at /admin on port 5150.
+      LOCO_ENV: e2e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: debug
+          save-if: "false"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: admin/.node-version
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - name: Start PostgreSQL (compose.yaml)
+        run: docker compose up --detach --wait --wait-timeout 120 postgres
+      - name: Install the admin dependencies
+        working-directory: admin
+        run: npm ci
+      - name: Build the admin (admin/dist)
+        working-directory: admin
+        env:
+          # The production build, but with every missing Hungarian string
+          # reported to console.error, which fails the Playwright run: the
+          # smoke-test mode of ADR 0021 section 7. Production images never
+          # set it (admin/src/i18n/report-missing-keys.ts).
+          VITE_REPORT_MISSING_KEYS: "1"
+        run: npm run build
+      - name: Build backend3 (debug)
+        run: cargo build --locked
+      - name: Ensure the E2E database exists
+        # compose.yaml's init script creates backend3_e2e when the container
+        # initialises its (tmpfs) data directory; the server's auto-migrate
+        # fills in the schema on boot. This step only proves the database is
+        # there and creates it inside the Postgres container if a future
+        # compose.yaml stops doing so. Never `backend3-cli db create`:
+        # loco-rs 1.2.0 connects to the configured database while building
+        # the app context, before it dispatches `db create`, so that command
+        # fails with "database ... does not exist".
+        run: |
+          exists=$(docker compose exec -T postgres psql --username loco --dbname postgres -tAc \
+            "SELECT 1 FROM pg_database WHERE datname = 'backend3_e2e'")
+          if [[ $exists != 1 ]]; then
+            docker compose exec -T postgres createdb --username loco backend3_e2e
+          fi
+      - name: Start backend3
+        # The log lives outside admin/: Playwright empties its output directory
+        # when it starts.
+        run: |
+          mkdir -p e2e-logs
+          nohup target/debug/backend3-cli start > e2e-logs/backend3.log 2>&1 &
+          echo "$!" > e2e-logs/backend3.pid
+      - name: Wait for /_ping
+        run: |
+          pid=$(cat e2e-logs/backend3.pid)
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent --max-time 2 --output /dev/null http://localhost:5150/_ping; then
+              echo "backend3 answered /_ping after ${attempt} attempt(s)."
+              exit 0
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "::error::backend3 exited before /_ping answered; its log follows."
+              tail -n 200 e2e-logs/backend3.log
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::backend3 did not answer /_ping within 180 seconds; its log follows."
+          tail -n 200 e2e-logs/backend3.log
+          exit 1
+      - name: Seed the E2E fixtures
+        # Hooks::seed loads the E2E fixtures into backend3_e2e after the
+        # server has migrated it on boot (ADR 0022 section 3).
+        run: target/debug/backend3-cli db seed
+      - name: Install Playwright Chromium
+        working-directory: admin
+        run: npx playwright install --with-deps chromium
+      - name: Playwright
+        working-directory: admin
+        run: npm run e2e
+      - name: Stop backend3
+        if: always()
+        run: |
+          if [[ -f e2e-logs/backend3.pid ]]; then
+            kill "$(cat e2e-logs/backend3.pid)" 2>/dev/null || true
+          fi
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report
+          path: |
+            admin/playwright-report/
+            admin/test-results/
+            e2e-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  loco-skill:
+    name: Loco skill
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --no-self-update && rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: registry
+          cache-targets: "false"
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: The vendored skill equals the locked crate's copy
+        # ADR 0024 section 3: .claude/skills/loco/ is a byte copy of skills/loco/
+        # in the locked loco-rs crate, plus its LICENSE.
+        run: bash scripts/sync-loco-skill.sh --check
+
+  workflow-policy:
+    name: Workflow policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: yq version
+        run: yq --version
+      - name: Workflows follow ADR 0022
+        run: bash scripts/ci/check-workflow-policy.sh .github/workflows

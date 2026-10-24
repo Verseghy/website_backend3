@@ -1,0 +1,19 @@
+//! Integration and request tests of backend3, in one test binary as Loco's
+//! template lays them out (ADR 0008, "Testing per layer").
+//!
+//! Every test that boots the app uses Loco's per-test databases through
+//! `support::with_app` and `support::with_server`: each test creates
+//! its own `_loco_test_*` database in the local PostgreSQL of compose.yaml and
+//! migrates it, so tests run in parallel without sharing state. Tests that
+//! must observe the process environment run the built `backend3-cli` binary
+//! as a child process with an explicit environment instead of changing their
+//! own.
+
+mod boot;
+mod cli;
+mod migration;
+mod models;
+mod requests;
+mod support;
+mod tasks;
+mod workers;

@@ -1,0 +1,30 @@
+# Sea-ORM migrations of backend3 (ADR 0009). `src/app.rs` passes `Migrator`
+# to Loco's `create_app`, and `backend3-cli db ...` runs it.
+[package]
+name = "migration"
+version = "0.1.0"
+description = "Sea-ORM migrations of backend3"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "migration"
+path = "src/lib.rs"
+
+[dependencies]
+# loco-rs with the workspace features; `with-db` brings sea-orm-migration
+# with the PostgreSQL driver.
+loco-rs = { workspace = true }
+async-trait = "0.1"
+
+[dependencies.sea-orm-migration]
+version = "2.0"
+# The async runtime feature; the PostgreSQL driver feature comes in through
+# loco-rs (`with-db`), and no SQLite or MySQL driver is enabled here.
+features = ["runtime-tokio-rustls", "sqlx-postgres"]

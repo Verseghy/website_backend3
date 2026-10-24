@@ -1,0 +1,22 @@
+node_modules/
+coverage/
+.pnpm-store/
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+dist/
+playwright-report/
+test-results/
+
+# ts-rs output: generated and never edited (ADR 0005).
+src/bindings/
+
+# Vendored code keeps its upstream formatting, so a kit re-sync stays a clean
+# diff (THIRD_PARTY.md lists these files).
+src/components/admin/
+src/components/ui/
+src/hooks/use-mobile.ts
+src/lib/utils.ts
+src/lib/field.type.ts
+src/lib/i18nProvider.ts
+AGENTS.md

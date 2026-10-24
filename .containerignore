@@ -1,0 +1,31 @@
+# Build-context exclusions for the Containerfile (ADR 0022 section 2).
+#
+# The PAC builder clones the pushed commit, so on the hub these paths are
+# absent anyway; the list matters for local `podman build` runs, where they
+# would bloat the context and could leak local build output into the image.
+# Each stage rebuilds what it needs from source: the rust stage compiles into
+# a fresh target/, and the admin stage runs npm ci and npm run build.
+
+# ADR 0022 section 2.
+target/
+.git/
+admin/node_modules/
+admin/dist/
+
+# Local test output that has no place in an image.
+admin/playwright-report/
+admin/test-results/
+e2e-logs/
+
+# Local environment files can hold credentials; never send them to a builder.
+.env
+.env.*
+
+# Personal Loco configuration overrides. loco-rs 1.2.0 deep-merges
+# config/<env>.local.yaml over config/<env>.yaml (config/mod.rs,
+# `from_folder`), and .gitignore keeps them out of commits because they may
+# hold local credentials. The rust stage copies config/ into the image, so a
+# local `podman build` would otherwise ship such a file and let it override
+# config/production.yaml.
+config/local.yaml
+config/*.local.yaml
