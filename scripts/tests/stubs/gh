@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+#
+# gh (test stub) - a stateful stand-in for the GitHub CLI, used by
+# scripts/tests/test-sync-parity-issues.sh.
+#
+# WHY IT EXISTS
+#   sync-parity-issues.sh must be tested without a network, a token or a real
+#   project board. The stub keeps a small model of one repository and one
+#   project in JSON files and answers the calls the script makes, so a test can
+#   run the script several times and see the state that earlier runs left.
+#
+# CONVENTIONS
+#   - It accepts exactly the invocation shapes that sync-parity-issues.sh uses,
+#     with the flag names of gh 2.97 (checked with `gh <command> --help`).
+#     Any other command or flag fails, so a change to the script that relies on
+#     something the stub does not model fails the tests instead of passing
+#     against a fake that guesses.
+#   - GraphQL reads are recognised by their operation name (ParityIssues,
+#     ParityBoard, ParityBoardItems) and answered in the shape GitHub gives for
+#     those queries. --paginate --slurp returns an array of pages, as gh does.
+#   - Every call is appended to calls.log as "READ <args>" or "WRITE <args>",
+#     so tests can assert which writes happened.
+#
+# STATE (directory $GH_STUB_DIR, required)
+#   repo.json     {"nameWithOwner": "Owner/Name", "next_number": N}
+#   labels.json   [{"name", "color", "description"}]
+#   issues.json   [{"number", "title", "body", "state", "url", "labels": [...], "comments": [...]}]
+#   project.json  {"id", "number", "owner", "title",
+#                  "fields": [{"id", "name", "dataType", "options": [{"id", "name"}]}],
+#                  "items": [{"id", "issue_url", "values": {"<field id>": {"text"} | {"optionId", "name"}}}]}
+#   prs.json      {"<PR URL>": "MERGED" | "OPEN" | "CLOSED"}
+#   calls.log     the call log (created on first call)
+#   GH_STUB_PAGE_SIZE (default 2) is the page size of paginated reads; it is
+#   small so that the tests cross page boundaries.
+
+# FLAG_* variables are assigned by parse_flags through printf -v.
+# shellcheck disable=SC2154
+
+set -euo pipefail
+
+: "${GH_STUB_DIR:?GH_STUB_DIR must name the stub state directory}"
+PAGE_SIZE="${GH_STUB_PAGE_SIZE:-2}"
+
+# fail MESSAGE: report an error the way gh does ("gh: ..." on stderr), exit 1.
+#   MESSAGE  the error text
+fail() {
+  printf 'gh: %s\n' "$1" >&2
+  exit 1
+}
+
+# log CLASS ARGS...: append one line to calls.log.
+#   CLASS  READ or WRITE
+#   ARGS   the call's arguments, as given
+log() {
+  local class="$1"
+  shift
+  printf '%s %s\n' "$class" "$*" >>"$GH_STUB_DIR/calls.log"
+}
+
+# state_update FILE JQ_ARGS...: rewrite a state file in place with jq.
+#   FILE     file name inside $GH_STUB_DIR
+#   JQ_ARGS  jq options and filter
+state_update() {
+  local file="$GH_STUB_DIR/$1"
+  shift
+  jq "$@" "$file" >"$file.tmp"
+  mv "$file.tmp" "$file"
+}
+
+# parse_flags SPEC ARGS...: parse ARGS against SPEC, a space-separated list of
+# accepted flags; a flag written "--name=" takes a value. Sets FLAG_<name>
+# (dashes become underscores) for each flag given, and POSITIONAL. An unknown
+# flag fails, as in gh.
+#   SPEC  accepted flags of the subcommand
+#   ARGS  the subcommand's arguments
+parse_flags() {
+  local spec=" $1 " arg name
+  shift
+  POSITIONAL=()
+  while (($# > 0)); do
+    arg="$1"
+    shift
+    case "$arg" in
+      --*)
+        name="${arg#--}"
+        if [[ "$spec" == *" --$name= "* ]]; then
+          (($# > 0)) || fail "flag needs an argument: $arg"
+          printf -v "FLAG_${name//-/_}" '%s' "$1"
+          shift
+        elif [[ "$spec" == *" --$name "* ]]; then
+          printf -v "FLAG_${name//-/_}" '%s' 1
+        else
+          fail "unknown flag: $arg (the stub models only the flags sync-parity-issues.sh uses)"
+        fi
+        ;;
+      *) POSITIONAL+=("$arg") ;;
+    esac
+  done
+}
+
+# require_repo REPO: fail unless REPO names the modelled repository (GitHub
+# matches owner and name case-insensitively).
+#   REPO  value of --repo
+require_repo() {
+  jq -e --arg r "$1" '(.nameWithOwner | ascii_downcase) == ($r | ascii_downcase)' "$GH_STUB_DIR/repo.json" >/dev/null ||
+    fail "Could not resolve to a Repository with the name '$1'."
+}
+
+# read_body FILE: print the body text from a --body-file value ("-" is stdin).
+#   FILE  value of --body-file
+read_body() {
+  if [[ "$1" == "-" ]]; then cat; else cat -- "$1"; fi
+}
+
+# issue_index NUMBER: fail unless issue NUMBER exists. No output.
+#   NUMBER  issue number given on the command line
+issue_index() {
+  [[ "$1" =~ ^[0-9]+$ ]] || fail "invalid issue number: $1"
+  jq -e --argjson n "$1" 'any(.[]; .number == $n)' "$GH_STUB_DIR/issues.json" >/dev/null ||
+    fail "Could not resolve to an issue or pull request with the number of $1."
+}
+
+# The jq definition shared by the paginated reads: pages(nodes; size) splits a
+# node list into GraphQL connection pages with pageInfo, at least one page.
+readonly PAGES_JQ='
+def pages($nodes; $size):
+  ($nodes | length) as $n
+  | [ range(0; (if $n == 0 then 1 else (($n + $size - 1) / $size | floor) end)) as $p
+      | { nodes: $nodes[($p * $size):(($p + 1) * $size)],
+          pageInfo: { hasNextPage: ((($p + 1) * $size) < $n),
+                      endCursor: (if $n == 0 then null else "cursor:\(($p + 1) * $size)" end) } } ];'
+
+# api_graphql ARGS...: answer one of the sync script's GraphQL reads.
+#   ARGS  arguments after "api graphql"
+api_graphql() {
+  local paginate=0 slurp=0 query="" op arg key value vars='{}' result
+  while (($# > 0)); do
+    case "$1" in
+      --paginate) paginate=1 ;;
+      --slurp) slurp=1 ;;
+      -f | -F)
+        (($# > 1)) || fail "flag needs an argument: $1"
+        arg="$2"
+        key="${arg%%=*}"
+        value="${arg#*=}"
+        if [[ "$key" == "query" ]]; then
+          query="$value"
+        elif [[ "$1" == "-F" && "$value" =~ ^[0-9]+$ ]]; then
+          # -F converts integers to JSON numbers, as gh's typed fields do.
+          vars="$(jq -c --arg k "$key" --argjson v "$value" '.[$k] = $v' <<<"$vars")"
+        else
+          vars="$(jq -c --arg k "$key" --arg v "$value" '.[$k] = $v' <<<"$vars")"
+        fi
+        shift
+        ;;
+      *) fail "unknown argument to api graphql: $1" ;;
+    esac
+    shift
+  done
+  [[ "$query" =~ (query|mutation)[[:space:]]+([A-Za-z0-9_]+) ]] || fail "the stub needs a named GraphQL operation"
+  [[ "${BASH_REMATCH[1]}" == "query" ]] || fail "the stub models no GraphQL mutations"
+  op="${BASH_REMATCH[2]}"
+  log READ "api graphql $op $vars"
+  ((slurp == 0 || paginate == 1)) || fail '`--paginate` required when passing `--slurp`'
+
+  case "$op" in
+    ParityIssues)
+      [[ "$query" =~ labels:\ \[\"([^\"]+)\"\] ]] || fail "ParityIssues: no labels filter in the query"
+      require_repo "$(jq -r '"\(.owner)/\(.name)"' <<<"$vars")"
+      result="$(jq -n --arg label "${BASH_REMATCH[1]}" --argjson size "$PAGE_SIZE" \
+        --slurpfile repo "$GH_STUB_DIR/repo.json" --slurpfile labels "$GH_STUB_DIR/labels.json" \
+        --slurpfile issues "$GH_STUB_DIR/issues.json" "$PAGES_JQ"'
+        ($issues[0] | map(select(.labels | index([$label]))) | sort_by(.number)
+          | map({number, title, body, state, url})) as $nodes
+        | [ pages($nodes; $size)[]
+            | { data: { repository: {
+                  nameWithOwner: $repo[0].nameWithOwner,
+                  label: ($labels[0] | map(select(.name == $label)) | if length > 0 then {name: .[0].name} else null end),
+                  issues: . } } } ]')"
+      ;;
+    ParityBoard | ParityBoardItems)
+      if ! jq -e --argjson v "$vars" '(.owner | ascii_downcase) == ($v.owner | ascii_downcase) and .number == $v.number' \
+        "$GH_STUB_DIR/project.json" >/dev/null; then
+        # GitHub answers with data and an error; gh prints both and exits 1.
+        jq -nc --argjson v "$vars" \
+          '{data: {repositoryOwner: {projectV2: null}}, errors: [{type: "NOT_FOUND", message: "Could not resolve to a ProjectV2 with the number \($v.number)."}]}'
+        fail "Could not resolve to a ProjectV2 with the number $(jq -r '.number' <<<"$vars")."
+      fi
+      if [[ "$op" == "ParityBoard" ]]; then
+        result="$(jq '[{ data: { repositoryOwner: { projectV2: {
+            id, title,
+            fields: { nodes: [ .fields[] | {id, name, dataType} + (if .dataType == "SINGLE_SELECT" then {options} else {} end) ] } } } } }]' \
+          "$GH_STUB_DIR/project.json")"
+      else
+        result="$(jq -n --argjson size "$PAGE_SIZE" --slurpfile project "$GH_STUB_DIR/project.json" \
+          --slurpfile issues "$GH_STUB_DIR/issues.json" --slurpfile repo "$GH_STUB_DIR/repo.json" "$PAGES_JQ"'
+          $project[0] as $p
+          | ($p.fields | map(select(.name == "Title")) | .[0].id) as $title_field
+          | [ $p.items[] as $item
+              | ($issues[0] | map(select(.url == $item.issue_url)) | .[0]) as $issue
+              | { id: $item.id,
+                  content: { number: $issue.number, repository: { nameWithOwner: $repo[0].nameWithOwner } },
+                  fieldValues: { nodes: (
+                    [ { text: $issue.title, field: { id: $title_field } } ]
+                    + [ $item.values | to_entries[] | .value + { field: { id: .key } } ]
+                    # A value type the query does not select comes back as {}.
+                    + [ {} ] ) } } ] as $nodes
+          | [ pages($nodes; $size)[] | { data: { repositoryOwner: { projectV2: { items: . } } } } ]')"
+      fi
+      ;;
+    *) fail "the stub does not model the GraphQL operation $op" ;;
+  esac
+
+  if ((slurp == 1)); then
+    jq -c '.' <<<"$result"
+  elif ((paginate == 1)); then
+    jq -c '.[]' <<<"$result"
+  else
+    jq -c '.[0]' <<<"$result"
+  fi
+}
+
+[[ $# -gt 0 ]] || fail "no command given"
+case "$1 ${2:-}" in
+  "api graphql")
+    shift 2
+    api_graphql "$@"
+    ;;
+
+  "pr view")
+    shift 2
+    log READ "pr view $*"
+    parse_flags "--json=" "$@"
+    [[ "${FLAG_json:-}" == "state" ]] || fail "the stub models only: gh pr view URL --json state"
+    url="${POSITIONAL[0]:?pr view needs a URL}"
+    jq -ce --arg u "$url" 'if has($u) then {state: .[$u]} else empty end' "$GH_STUB_DIR/prs.json" ||
+      fail "Could not resolve to a PullRequest: $url"
+    ;;
+
+  "label create")
+    shift 2
+    log WRITE "label create $*"
+    parse_flags "--repo= --color= --description=" "$@"
+    require_repo "${FLAG_repo:?label create needs --repo}"
+    name="${POSITIONAL[0]:?label create needs a name}"
+    ! jq -e --arg n "$name" 'any(.[]; .name == $n)' "$GH_STUB_DIR/labels.json" >/dev/null ||
+      fail "label with name \"$name\" already exists; use \`--force\` to update its color and description"
+    state_update labels.json --arg n "$name" --arg c "${FLAG_color:-}" --arg d "${FLAG_description:-}" \
+      '. + [{name: $n, color: $c, description: $d}]'
+    ;;
+
+  "issue create")
+    shift 2
+    log WRITE "issue create $*"
+    parse_flags "--repo= --title= --body-file= --label=" "$@"
+    require_repo "${FLAG_repo:?issue create needs --repo}"
+    [[ -n "${FLAG_title:-}" ]] || fail "title can't be blank"
+    label="${FLAG_label:?the stub expects --label}"
+    jq -e --arg n "$label" 'any(.[]; .name == $n)' "$GH_STUB_DIR/labels.json" >/dev/null ||
+      fail "could not add label: '$label' not found"
+    body="$(read_body "${FLAG_body_file:?the stub expects --body-file}")"
+    number="$(jq -r '.next_number' "$GH_STUB_DIR/repo.json")"
+    url="https://github.com/$(jq -r '.nameWithOwner' "$GH_STUB_DIR/repo.json")/issues/$number"
+    state_update issues.json --argjson n "$number" --arg t "$FLAG_title" --arg b "$body" --arg u "$url" --arg l "$label" \
+      '. + [{number: $n, title: $t, body: $b, state: "OPEN", url: $u, labels: [$l], comments: []}]'
+    state_update repo.json '.next_number += 1'
+    printf '%s\n' "$url"
+    ;;
+
+  "issue edit")
+    shift 2
+    log WRITE "issue edit $*"
+    parse_flags "--repo= --title= --body-file=" "$@"
+    require_repo "${FLAG_repo:?issue edit needs --repo}"
+    number="${POSITIONAL[0]:?issue edit needs a number}"
+    issue_index "$number"
+    [[ -n "${FLAG_title:-}${FLAG_body_file:-}" ]] || fail "specify properties to edit when not running interactively"
+    if [[ -n "${FLAG_title:-}" ]]; then
+      state_update issues.json --argjson n "$number" --arg t "$FLAG_title" 'map(if .number == $n then .title = $t else . end)'
+    fi
+    if [[ -n "${FLAG_body_file:-}" ]]; then
+      body="$(read_body "$FLAG_body_file")"
+      state_update issues.json --argjson n "$number" --arg b "$body" 'map(if .number == $n then .body = $b else . end)'
+    fi
+    jq -r --argjson n "$number" '.[] | select(.number == $n) | .url' "$GH_STUB_DIR/issues.json"
+    ;;
+
+  "issue comment")
+    shift 2
+    log WRITE "issue comment $*"
+    parse_flags "--repo= --body-file=" "$@"
+    require_repo "${FLAG_repo:?issue comment needs --repo}"
+    number="${POSITIONAL[0]:?issue comment needs a number}"
+    issue_index "$number"
+    body="$(read_body "${FLAG_body_file:?the stub expects --body-file}")"
+    state_update issues.json --argjson n "$number" --arg b "$body" 'map(if .number == $n then .comments += [$b] else . end)'
+    jq -r --argjson n "$number" '.[] | select(.number == $n) | "\(.url)#issuecomment-\(.comments | length)"' "$GH_STUB_DIR/issues.json"
+    ;;
+
+  "issue close")
+    shift 2
+    log WRITE "issue close $*"
+    parse_flags "--repo= --reason=" "$@"
+    require_repo "${FLAG_repo:?issue close needs --repo}"
+    number="${POSITIONAL[0]:?issue close needs a number}"
+    issue_index "$number"
+    case "${FLAG_reason:-}" in
+      "" | completed | "not planned" | duplicate) ;;
+      *) fail "invalid argument \"$FLAG_reason\" for \"-r, --reason\" flag" ;;
+    esac
+    state_update issues.json --argjson n "$number" 'map(if .number == $n then .state = "CLOSED" else . end)'
+    ;;
+
+  "project item-add")
+    shift 2
+    log WRITE "project item-add $*"
+    parse_flags "--owner= --url= --format=" "$@"
+    [[ "${FLAG_format:-}" == "json" ]] || fail "the stub expects --format json"
+    number="${POSITIONAL[0]:?item-add needs a project number}"
+    jq -e --arg o "${FLAG_owner:?item-add needs --owner}" --argjson n "$number" \
+      '(.owner | ascii_downcase) == ($o | ascii_downcase) and .number == $n' "$GH_STUB_DIR/project.json" >/dev/null ||
+      fail "Could not resolve to a ProjectV2 with the number $number."
+    url="${FLAG_url:?item-add needs --url}"
+    jq -e --arg u "$url" 'any(.[]; .url == $u)' "$GH_STUB_DIR/issues.json" >/dev/null ||
+      fail "Could not resolve to an issue or pull request: $url"
+    # Adding an issue that is already on the board returns the existing item,
+    # as addProjectV2ItemById does.
+    if ! jq -e --arg u "$url" 'any(.items[]; .issue_url == $u)' "$GH_STUB_DIR/project.json" >/dev/null; then
+      state_update project.json --arg u "$url" '.items += [{id: "PVTI_stub\(.items | length + 1)", issue_url: $u, values: {}}]'
+    fi
+    jq -c --arg u "$url" --slurpfile issues "$GH_STUB_DIR/issues.json" \
+      '(.items[] | select(.issue_url == $u)) as $i | ($issues[0][] | select(.url == $u)) as $is
+       | {id: $i.id, title: $is.title, body: $is.body, type: "Issue", url: $u}' "$GH_STUB_DIR/project.json"
+    ;;
+
+  "project item-edit")
+    shift 2
+    log WRITE "project item-edit $*"
+    parse_flags "--id= --project-id= --field-id= --text= --single-select-option-id=" "$@"
+    ((${#POSITIONAL[@]} == 0)) || fail "item-edit with --id takes no project number"
+    jq -e --arg p "${FLAG_project_id:?item-edit needs --project-id}" '.id == $p' "$GH_STUB_DIR/project.json" >/dev/null ||
+      fail "Could not resolve to a node with the global id of '$FLAG_project_id'"
+    item="${FLAG_id:?item-edit needs --id}"
+    jq -e --arg i "$item" 'any(.items[]; .id == $i)' "$GH_STUB_DIR/project.json" >/dev/null ||
+      fail "Could not resolve to a node with the global id of '$item'"
+    field="${FLAG_field_id:?item-edit needs --field-id}"
+    if [[ -n "${FLAG_text+set}" && -z "${FLAG_single_select_option_id+set}" ]]; then
+      jq -e --arg f "$field" 'any(.fields[]; .id == $f and .dataType == "TEXT")' "$GH_STUB_DIR/project.json" >/dev/null ||
+        fail "field $field is not a text field"
+      state_update project.json --arg i "$item" --arg f "$field" --arg t "$FLAG_text" \
+        '.items |= map(if .id == $i then .values[$f] = {text: $t} else . end)'
+    elif [[ -n "${FLAG_single_select_option_id+set}" && -z "${FLAG_text+set}" ]]; then
+      option="$FLAG_single_select_option_id"
+      name="$(jq -r --arg f "$field" --arg o "$option" \
+        '.fields[] | select(.id == $f and .dataType == "SINGLE_SELECT") | .options[] | select(.id == $o) | .name' \
+        "$GH_STUB_DIR/project.json")"
+      [[ -n "$name" ]] || fail "option $option is not an option of single-select field $field"
+      state_update project.json --arg i "$item" --arg f "$field" --arg o "$option" --arg n "$name" \
+        '.items |= map(if .id == $i then .values[$f] = {optionId: $o, name: $n} else . end)'
+    else
+      fail "the stub expects exactly one of --text or --single-select-option-id"
+    fi
+    ;;
+
+  *)
+    log UNSUPPORTED "$*"
+    fail "the stub does not model: gh $*"
+    ;;
+esac
