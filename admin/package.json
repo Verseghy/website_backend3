@@ -57,7 +57,7 @@
     "@testing-library/user-event": "^14.6.8",
     "@types/estree-jsx": "^1.0.5",
     "@types/lodash": "^4.17.27",
-    "@types/node": "^24",
+    "@types/node": "^26",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/spdx-expression-parse": "^4.0.0",
