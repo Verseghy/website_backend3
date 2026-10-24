@@ -1,0 +1,75 @@
+# Loco configuration of the `development` environment: `cargo loco start` on
+# a developer machine, against the PostgreSQL that compose.yaml starts.
+#
+# Safety (ADR 0024 §4, layer 3): `App::load_config` refuses any database host
+# here that is not local (localhost, 127.0.0.1, ::1 or a Unix socket). A
+# container-network name such as `postgres` is refused too; run the app on the
+# host against the published port.
+#
+# In development the Vite dev server serves the admin UI and proxies /api to
+# http://localhost:5150 (ADR 0004 §4). The /admin route of this server only
+# serves admin/dist when it has been built.
+
+logger:
+  enable: true
+  pretty_backtrace: true
+  level: <%= get_env(name="LOG_LEVEL", default="debug") %>
+  format: compact
+
+server:
+  port: <%= get_env(name="PORT", default="5150") %>
+  binding: <%= get_env(name="BINDING", default="localhost") %>
+  host: http://localhost
+  middlewares:
+    # ADR 0004 §3: no static middleware, no welcome fallback.
+    static:
+      enable: false
+    fallback:
+      enable: false
+    compression:
+      enable: true
+    # ADR 0023 §6: the global headers; /admin overrides its own set.
+    secure_headers:
+      enable: true
+      preset: github
+      overrides:
+        Content-Security-Policy: "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        Referrer-Policy: "strict-origin-when-cross-origin"
+
+# The production queue set-up (ADR 0016 §3), so jobs behave as they will in
+# production. Start with `cargo loco start --server-and-worker` to process
+# them.
+workers:
+  mode: BackgroundQueue
+
+queue:
+  kind: Postgres
+  uri: <%= get_env(name="DATABASE_URL", default="postgres://loco:loco@localhost:5432/backend3_development") %>
+  max_connections: 2
+  min_connections: 1
+  num_workers: 1
+  poll_interval_sec: 5
+  dangerously_flush: false
+  reaper:
+    age_minutes: 30
+    interval_seconds: 300
+
+# Entries, not bytes (loco-rs 1.2.0 InMem has no weigher), ADR 0016 §2.
+cache:
+  kind: InMem
+  max_capacity: 1000
+
+database:
+  uri: <%= get_env(name="DATABASE_URL", default="postgres://loco:loco@localhost:5432/backend3_development") %>
+  enable_logging: <%= get_env(name="DB_LOGGING", default="false") %>
+  connect_timeout: <%= get_env(name="DB_CONNECT_TIMEOUT", default="5000") %>
+  idle_timeout: <%= get_env(name="DB_IDLE_TIMEOUT", default="500") %>
+  min_connections: 1
+  max_connections: 5
+  auto_migrate: true
+  dangerously_truncate: false
+  dangerously_recreate: false
+
+settings:
+  admin_ui:
+    dist_dir: admin/dist

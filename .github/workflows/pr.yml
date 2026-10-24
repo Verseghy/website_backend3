@@ -1,0 +1,69 @@
+# Pull-request metadata checks (ADR 0012 section 3, ADR 0022 section 3).
+#
+#   - "PR title": Tide squash-merges, so the title becomes the commit subject
+#     on master and must follow the convention (scripts/ci/check-pr-title.sh).
+#   - "No session links": no claude.ai session link in the title, the body,
+#     any commit message of the PR or any added line
+#     (scripts/ci/check-session-links.sh).
+#
+# Both run on `edited` too, so a title or body edit is checked while the PR is
+# open, and on `synchronize`, because a required context must report on every
+# new head commit. They are small scripts in this repository, not third-party
+# actions. Both are pull_request-only: on master there is no PR payload, and
+# what reaches master went through these checks first.
+#
+# Untrusted PR text never reaches a shell: the title travels in an environment
+# variable, and the session-link scan reads title and body straight from the
+# event payload file with jq. The ground rules of ci.yml apply here as well.
+name: PR
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+# A newer event for the same PR (another edit, a push) supersedes the run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  title:
+    name: PR title
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - name: Check the PR title (ADR 0012 section 3)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: bash scripts/ci/check-pr-title.sh "$PR_TITLE"
+
+  session-links:
+    name: No session links
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The whole history, so the PR's base and head commits are present.
+          fetch-depth: 0
+      - name: Scan title, body, commit messages and added lines
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          bash scripts/ci/check-session-links.sh
+          --event "$GITHUB_EVENT_PATH"
+          --base "$BASE_SHA"
+          --head "$HEAD_SHA"

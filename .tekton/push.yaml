@@ -1,0 +1,91 @@
+# Pipelines-as-Code trigger: rebuild the backend3 image on every push to master.
+#
+# PAC matches this repo to the `website-backend3` Repository CR in the verseghy
+# namespace (website_k8s/verseghy-website/builds/pac-repository-backend3.yaml),
+# reads this file from the pushed revision, and runs it as a PipelineRun there.
+# That CR must exist before the first push to master that carries this file;
+# a master commit that lands earlier gets no image by any other route
+# (ADR 0022, "Precondition for the bootstrap PR").
+#
+# This is the only production build. GitHub Actions runs PR checks and never
+# builds or pushes an image, and there is deliberately no
+# .tekton/pull-request.yaml (ADR 0022 section 1).
+#
+# The single task references the cluster's maintained `openshift-client` task
+# (no hand-rolled taskSpec/image). Its SCRIPT creates a self-contained Shipwright
+# BuildRun — the full build recipe lives inline in spec.build.spec, with
+# source.git.revision pinned to the exact pushed commit — then `oc wait`s for it
+# to complete and reports the verdict back onto the commit as a GitHub check.
+#
+# Strategy: the cluster-wide `buildah` ClusterBuildStrategy moved to a UBI 10
+# image in Builds for OpenShift 1.8.2, and RHEL 10 requires x86-64-v3 CPUs,
+# which the Sandy Bridge era okd4 nodes lack ("Fatal glibc error: CPU does not
+# support x86-64-v3", first seen on the frontend's build-frontend-zwbdt on
+# 2026-10-21). The build therefore uses `buildah-ubi9`, a namespaced
+# BuildStrategy in verseghy that is a copy of the operator strategy on a RHEL 9
+# buildah image, managed in
+# website_k8s/verseghy-website/builds/buildstrategy-buildah-ubi9.yaml. Its
+# build-and-push step limits (4 CPU / 6Gi) are set there too; backend3 adds no
+# stepResources of its own (ADR 0022 section 1).
+#
+# The output image MUST be tagged with the pushed commit SHA ({{ revision }}):
+# argocd-image-updater (ImageUpdater CR in website_k8s) only considers tags
+# matching ^[0-9a-f]{40}$ when opening the deploy PR against website_k8s.
+# An untagged push lands on :latest, which the updater ignores — the image
+# builds fine but never deploys.
+#
+# Timeouts: every layer is explicit and larger than the one inside it, so a
+# slow build fails at a known layer instead of being killed by Tekton's
+# 60-minute TaskRun default (ADR 0022 section 1). Innermost first:
+#   Shipwright BuildRun spec.timeout   1h30m0s
+#   oc wait --timeout                  100m     (BuildRun + 10 min)
+#   Tekton task timeout                1h45m0s  (oc wait + 5 min)
+#   PipelineRun timeouts.pipeline      2h0m0s   (task + 15 min)
+# After three successful PAC builds, a deploy-scoped PR shrinks all four with
+# the same offsets: BuildRun = 2 x the median BuildRun duration rounded up to
+# the next 5 minutes, then +10, +5 and +15 minutes. That PR lists the three
+# measured durations. scripts/tests/test-check-tekton.sh keeps the order.
+#
+# SOURCE_COMMIT={{ revision }} is passed as a build arg, so the admin footer
+# links to the exact source of the running image (AGPL-3.0 section 13,
+# ADR 0012 section 4).
+#
+# `oc wait --for=jsonpath={.status.completionTime}` returns as soon as the build
+# finishes (success OR failure), so no polling loop is needed.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: build-backend3
+  annotations:
+    pipelinesascode.tekton.dev/on-event: '[push]'
+    pipelinesascode.tekton.dev/on-target-branch: '[master]'
+    pipelinesascode.tekton.dev/max-keep-runs: '5'
+spec:
+  timeouts:
+    pipeline: '2h0m0s'
+  taskRunTemplate:
+    # Runs in verseghy; this SA can create/get BuildRuns via ClusterRole/edit.
+    serviceAccountName: pipeline
+  pipelineSpec:
+    tasks:
+      - name: trigger-shipwright-build
+        timeout: '1h45m0s'
+        taskRef:
+          # Maintained task shipped with OpenShift Pipelines; pulled in-cluster.
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: openshift-client
+            - name: namespace
+              value: openshift-pipelines
+        params:
+          - name: SCRIPT
+            value: |
+              BR=$(echo '{"apiVersion":"shipwright.io/v1beta1","kind":"BuildRun","metadata":{"generateName":"backend3-pac-","labels":{"pipelinesascode.tekton.dev/sha":"{{ revision }}","app.kubernetes.io/managed-by":"pipelines-as-code"}},"spec":{"timeout":"1h30m0s","build":{"spec":{"source":{"type":"Git","git":{"url":"https://github.com/Verseghy/website_backend3","revision":"{{ revision }}"}},"strategy":{"name":"buildah-ubi9","kind":"BuildStrategy"},"paramValues":[{"name":"dockerfile","value":"Containerfile"},{"name":"build-args","values":[{"value":"SOURCE_COMMIT={{ revision }}"}]}],"output":{"image":"ghcr.io/verseghy/website_backend3:{{ revision }}","pushSecret":"ghcr-pull-secret"}}}}}' | oc create -o name -f -)
+              echo "==> Created $BR (revision {{ revision }})"
+              oc wait --for=jsonpath='{.status.completionTime}' "$BR" --timeout=100m
+              succeeded=$(oc get "$BR" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
+              echo "==> Succeeded=$succeeded"
+              [ "$succeeded" = True ] || { oc get "$BR" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}{"\n"}'; exit 1; }

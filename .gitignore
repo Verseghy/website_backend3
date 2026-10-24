@@ -1,0 +1,32 @@
+# Rust build output. Cargo.lock is committed (ADR 0024 §3).
+/target/
+
+# Personal Loco configuration overrides: config/<env>.local.yaml is merged
+# over config/<env>.yaml and never committed.
+**/config/local.yaml
+**/config/*.local.yaml
+
+# Output of `cargo loco db schema`.
+/schema_dump.json
+
+# rustfmt backups.
+**/*.rs.bk
+
+# Admin UI dependencies and build output (admin/ has its own rules as well).
+/admin/node_modules/
+/admin/dist/
+
+# Editor and OS clutter.
+.DS_Store
+*.swp
+
+# Personal Claude Code settings (ADR 0024 §4): they may add rules for one
+# person and are never committed; .claude/settings.json is the shared file.
+/.claude/settings.local.json
+
+# Backend log and PID of a local or CI E2E run (the E2E job in ci.yml).
+/e2e-logs/
+
+# Local environment files can hold credentials.
+.env
+.env.*

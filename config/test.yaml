@@ -1,0 +1,70 @@
+# Loco configuration of the `test` environment: `cargo test`, `cargo nextest`
+# and the Test CI job.
+#
+# Safety (ADR 0024 §4, layer 3): `App::load_config` refuses any database host
+# here that is not local (localhost, 127.0.0.1, ::1 or a Unix socket), before
+# anything connects. Tests use Loco's per-test databases
+# (`request_with_create_db`, `boot_test_with_create_db`): each test creates
+# its own `_loco_test_<random>_<timestamp>` database next to backend3_test and
+# migrates it, so the destructive `dangerously_*` flags of Loco's template are
+# not needed and stay off. The role needs CREATEDB; compose.yaml's role is a
+# superuser.
+
+logger:
+  # Test output stays readable; enable locally when debugging a test.
+  enable: false
+  pretty_backtrace: true
+  level: debug
+  format: compact
+
+server:
+  port: 5150
+  binding: localhost
+  host: http://localhost
+  middlewares:
+    # ADR 0004 §3: the /admin router replaces Loco's static middleware, and
+    # the development welcome fallback is off everywhere.
+    static:
+      enable: false
+    fallback:
+      enable: false
+    compression:
+      enable: true
+    # ADR 0023 §6: the global headers. API responses are JSON and never
+    # rendered, so their CSP allows nothing. /admin overrides the CSP and the
+    # frame, referrer, permissions, opener and robots headers itself.
+    secure_headers:
+      enable: true
+      preset: github
+      overrides:
+        Content-Security-Policy: "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        Referrer-Policy: "strict-origin-when-cross-origin"
+
+# Jobs run inline and deterministically in tests (ADR 0016 §3), so no queue
+# connection is configured.
+workers:
+  mode: ForegroundBlocking
+
+# The cache is an optimisation only; tests run with the Null cache, which
+# proves that every code path works without it (ADR 0016 §2).
+cache:
+  # Quoted: a bare Null is the YAML null literal, not the variant name.
+  kind: "Null"
+
+database:
+  uri: <%= get_env(name="DATABASE_URL", default="postgres://loco:loco@localhost:5432/backend3_test") %>
+  enable_logging: false
+  connect_timeout: <%= get_env(name="DB_CONNECT_TIMEOUT", default="5000") %>
+  idle_timeout: <%= get_env(name="DB_IDLE_TIMEOUT", default="500") %>
+  min_connections: 1
+  max_connections: 2
+  auto_migrate: true
+  dangerously_truncate: false
+  dangerously_recreate: false
+
+settings:
+  admin_ui:
+    # The fixture with a stub index.html and one hashed asset, so Rust tests
+    # never need a Node build (ADR 0004 §4). Relative to the package root,
+    # the working directory of cargo test and nextest.
+    dist_dir: tests/fixtures/admin-dist

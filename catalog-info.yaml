@@ -1,0 +1,51 @@
+# Backstage (Red Hat Developer Hub) catalog entity for website_backend3
+# (parity item PLT-35).
+#
+# RHDH's GitHub discovery ingests the root catalog-info.yaml of every
+# Verseghy/website_* repository, so the Component lives next to its code, as
+# website-backend2's does (see website_k8s catalog/README.md for the model and
+# the annotation conventions):
+#   - argocd/*: the Argo CD card. The backend3 Argo CD Application must carry
+#     the label verseghy.net/component: backend3.
+#   - janus-idp.io/tekton and backstage.io/kubernetes-*: the Tekton card for
+#     the PAC builds of .tekton/push.yaml, which run in the verseghy namespace
+#     through the website-backend3 Repository CR.
+# References that website_k8s adds separately (human-reviewed PRs):
+#   - resource:postgres, the PostgreSQL Deployment of ADR 0002;
+#   - api:backend3-api, the OpenAPI entity of the public /api/v1 (ADR 0005).
+# Backstage shows a relation to an entity that does not exist yet as missing,
+# without failing ingestion.
+# Not set yet: backstage.io/techdocs-ref, which needs an mkdocs.yml at the
+# repository root.
+# lifecycle moves from experimental to production at the cut-over
+# (docs/design/cutover.md).
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: website-backend3
+  title: Website Backend 3
+  description: Loco (Rust) backend with the admin UI at /admin, the admin API and the public REST API; PostgreSQL backed
+  annotations:
+    github.com/project-slug: Verseghy/website_backend3
+    argocd/instance-name: verseghy
+    argocd/app-selector: verseghy.net/component=backend3
+    janus-idp.io/tekton: website-backend3
+    backstage.io/kubernetes-namespace: verseghy
+    backstage.io/kubernetes-label-selector: 'pipelinesascode.tekton.dev/repository=website-backend3'
+    backstage.io/source-location: url:https://github.com/Verseghy/website_backend3/tree/master/
+  tags:
+    - service
+    - ghcr
+    - rust
+  links:
+    - url: https://backend3.microshift.verseghy-gimnazium.net
+      title: Backend3 route
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:verseghy
+  system: verseghy-website
+  dependsOn:
+    - resource:postgres
+  providesApis:
+    - backend3-api

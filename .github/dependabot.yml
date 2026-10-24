@@ -1,0 +1,42 @@
+# Dependabot version updates.
+#
+# Commit-message prefixes (ADR 0012 section 3): Dependabot's prefix sets both
+# the commit message and the PR title, and it inserts ": " after a prefix that
+# ends in ")". The resulting titles, for example
+# "build(api): bump serde from 1.0.1 to 1.0.2", pass the "PR title" check.
+# `include: scope` is deliberately not set; it would add a second scope.
+#
+# Ignored on purpose (ADR 0024 section 3): loco-rs and the sea-orm crates.
+# loco-rs is pinned exactly and its agent skill is vendored from the locked
+# crate, so a bump is a dedicated PR that re-syncs and re-reads the skill;
+# Sea-ORM moves with Loco.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: build(api)
+    ignore:
+      - dependency-name: loco-rs
+      - dependency-name: sea-orm
+      - dependency-name: sea-orm-*
+
+  - package-ecosystem: npm
+    directory: /admin
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: build(admin)
+
+  # Keeps the commit-SHA pins in .github/workflows/ current and rewrites their
+  # version comments.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci(deploy)

@@ -1,0 +1,18 @@
+# clippy configuration (ADR 0008, "Enforcement").
+#
+# Same value as `rust-version` in Cargo.toml.
+msrv = "1.94"
+
+disallowed-methods = [
+  # Configuration comes from `config/<env>.yaml` through `ctx.config`; only
+  # config/production.yaml reads the environment, with `get_env` (ADR 0008,
+  # ADR 0023 §11). Modules receive values as explicit arguments.
+  { path = "std::env::var", reason = "read configuration from ctx.config and pass it down explicitly (ADR 0008)" },
+  { path = "std::env::var_os", reason = "read configuration from ctx.config and pass it down explicitly (ADR 0008)" },
+  { path = "std::env::vars", reason = "read configuration from ctx.config and pass it down explicitly (ADR 0008)" },
+  { path = "std::env::vars_os", reason = "read configuration from ctx.config and pass it down explicitly (ADR 0008)" },
+  # Out-of-request work goes through a BackgroundWorker on the Postgres queue
+  # (ADR 0016); a spawned task dies with the process and is never retried.
+  { path = "tokio::spawn", reason = "use a Loco BackgroundWorker on the Postgres queue (ADR 0016)" },
+  { path = "tokio::task::spawn", reason = "use a Loco BackgroundWorker on the Postgres queue (ADR 0016)" },
+]

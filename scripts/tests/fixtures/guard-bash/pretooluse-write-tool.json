@@ -1,0 +1,13 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "transcript.jsonl",
+  "cwd": ".",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "notes.md",
+    "content": "kubectl delete pvc data && cargo loco db reset"
+  },
+  "tool_use_id": "toolu_test"
+}

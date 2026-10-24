@@ -1,0 +1,12 @@
+# The single source of the Rust toolchain (ADR 0022 §3).
+#
+# - `channel` is an exact stable release, never the moving `stable`, so local
+#   builds, CI and the Containerfile's `RUST_VERSION` ARG all compile with the
+#   same compiler. It must stay at or above 1.94, the MSRV of loco-rs 1.2.0 and
+#   Sea-ORM 2.0 (`rust-version` in Cargo.toml).
+# - A bump is its own PR that changes this file and the Containerfile ARG
+#   together; the `Toolchain` CI job fails when they differ.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
