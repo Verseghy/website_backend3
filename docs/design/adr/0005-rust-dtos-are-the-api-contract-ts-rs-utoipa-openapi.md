@@ -1,6 +1,6 @@
 # 0005. Rust DTOs are the API contract (ts-rs + utoipa OpenAPI)
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0025](0025-delivery-exceptions-for-the-backend3-slice-plan.md) (2026-10-25)
 - Decision questions: Q4
 
 ## Context
