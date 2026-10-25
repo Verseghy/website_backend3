@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react"
 import { defineConfig, loadEnv } from "vite"
 
 import { parseReportMissingKeys } from "./src/i18n/report-missing-keys.ts"
+import { includeClipboardRecorder } from "./src/recorder/recorder-flag.ts"
 import { parseSourceCommit } from "./src/source-link/source-commit.ts"
 
 /**
@@ -23,17 +24,32 @@ import { parseSourceCommit } from "./src/source-link/source-commit.ts"
  *   build report every missing Hungarian string, which the CI E2E build uses
  *   (ADR 0021 §7); `0` or unset keeps production silent. A typo fails the
  *   build instead of silently switching the check off.
+ * - `VITE_CLIPBOARD_RECORDER` decides whether the development-only clipboard
+ *   recorder exists (`src/recorder/recorder-flag.ts`): always on the dev
+ *   server, in a build only when it is `1`. The decision reaches the app as
+ *   the constant `__CLIPBOARD_RECORDER__` rather than as the raw
+ *   `import.meta.env` value, because it depends on the Vite command as well
+ *   as on the variable, and is validated here first. In a build the constant
+ *   is a literal, so the bundler drops the branch of `main.tsx` that it
+ *   guards, with its dynamic import (`src/recorder/production-bundle.test.ts`).
  */
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   // loadEnv reads `.env*` files and the process environment; only `VITE_`
   // variables are ever exposed to client code.
   const env = loadEnv(mode, import.meta.dirname, "VITE_")
   parseSourceCommit(env.VITE_SOURCE_COMMIT)
   parseReportMissingKeys(env.VITE_REPORT_MISSING_KEYS)
+  const clipboardRecorder = includeClipboardRecorder({
+    build: command === "build",
+    flag: env.VITE_CLIPBOARD_RECORDER,
+  })
 
   return {
     base: "/admin/",
     plugins: [react(), tailwindcss()],
+    define: {
+      __CLIPBOARD_RECORDER__: JSON.stringify(clipboardRecorder),
+    },
     resolve: {
       alias: {
         "@": resolve(import.meta.dirname, "./src"),

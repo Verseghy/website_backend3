@@ -24,6 +24,7 @@ const NAMESPACES = [
   "app",
   "kit",
   "dashboard",
+  "recorder",
   "resources",
   "editor",
   "tree",

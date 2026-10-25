@@ -32,7 +32,8 @@
  * strings of the copied kit and shadcn/ui files, which upstream hard-codes in
  * English (ADR 0021 §3); `app.*` holds the application shell that no ADR
  * namespace covers (title, footer, about page, update prompt, client-side data
- * errors); `dashboard.*` holds the dashboard. Vertical slices add
+ * errors); `dashboard.*` holds the dashboard; `recorder.*` holds the
+ * development-only clipboard recorder (editor.md §13.1). Vertical slices add
  * `resources.*`, `enums.*`, `errors.*` and their own screens' namespaces in the
  * same PR as the screen.
  *
@@ -346,6 +347,27 @@ export const hu = {
     welcome: "Üdv a Verseghy-adminban!",
     placeholder:
       "Az irányítópult a statisztikákkal és a teendőkkel egy későbbi kiadásban érkezik.",
+  },
+  // The development-only clipboard recorder (editor.md §13.1). Its route is
+  // left out of the default build (src/recorder/recorder-flag.ts); these
+  // strings stay, because this file is one module.
+  recorder: {
+    title: "Vágólap-rögzítő",
+    dev_only:
+      "Fejlesztői eszköz a beillesztési tesztekhez: az éles admin nem tartalmazza.",
+    intro:
+      "Másold ki a tartalmat (például Wordből vagy Excelből), kattints a beillesztési mezőbe, és illeszd be a Ctrl+V billentyűkkel. A rögzítő egy JSON-fájlba menti a vágólap típusait, a HTML- és a szöveges tartalmat, valamint a fájlok típusát és méretét, majd letölti a fájlt. RTF-et és fájltartalmat nem ment.",
+    synthetic:
+      "Csak erre a célra írt, kitalált tartalmú dokumentumot rögzíts, valódi iskolai dokumentumot vagy személyes adatot soha.",
+    scrub_notice:
+      "A felhasználói mappák nevét (például C:\\Users\\… vagy /Users/…) a rögzítő kitakarja, a dokumentumban szereplő neveket viszont nem: a fájlt nézd át, mielőtt a tesztek közé kerül.",
+    paste_area: "Beillesztési mező",
+    paste_hint:
+      "Kattints a lenti mezőbe, és illeszd be a vágólap tartalmát (Ctrl+V).",
+    no_clipboard:
+      "A böngésző nem adta át a vágólap tartalmát. Illeszd be újra a Ctrl+V billentyűkkel.",
+    saved:
+      "Letöltve: %{file}. Típusok: %{types}. Kitakart mappanevek: %{scrubbed}.",
   },
   errors: {
     not_found: "A keresett elem nem található.",

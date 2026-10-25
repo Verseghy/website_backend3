@@ -114,9 +114,11 @@ npm run e2e            # Playwright (Chromium) against http://localhost:5150/adm
 ```
 
 `npm run e2e` expects backend3 to be running already with `LOCO_ENV=e2e`,
-serving the built `admin/dist` (`VITE_REPORT_MISSING_KEYS=1 npm run build`,
-which makes any missing Hungarian string fail the run as in CI; then, from the
-repository root, `LOCO_ENV=e2e cargo loco start`, which migrates backend3_e2e
+serving the built `admin/dist`
+(`VITE_REPORT_MISSING_KEYS=1 VITE_CLIPBOARD_RECORDER=1 npm run build`, as in
+CI: the first makes any missing Hungarian string fail the run, the second adds
+the development-only clipboard recorder that its E2E test drives; then, from
+the repository root, `LOCO_ENV=e2e cargo loco start`, which migrates backend3_e2e
 on boot, and `LOCO_ENV=e2e cargo loco db seed`).
 
 ## Rust dependencies

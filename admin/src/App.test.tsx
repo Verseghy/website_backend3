@@ -2,8 +2,9 @@
  * The admin root mounted the way `main.tsx` mounts it, but on a memory router
  * built from the same route table (`adminRoutes`).
  */
+import type { ReactNode } from "react"
 import { render, screen, within } from "@testing-library/react"
-import { RouterProvider, createMemoryRouter } from "react-router-dom"
+import { Route, RouterProvider, createMemoryRouter } from "react-router-dom"
 import { describe, expect, it } from "vitest"
 
 import { AdminApp } from "@/App"
@@ -17,9 +18,11 @@ const SHA = "fedcba9876543210fedcba9876543210fedcba98"
  * Mounts the admin at `entry`.
  *
  * @param entry - the initial URL, path plus query.
+ * @param developmentRoutes - routes a development build adds, as `main.tsx`
+ *   passes them.
  * @returns the memory router, to inspect its location.
  */
-function mountAdmin(entry: string) {
+function mountAdmin(entry: string, developmentRoutes?: ReactNode) {
   const router = createMemoryRouter(
     adminRoutes(
       <AdminApp
@@ -29,6 +32,7 @@ function mountAdmin(entry: string) {
         })}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
         sourceCommit={SHA}
+        developmentRoutes={developmentRoutes}
       />
     ),
     { initialEntries: [entry] }
@@ -124,5 +128,17 @@ describe("AdminApp", () => {
     await screen.findByRole("contentinfo")
     expect(router.state.location.pathname).toBe("/admin/media")
     expect(router.state.location.search).toBe("?path=uploads/posts")
+  })
+
+  it("renders a development route inside the layout when main.tsx passes one", async () => {
+    mountAdmin(
+      "/admin/clipboard-recorder",
+      <Route
+        path="/clipboard-recorder"
+        element={<div data-testid="development-route" />}
+      />
+    )
+    expect(await screen.findByTestId("development-route")).toBeInTheDocument()
+    expect(screen.getByRole("contentinfo")).toBeInTheDocument()
   })
 })

@@ -949,6 +949,15 @@ The repository is AGPL-3.0-only ([ADR 0012](adr/0012-delivery-review-commits-and
 | CKEditor 4.22.1 `pastefromword` test captures | GPL-2.0-or-later, LGPL-2.1-or-later or MPL-1.1-or-later, at the user's choice | **Study only. Not copied.** The licence would allow taking the files as MPL-2.0 (through "MPL 1.1 or later"), but our own Windows captures make them unnecessary, and copying them would need a `THIRD_PARTY.md` row and a maintainer decision. Later CKEditor 4 releases are commercial (LTS) and are not read at all. |
 | The production corpus | school content; drafts are not public | **Never committed.** A deleted post must not live on in git history. A private CI job fetches a scrubbed snapshot. Committed fixtures are synthetic or scrubbed, and they never copy rows from a dump ([data-migration.md](data-migration.md) §12). |
 
+**The capture file.** The recorder (`admin/src/recorder/`) writes one JSON object per paste, with these fields:
+
+- `format` (`backend3-clipboard-capture`) and `version` (1). A fixture loader checks both before it reads the rest, and a change to the shape bumps `version`.
+- `capturedAt`, the instant of the paste in UTC, and `userAgent`, which tells the browsers of §13.2 apart.
+- `types`, every clipboard format in the browser's order.
+- `html` and `text`: the `text/html` and `text/plain` data, or `null` when the clipboard had none.
+- `files`: each file's `type` and `size`.
+- `scrubbedPaths`: how many profile folder names the recorder replaced with `USER`. The review before commit still looks for the other names.
+
 **Material copied into the admin code:**
 
 | Material | From | Licence | Rule |
