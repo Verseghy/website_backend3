@@ -1,6 +1,6 @@
 # 0003. Cut-over: one rehearsed flip, then a read-only parallel run
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0026](0026-backend2-unchanged-and-running-until-decommissioning.md) (2026-10-25)
 - Decision questions: Q2, Q41, Q42, and the cut-over parts of Q31, Q32b and Q33
 
 The step-by-step plan is in [cutover.md](../cutover.md). The operator runbook, with commands and credential handling, lives in the private `Verseghy/runbooks` repository.

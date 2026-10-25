@@ -330,7 +330,7 @@ These are capabilities that other decisions add. They do not map onto a single l
 
 ## 21. Platform items (PLT)
 
-Repository, delivery, deployment and cut-over work. Items in website_k8s, website_frontend and website_backend2 are opened as PRs there and left for human review (ADR [0012]). Their PR bodies carry `Closes Verseghy/website_backend3#N` (ADR [0019] §1).
+Repository, delivery, deployment and cut-over work. Items in website_k8s and website_frontend are opened as PRs there and left for human review (ADR [0012]). Their PR bodies carry `Closes Verseghy/website_backend3#N` (ADR [0019] §1).
 
 | ID | Feature | Disposition | ADR | Notes |
 |---|---|---|---|---|
@@ -362,11 +362,11 @@ Repository, delivery, deployment and cut-over work. Items in website_k8s, websit
 | PLT-26 | Staging on the hub (LAN-only) for cut-over rehearsals | new | [0003] | |
 | PLT-27 | Nightly import rehearsals against dumps | new | [0003], [0017] | |
 | PLT-28 | Cut-over runbook: evening admin write freeze, final import, promotion of the Angular REST build | new | [0003] | |
-| PLT-29 | backend2 fixes #251 and #258 merged now (decision 2), by the maintainer | new | [0003] | website_backend2 PRs; [cutover.md](cutover.md) P5 checks that they are deployed |
+| PLT-29 | backend2 fixes #251 and #258 merged now (decision 2), by the maintainer | retired | [0026] | Not done: the rewrite makes no change in website_backend2. backend3's `/api/v1` carries both fixes (PUB-01, PUB-08). |
 | PLT-30 | Angular REST client build staged ahead, including notices, banners, settings and Diáktoll | new | [0003], [0019] | website_frontend PR |
 | PLT-31 | Read-only parallel run of backend1 and MySQL as a reference view, with MySQL in `super_read_only`; PVs patched to `Retain` before any other cut-over change; decommissioned only when the maintainer decides, never on the project's initiative | new | [0003] | Closes once the parallel run is in place (ADR 0019 §1) |
 | PLT-32 | Credential rotation at the cut-over | new | [0023] | |
-| PLT-33 | backend2 and its Redis retired after the flip; the website_frontend2 hub beta scaled down | new | [0019] | After the retirement criteria in ADR 0019 hold |
+| PLT-33 | backend2 and its Redis retired together with backend1 and MySQL when the maintainer decides to decommission; the website_frontend2 hub beta scaled down then | new | [0019], [0026] | Not in the window: backend2 and its Redis keep running, unchanged, through the read-only parallel run. Closes with the website_k8s PR that removes their manifests at decommissioning ([cutover.md](cutover.md) §10), never on the project's initiative |
 | PLT-34 | Clean-up of files the retired backup tool used (procedure in the private runbook) | new | [0019] | |
 | PLT-35 | Backstage `catalog-info.yaml` for website-backend3 | new | none | House convention (research: SYNTHESIS §1.16.3) |
 | PLT-36 | Human review of the whole codebase after all slices have merged | new | [0012] | Outside the per-PR loop |
@@ -418,4 +418,5 @@ These rows depend on something no decision has settled yet. Each is settled in t
 [0022]: adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md
 [0023]: adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md
 [0024]: adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md
+[0026]: adr/0026-backend2-unchanged-and-running-until-decommissioning.md
 [api]: public-api.md

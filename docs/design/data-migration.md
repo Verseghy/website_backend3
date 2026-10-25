@@ -694,7 +694,7 @@ The synthetic fixture reproduces every production shape that the REST-spec fixtu
 | 6 | Public links to the 3 label ids that D8 merges away (`/search/label/<id>`). | The maintainer decides, before the PR that implements `/search/label/{id}` merges, whether the public API answers them with the surviving label or with 404, and [public-api.md](public-api.md) records the answer. Until then the importer reports the 3 merged ids and their survivors. Low traffic is expected. |
 | 7 | How the release-1 seed of ADR 0019 (partner banners, site settings, one Diáktoll issue) runs at the cut-over. `import_mysql` does not write those tables. | Proposed: a separate idempotent task that reads versioned seed files from the repository and runs right after the import in the window, rehearsed nightly together with it. Settled with ADR 0019 and [cutover.md](cutover.md) before the first dress rehearsal. |
 | 8 | The path and schema of the resolution file. | The import PR. |
-| 9 | Removal of the importer. | After the maintainer decommissions the legacy stack (decision 41), a dedicated PR removes the `import-mysql` feature and the `import_mysql` task. `content_normalize` stays. |
+| 9 | Removal of the importer. | After the maintainer decommissions the legacy stack (backend1, MySQL, backend2 and its Redis; decision 41, [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)), a dedicated PR removes the `import-mysql` feature and the `import_mysql` task. `content_normalize` stays. |
 
 ## 14. References
 
@@ -704,4 +704,4 @@ The synthetic fixture reproduces every production shape that the REST-spec fixtu
 - website_backend@0dead98: `app/Models/Posts.php`, `app/PageTemplates.php`, `database/migrations/`
 - website_backend2@7ba71da: `migrations/03-canteen_data_add_time.sql`, `migrations/11-posts_data_fix_types.sql`, `migrations/12-menu_items_fix_types.sql`, `migrations/13-posts_fix_null_date.sql`
 - loco-rs@1.2.0: `src/schema.rs`, `src/cli.rs`, `src/task.rs`; sea-query@1.0.2: `src/backend/postgres/table.rs`; html5ever@0.40.1: `src/serialize/mod.rs`
-- ADR 0002, ADR 0003, ADR 0006, ADR 0007, ADR 0008, ADR 0009, ADR 0010, ADR 0011, ADR 0013, ADR 0015, ADR 0017, ADR 0018, ADR 0019, ADR 0020, ADR 0022, ADR 0024
+- ADR 0002, ADR 0003, ADR 0006, ADR 0007, ADR 0008, ADR 0009, ADR 0010, ADR 0011, ADR 0013, ADR 0015, ADR 0017, ADR 0018, ADR 0019, ADR 0020, ADR 0022, ADR 0024, ADR 0026

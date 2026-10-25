@@ -680,7 +680,7 @@ backend2 answers HTTP 500 for a week that does not exist (fixed by backend2 PR #
 | 2026-12-28 to 2026-12-31 | (2026, 53) and (2026, 54) | 500 | `400` for (2026, 54) | 2026-W53, 2027-W01 |
 | 2027-01-01 to 2027-01-03 | (2027, 53) and (2027, 54) | 500 | `400` for both | 2026-W53, 2027-W01 |
 
-After #258 deploys (research: DECISIONS 2), backend2 answers these requests with a GraphQL error instead of HTTP 500; backend3 answers `400 invalid_week`.
+The rewrite does not deploy #258 to backend2 ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)). backend3 answers these requests with `400 invalid_week`.
 
 The server cannot repair a wrong request. The Angular adapter must therefore use `/canteen/current` (7.9) or compute the ISO week-year itself (section 18).
 
@@ -962,7 +962,7 @@ Points that the draft left outside its register, and how they are settled:
 
 ## 13. backend2 defects this API fixes
 
-backend2's semantics are the baseline, but these behaviours are deliberately not reproduced. Most have a fix branch in website_backend2 with an approved PR (#248 to #259); none is merged as of 2026-10-24 (research: SYNTHESIS §5.11). The maintainer chose to merge #251 and #258 into backend2 now ([ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md)).
+backend2's semantics are the baseline, but these behaviours are deliberately not reproduced. Most have a fix branch in website_backend2 with an approved PR (#248 to #259); none is merged as of 2026-10-24 (research: SYNTHESIS §5.11). The rewrite merges none of them: website_backend2 stays unchanged ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)), and backend3 fixes these behaviours in its own API.
 
 | # | backend2 behaviour | backend3 v1 | Reference |
 |---|---|---|---|
@@ -1022,7 +1022,7 @@ Payload names stay the same, yet visitors will notice these changes when the Ang
 | Notices, banners, contact details, Diáktoll | change only with a frontend deploy | edited in the admin, live on the next request | [ADR 0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md) |
 | Requests per data load | one or two `POST`s | one `GET`, revalidated with `ETag` | section 9 |
 
-The backdated-posts fix reaches visitors earlier, when backend2 #251 deploys (research: DECISIONS 2, [cutover.md](cutover.md) P5); backend3 keeps it (5.3).
+The backdated-posts fix reaches visitors with backend3 at the flip (5.3). The rewrite does not deploy #251 to backend2 ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)).
 
 ## 15. Read counting for the dashboard
 
@@ -1277,4 +1277,4 @@ Public code:
 
 Design documents in this repository:
 
-- [ADR index](adr/README.md); in particular ADRs [0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md), [0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md), [0010](adr/0010-all-instants-stored-as-timestamptz.md), [0011](adr/0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md), [0014](adr/0014-one-host-backend3-microshift-verseghy-gimnazium-net.md), [0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md), [0017](adr/0017-legacy-data-import-normalisation-and-defect-resolution.md), [0018](adr/0018-content-model-publishing-pages-menu-tree-canteen-week-editor.md), [0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md) and [0020](adr/0020-search-and-hungarian-ordering.md)
+- [ADR index](adr/README.md); in particular ADRs [0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md), [0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md), [0010](adr/0010-all-instants-stored-as-timestamptz.md), [0011](adr/0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md), [0014](adr/0014-one-host-backend3-microshift-verseghy-gimnazium-net.md), [0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md), [0017](adr/0017-legacy-data-import-normalisation-and-defect-resolution.md), [0018](adr/0018-content-model-publishing-pages-menu-tree-canteen-week-editor.md), [0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md), [0020](adr/0020-search-and-hungarian-ordering.md) and [0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)

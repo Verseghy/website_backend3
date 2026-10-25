@@ -1,6 +1,6 @@
 # 0012. Delivery, review, commits and licensing
 
-- Status: Amended by [0025](0025-delivery-exceptions-for-the-backend3-slice-plan.md) (2026-10-25)
+- Status: Amended by [0025](0025-delivery-exceptions-for-the-backend3-slice-plan.md) and [0026](0026-backend2-unchanged-and-running-until-decommissioning.md) (2026-10-25)
 - Decision questions: Q12, Q13, Q14, Q44, and the maintainer's follow-up decisions R1 (SPDX identifier), R2 (merge autonomy in other repositories) and R3 (self-merge mechanism)
 
 ## Context
