@@ -1,6 +1,48 @@
 //! The [`Sanitizer`]: ammonia 4.2.4 configured from the content-v1 tables,
-//! the [`SanitizedHtml`] type, and the removal report of each run
-//! (editor.md §7.2, ADR 0013 §5).
+//! the structural pass, the fixed-point loop around both, the
+//! [`SanitizedHtml`] type, and the removal report of each run (editor.md
+//! §7.2, §7.5, ADR 0013 §5).
+//!
+//! [`Sanitizer::sanitize`] first bounds the work (input size, then nesting
+//! depth by a linear scan), then repeats one pass, ammonia followed by the
+//! structural pass, until a pass returns its own input. That output `z` has
+//! `P(z) == z`, so sanitising it again returns it after one pass: this is
+//! what makes `S(S(x)) == S(x)` hold byte for byte. At most
+//! [`MAX_PASSES`] passes run; an input that is still changing is refused
+//! (`content_not_normalisable`), because it means the parser and the
+//! serializer disagree. One pass is enough for editor output. Any other
+//! input usually settles in its first pass, because the structural pass
+//! already parses ammonia's output afresh, as the next reader would (text
+//! that an unwrapped `caption` leaves in a table moves in front of it then,
+//! editor.md §3.5); the second pass confirms it.
+//!
+//! The third pass confirms a second change. Each pass parses twice, in
+//! ammonia and in the structural pass, and the first pass's structural pass
+//! can write a tree that the second pass's ammonia parse closes: a heading
+//! directly inside a heading, or an `li` inside an `li`. The structural
+//! pass's own unwrapping makes the first: in `<sub><h2><sub><h2>x`,
+//! removing the inner `sub` makes the headings parent and child. So does
+//! the adoption agency, when the structural pass's parse meets a link that
+//! ammonia's parse left inside another link, and moves the heading between
+//! them up into the outer heading. ammonia's parse leaves that nesting when
+//! it fosters a link out of a table into another link
+//! (`tests/fixtures/regressions/link-fostered-into-link`), and also, with
+//! no table, when eight or more blocks stand between a link start tag and
+//! the open link, because the adoption agency stops after eight rounds and
+//! leaves a copy of the outer link open around the new one. And so does
+//! foster parenting in the structural pass's parse, of what an unwrapped
+//! `caption` left in a table. Nothing changes after that first parse of the
+//! second pass: by then no element that ammonia unwraps is left to leave
+//! content in a table, the structural pass has unwrapped every link nested
+//! in a link, and a parse of such markup only closes elements, which builds
+//! a tree that parses back into itself ([`super::structure`], "How the
+//! output settles", has the sketch). The worst case is therefore three
+//! passes with one parse to spare: the second pass's structural parse never
+//! changes anything. Before nested links were unwrapped, the adoption
+//! agency's limit of eight rounds made the number of passes grow with the
+//! nesting depth, and a link around 24 quotes was refused
+//! (`nested-link-deeper-than-eight-blocks`). ADR 0037 adds the unwrapping
+//! of nested links to the structural pass of ADR 0013 §5.
 //!
 //! `Builder::empty()` clears only the tag list, so every other `Builder`
 //! field is set here explicitly; an ammonia default can never decide what is
@@ -24,11 +66,10 @@
 //! reads: it only decides where ammonia appends a missing forced attribute.
 //!
 //! The appended and swapped attributes are put back into canonical order by
-//! the structural pass of editor.md §7.5, which, with the fixed-point loop,
-//! the CSS grammar and the manifest, is not part of this module yet. Until
-//! then `sanitize` is one ammonia pass, and its attribute order is
-//! byte-stable only for input that already has every forced attribute.
+//! the structural pass ([`super::structure`]), so the output is the same
+//! in every process (editor.md §13.6, P5).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -36,11 +77,17 @@ use std::sync::Arc;
 use ammonia::{Builder, UrlRelative};
 
 use super::attrs;
+use super::depth::exceeds_depth;
 use super::policy::{
     ELEMENTS, LINK_REL, PolicyError, REMOVED_WITH_CONTENT, SanitizePolicy, URL_SCHEMES, ValueRule,
 };
 use super::report::{RemovalReport, explain};
+use super::structure::{Violation, restructure};
 use super::url_rules;
+
+/// The most passes one run makes before it refuses the input (editor.md
+/// §7.2, ADR 0013 §5).
+pub const MAX_PASSES: usize = 3;
 
 /// HTML that [`Sanitizer::sanitize`] produced.
 ///
@@ -91,7 +138,8 @@ pub struct Sanitized {
     pub report: RemovalReport,
 }
 
-/// Why the sanitiser refused an input.
+/// Why the sanitiser refused an input. Nothing is written for a refused
+/// input; [`Self::code`] gives the admin error code of editor.md §7.6.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SanitizeError {
     /// The input is larger than the policy's `max_input_bytes`.
@@ -102,6 +150,58 @@ pub enum SanitizeError {
         /// The input's length.
         actual: usize,
     },
+    /// The input nests elements deeper than the policy's
+    /// `max_nesting_depth`, as the depth scan counts them. The count can be
+    /// too high (implied end tags, and the simpler count after unusual SVG
+    /// or `MathML`); both use this one variant and code, as the maintainer
+    /// confirmed (item D87, research: DECISIONS R15).
+    #[error("the content nests elements more than {limit} levels deep (line {line})")]
+    TooDeep {
+        /// The policy's limit.
+        limit: usize,
+        /// The line of the first start tag that went deeper, or of the SVG
+        /// or `MathML` markup after which the depth scan counts every tag as
+        /// open ([`super::depth`]).
+        line: u64,
+    },
+    /// A pass produced more than the policy's `max_output_bytes`.
+    #[error(
+        "the sanitised content would be {actual} bytes long, more than the limit of {limit} bytes"
+    )]
+    OutputTooLarge {
+        /// The policy's limit.
+        limit: usize,
+        /// The length of the pass's output.
+        actual: usize,
+    },
+    /// The output was still changing after [`MAX_PASSES`] passes. This
+    /// means the parser and the serializer disagree about some input, so the
+    /// caller also logs it as an error (editor.md §7.2).
+    #[error("the content did not reach a fixed point in {passes} sanitiser passes")]
+    NotNormalisable {
+        /// How many passes ran.
+        passes: usize,
+    },
+    /// The structural pass found an invariant of editor.md §7.5 broken.
+    /// This is a bug: an admin write answers `500` and logs it, a read
+    /// serves an empty body and raises the alert metric.
+    #[error("the sanitiser broke one of its own invariants: {0}")]
+    InvariantViolated(Violation),
+}
+
+impl SanitizeError {
+    /// The admin error code of editor.md §7.6 that a refused admin write
+    /// answers with `422`, or `None` for [`Self::InvariantViolated`], which
+    /// is a bug and answers `500`.
+    #[must_use]
+    pub const fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::TooLarge { .. } | Self::OutputTooLarge { .. } => Some("content_too_large"),
+            Self::TooDeep { .. } => Some("content_too_deep"),
+            Self::NotNormalisable { .. } => Some("content_not_normalisable"),
+            Self::InvariantViolated(_) => None,
+        }
+    }
 }
 
 /// The content-v1 sanitiser. Built once at boot, shared, and passed to
@@ -133,16 +233,23 @@ impl Sanitizer {
         &self.policy
     }
 
-    /// Sanitises `input` into content-v1 and reports what it removed. The
-    /// report is derived from a second parse of `input`, which is skipped
-    /// when the output equals the input.
+    /// Sanitises `input` into content-v1 and reports what it removed, over
+    /// every pass of the fixed-point loop (see the module documentation).
     ///
     /// - `input`: an HTML fragment, for example a post body.
     ///
     /// # Errors
     ///
-    /// [`SanitizeError::TooLarge`] when `input` is longer than the policy's
-    /// `max_input_bytes`; it is refused before it is parsed.
+    /// - [`SanitizeError::TooLarge`] when `input` is longer than the
+    ///   policy's `max_input_bytes`, and [`SanitizeError::TooDeep`] when it
+    ///   nests deeper than `max_nesting_depth`; both are refused before
+    ///   anything is parsed.
+    /// - [`SanitizeError::OutputTooLarge`] when a pass writes more than
+    ///   `max_output_bytes`.
+    /// - [`SanitizeError::NotNormalisable`] when the output is still
+    ///   changing after [`MAX_PASSES`] passes.
+    /// - [`SanitizeError::InvariantViolated`] when the structural pass finds
+    ///   a broken invariant, which is a bug.
     pub fn sanitize(&self, input: &str) -> Result<Sanitized, SanitizeError> {
         let limit = self.policy.max_input_bytes;
         if input.len() > limit {
@@ -151,22 +258,77 @@ impl Sanitizer {
                 actual: input.len(),
             });
         }
-        let html = self.builder.clean(input).to_string();
-        // Output equal to the input byte for byte means ammonia removed and
-        // rewrote nothing, so the report is empty without the second parse.
-        // Editor saves, the common write, are such fixed points (editor.md
-        // §7.2). The proptest `sanitising_the_output_again_reports_nothing`
-        // checks that `explain` agrees on every sanitised output.
-        let report = if html == input {
-            RemovalReport::default()
-        } else {
-            explain(&self.policy, input)
-        };
+        let limit = self.policy.max_nesting_depth;
+        if let Some(exceeded) = exceeds_depth(input, limit) {
+            return Err(SanitizeError::TooDeep {
+                limit,
+                line: exceeded.line,
+            });
+        }
+        let mut report = RemovalReport::default();
+        let (html, _) = fixed_point(input, MAX_PASSES, |current| self.pass(current, &mut report))?;
         Ok(Sanitized {
             html: SanitizedHtml(html),
             report,
         })
     }
+
+    /// One pass: ammonia, then the structural pass. Their removals are
+    /// added to `report`.
+    fn pass(&self, input: &str, report: &mut RemovalReport) -> Result<String, SanitizeError> {
+        let cleaned = self.builder.clean(input).to_string();
+        // Checked before the structural pass parses it again.
+        self.check_output(&cleaned)?;
+        // Output equal to the input byte for byte means ammonia removed and
+        // rewrote nothing, so its part of the report is empty without the
+        // second parse. Editor saves, the common write, are such fixed
+        // points (editor.md §7.2). The proptest
+        // `sanitising_the_output_again_reports_nothing` checks that
+        // `explain` agrees on every sanitised output.
+        if cleaned != input {
+            report.merge(explain(&self.policy, input));
+        }
+        let structured = restructure(&cleaned, report).map_err(SanitizeError::InvariantViolated)?;
+        self.check_output(&structured)?;
+        Ok(structured)
+    }
+
+    /// Refuses a pass output above the policy's `max_output_bytes`.
+    fn check_output(&self, output: &str) -> Result<(), SanitizeError> {
+        let limit = self.policy.max_output_bytes;
+        if output.len() > limit {
+            return Err(SanitizeError::OutputTooLarge {
+                limit,
+                actual: output.len(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Applies `pass` until its output equals its input, at most `max_passes`
+/// times, and returns that output with the number of passes it took. It is
+/// generic over the pass so that the loop's own rules (stop at the first
+/// fixed point, refuse after the last pass) are tested without depending on
+/// an input that ammonia and html5ever fail to settle.
+///
+/// - `input`: the first input.
+/// - `max_passes`: how many passes may run; the last one may only confirm.
+/// - `pass`: one sanitiser pass; its error stops the loop.
+fn fixed_point(
+    input: &str,
+    max_passes: usize,
+    mut pass: impl FnMut(&str) -> Result<String, SanitizeError>,
+) -> Result<(String, usize), SanitizeError> {
+    let mut current = Cow::Borrowed(input);
+    for passes in 1..=max_passes {
+        let output = pass(&current)?;
+        if output == *current {
+            return Ok((output, passes));
+        }
+        current = Cow::Owned(output);
+    }
+    Err(SanitizeError::NotNormalisable { passes: max_passes })
 }
 
 /// The ammonia builder for content-v1 (the sketch of editor.md §7.2, pinned
@@ -264,6 +426,23 @@ mod tests {
             .into_string()
     }
 
+    /// One ammonia pass alone, without the structural pass: the tests that
+    /// pin ammonia's own behaviour read this, because the structural pass
+    /// would hide it.
+    fn ammonia(input: &str) -> String {
+        sanitizer().builder.clean(input).to_string()
+    }
+
+    /// The output and the number of passes the fixed-point loop takes.
+    fn passes(input: &str) -> (String, usize) {
+        let sanitizer = sanitizer();
+        let mut report = RemovalReport::default();
+        fixed_point(input, MAX_PASSES, |current| {
+            sanitizer.pass(current, &mut report)
+        })
+        .expect("converges")
+    }
+
     const YOUTUBE: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/VIDEOID?start=30" width="640" height="360" title="Videó" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
     const LINK: &str = r#"<p><a href="https://example.org/" target="_blank" rel="noopener noreferrer">link</a></p>"#;
 
@@ -274,19 +453,26 @@ mod tests {
     fn a_forced_attribute_with_its_canonical_value_stays_in_place() {
         assert_eq!(clean(YOUTUBE), YOUTUBE);
         assert_eq!(clean(LINK), LINK);
-        // A case variant matches the allow-list and is overwritten in place.
+        // A case variant matches the allow-list and is overwritten in place;
+        // the structural pass then writes the canonical order.
+        let variant = r#"<a target="_BLANK" href="/x">x</a>"#;
         assert_eq!(
-            clean(r#"<a target="_BLANK" href="/x">x</a>"#),
+            ammonia(variant),
             r#"<a target="_blank" href="/x" rel="noopener noreferrer">x</a>"#
+        );
+        assert_eq!(
+            clean(variant),
+            r#"<a href="/x" target="_blank" rel="noopener noreferrer">x</a>"#
         );
     }
 
     #[test]
     fn rel_is_appended_last() {
-        assert_eq!(
-            clean(r#"<a rel="nofollow" href="https://example.org/" target="_blank">x</a>"#),
-            r#"<a href="https://example.org/" target="_blank" rel="noopener noreferrer">x</a>"#
-        );
+        let input = r#"<a rel="nofollow" href="https://example.org/" target="_blank">x</a>"#;
+        let expected =
+            r#"<a href="https://example.org/" target="_blank" rel="noopener noreferrer">x</a>"#;
+        assert_eq!(ammonia(input), expected);
+        assert_eq!(clean(input), expected);
     }
 
     #[test]
@@ -296,10 +482,15 @@ mod tests {
             "https://evil.example/embed/x",
         );
         // The filter drops `src` (index 0); `swap_remove` moves the last
-        // attribute into its place. The structural pass restores the order.
+        // attribute into its place.
+        assert_eq!(
+            ammonia(&foreign),
+            r#"<p data-youtube-video=""><iframe referrerpolicy="strict-origin-when-cross-origin" width="640" height="360" title="Videó" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen=""></iframe></p>"#
+        );
+        // The structural pass restores the order.
         assert_eq!(
             clean(&foreign),
-            r#"<p data-youtube-video=""><iframe referrerpolicy="strict-origin-when-cross-origin" width="640" height="360" title="Videó" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen=""></iframe></p>"#
+            r#"<p data-youtube-video=""><iframe width="640" height="360" title="Videó" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#
         );
     }
 
@@ -315,9 +506,15 @@ mod tests {
             // The relative-URL step runs after `target` and `rel` were
             // appended and drops `href` with `swap_remove` too, so `rel`
             // moves to the front; the structural pass restores the order.
+            let link = format!(r#"<a href="{href}">x</a>"#);
             assert_eq!(
-                clean(&format!(r#"<a href="{href}">x</a>"#)),
+                ammonia(&link),
                 r#"<a rel="noopener noreferrer" target="_blank">x</a>"#,
+                "{href}"
+            );
+            assert_eq!(
+                clean(&link),
+                r#"<a target="_blank" rel="noopener noreferrer">x</a>"#,
                 "{href}"
             );
         }
@@ -325,12 +522,14 @@ mod tests {
 
     #[test]
     fn data_images_are_dropped() {
-        let result = sanitizer()
-            .sanitize(r#"<p><img src="data:image/png;base64,iVBORw0KGgo=" alt="x"></p>"#)
-            .unwrap();
-        // The image without `src` is removed by the structural pass.
-        assert_eq!(result.html.as_str(), r#"<p><img alt="x"></p>"#);
+        let input = r#"<p><img src="data:image/png;base64,iVBORw0KGgo=" alt="x"></p>"#;
+        // ammonia drops the `src` and keeps the element ...
+        assert_eq!(ammonia(input), r#"<p><img alt="x"></p>"#);
+        // ... and the structural pass removes the image without `src`.
+        let result = sanitizer().sanitize(input).unwrap();
+        assert_eq!(result.html.as_str(), "<p></p>");
         assert_eq!(result.report.count(RemovalRule::ImageSrcRejected), 1);
+        assert_eq!(result.report.count(RemovalRule::ImageWithoutSrcRemoved), 1);
     }
 
     #[test]
@@ -370,9 +569,20 @@ mod tests {
 
     #[test]
     fn caption_text_stays_inside_the_table() {
+        let input = "<table><caption>Cím</caption><tbody><tr><td>x</td></tr></tbody></table>";
         assert_eq!(
-            clean("<table><caption>Cím</caption><tbody><tr><td>x</td></tr></tbody></table>"),
+            ammonia(input),
             "<table>Cím<tbody><tr><td>x</td></tr></tbody></table>"
+        );
+        // The structural pass parses that again, and the parser moves the
+        // text in front of the table (editor.md §3.5): the second pass
+        // finds the fixed point.
+        assert_eq!(
+            passes(input),
+            (
+                "Cím<table><tbody><tr><td>x</td></tr></tbody></table>".to_owned(),
+                2
+            )
         );
     }
 
@@ -513,12 +723,13 @@ mod tests {
 
     #[test]
     fn missing_forced_iframe_attributes_are_added() {
-        let output = clean(r#"<iframe src="https://padlet.com/embed/k" height="608"></iframe>"#);
+        let input = r#"<iframe src="https://padlet.com/embed/k" height="608"></iframe>"#;
+        let output = ammonia(input);
         let attributes: HashMap<String, String> = attributes_of(&output, "iframe")
             .expect("an iframe")
             .into_iter()
             .collect();
-        // Appended in hash order; the structural pass sorts them.
+        // ammonia appends them in hash order ...
         assert_eq!(attributes.len(), 5);
         assert_eq!(attributes["src"], "https://padlet.com/embed/k");
         assert_eq!(attributes["allow"], IFRAME_ALLOW);
@@ -527,6 +738,302 @@ mod tests {
         assert!(
             output.starts_with(r#"<iframe src="https://padlet.com/embed/k" height="608" "#),
             "{output}"
+        );
+        // ... and the structural pass writes them in canonical order.
+        assert_eq!(
+            clean(input),
+            format!(
+                r#"<iframe src="https://padlet.com/embed/k" height="608" allow="{IFRAME_ALLOW}" allowfullscreen="" referrerpolicy="{IFRAME_REFERRER_POLICY}"></iframe>"#
+            )
+        );
+    }
+
+    #[test]
+    fn ammonia_alone_appends_in_an_order_that_differs_between_instances() {
+        // What P5 guards against (editor.md §7.4): every builder has its own
+        // hash seeds, so the appended order varies. Sixteen builders all
+        // agreeing by chance is about one in 10^12.
+        let input = r#"<iframe src="https://padlet.com/embed/k"></iframe>"#;
+        let orders: HashSet<String> = (0..16)
+            .map(|_| allow_list().clean(input).to_string())
+            .collect();
+        assert!(orders.len() > 1, "{orders:?}");
+        let sanitized: HashSet<String> = (0..16).map(|_| clean(input)).collect();
+        assert_eq!(sanitized.len(), 1, "{sanitized:?}");
+    }
+
+    #[test]
+    fn the_structural_pass_runs_inside_the_sanitizer() {
+        let result = sanitizer()
+            .sanitize(
+                r#"<p data-padlet-embed=""><iframe src="https://padlet.com/embed/k">felirat</iframe></p><p>H<sub>2<sub>x</sub></sub>O <img alt="kép"></p>"#,
+            )
+            .unwrap();
+        assert_eq!(
+            result.html.as_str(),
+            format!(
+                r#"<p data-padlet-embed=""><iframe src="https://padlet.com/embed/k" allow="{IFRAME_ALLOW}" allowfullscreen="" referrerpolicy="{IFRAME_REFERRER_POLICY}"></iframe></p><p>H<sub>2x</sub>O </p>"#
+            )
+        );
+        let per_rule = result.report.per_rule();
+        assert_eq!(per_rule[&RemovalRule::IframeContentRemoved], 1);
+        assert_eq!(per_rule[&RemovalRule::NestedSubSupUnwrapped], 1);
+        assert_eq!(per_rule[&RemovalRule::ImageWithoutSrcRemoved], 1);
+        assert_eq!(per_rule.len(), 3, "{per_rule:?}");
+    }
+
+    #[test]
+    fn the_loop_stops_at_the_first_fixed_point() {
+        // Canonical input: one pass. A repair: the second pass confirms it.
+        assert_eq!(passes(LINK), (LINK.to_owned(), 1));
+        assert_eq!(
+            passes(r#"<a target="_blank" href="/x">x</a>"#),
+            (
+                r#"<a href="/x" target="_blank" rel="noopener noreferrer">x</a>"#.to_owned(),
+                2
+            )
+        );
+        // A heading inside a heading, left by an unwrapped `div`, is closed
+        // by the fresh parse in the first pass.
+        assert_eq!(
+            passes("<h2>a<div><h3>b</h3></div></h2>"),
+            ("<h2>a</h2><h3>b</h3>".to_owned(), 2)
+        );
+        // Tag soup that the parser repairs by foster parenting: ammonia
+        // writes the repaired tree, and the structural pass's fresh parse
+        // turns it into its final shape in the same pass.
+        assert_eq!(
+            passes("<ul><li><table><li>x</table></ul>"),
+            ("<ul><li></li><li>x</li><table></table></ul>".to_owned(), 2)
+        );
+        // The structural pass's own unwrapping can leave a tree that parses
+        // differently: the inner `sub` goes, the two headings become parent
+        // and child, and the next parse closes the outer one. The third pass
+        // confirms.
+        assert_eq!(
+            passes("<sub><h2><sub><h2>x"),
+            ("<sub><h2></h2><h2>x</h2></sub>".to_owned(), 3)
+        );
+        // ammonia unwraps the `caption`, and the structural pass's parse
+        // fosters the heading it held into the outer heading; the second
+        // pass's first parse closes the outer one, and the third confirms.
+        assert_eq!(
+            passes("<h2><table><caption><h3>x</h3></caption></table></h2>"),
+            ("<h2></h2><h3>x</h3><table></table>".to_owned(), 3)
+        );
+        // ammonia's parse fosters the second link out of the table into the
+        // inner heading, inside the first link. The structural pass's parse
+        // runs the adoption agency on it, which moves the inner heading up
+        // into the outer one; the second pass's first parse closes that,
+        // and the third pass confirms.
+        let link = r#"href="/x" target="_blank" rel="noopener noreferrer""#;
+        assert_eq!(
+            passes(r#"<h2><a href="/x"><h3><table><a href="/x">"#),
+            (
+                format!(
+                    "<h2><a {link}></a></h2><h3><a {link}></a><a {link}></a><table></table></h3>"
+                ),
+                3
+            )
+        );
+        // The same without a table: nine blocks stand between the two links
+        // (seven quotes and two headings), and the adoption agency in
+        // ammonia's parse moves only eight of them, one per round, so a copy
+        // of the first link stays open around the second. The structural
+        // pass's parse runs the adoption agency on it again and moves the
+        // inner heading into the outer one; the second pass's first parse
+        // closes that, and the third pass confirms.
+        let other = r#"href="/y" target="_blank" rel="noopener noreferrer""#;
+        assert_eq!(
+            passes(&format!(
+                r#"<a href="/x">{}<h2><span><h3><a href="/y">x"#,
+                "<blockquote>".repeat(7)
+            )),
+            (
+                format!(
+                    "<a {link}></a>{}<h2><a {link}><span></span></a></h2><h3><a {link}></a><a {other}>x</a></h3>{}",
+                    format!("<blockquote><a {link}></a>").repeat(7),
+                    "</blockquote>".repeat(7)
+                ),
+                3
+            )
+        );
+        // Deeper than the adoption agency's eight rounds: the structural
+        // pass's parse leaves the last copy of the outer link around the
+        // fostered one, and the walk unwraps the fostered one. Before that
+        // rule, every parse repaired eight more levels and this input was
+        // refused after three passes.
+        let (output, passes_taken) = passes(&format!(
+            r#"<a href="/x">{}<table><a href="/y">x"#,
+            "<blockquote>".repeat(24)
+        ));
+        assert_eq!(passes_taken, 2);
+        assert_eq!(
+            output,
+            format!(
+                "<a {link}></a>{}<blockquote><a {link}>{}x<table></table>{}</a></blockquote>{}",
+                format!("<blockquote><a {link}></a>").repeat(7),
+                "<blockquote>".repeat(16),
+                "</blockquote>".repeat(16),
+                "</blockquote>".repeat(7)
+            )
+        );
+    }
+
+    #[test]
+    fn the_loop_refuses_what_does_not_settle() {
+        let count = |output: &str| -> usize { output.len() };
+        // A pass that always changes its input is refused after the last
+        // pass, which could only have confirmed.
+        let mut calls = 0;
+        let refused = fixed_point("x", MAX_PASSES, |current| {
+            calls += 1;
+            Ok(format!("{current}x"))
+        });
+        assert_eq!(refused, Err(SanitizeError::NotNormalisable { passes: 3 }));
+        assert_eq!(calls, 3);
+        // Two changes, then a confirmation: accepted in exactly three.
+        let settles = fixed_point("x", MAX_PASSES, |current| {
+            Ok(if count(current) < 3 {
+                format!("{current}x")
+            } else {
+                current.to_owned()
+            })
+        });
+        assert_eq!(settles, Ok(("xxx".to_owned(), 3)));
+        // An error from a pass stops the loop.
+        let failed = fixed_point("x", MAX_PASSES, |_| {
+            Err(SanitizeError::OutputTooLarge {
+                limit: 1,
+                actual: 2,
+            })
+        });
+        assert_eq!(
+            failed,
+            Err(SanitizeError::OutputTooLarge {
+                limit: 1,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn deep_input_is_refused_before_parsing() {
+        let deep = |depth: usize| format!("{}x{}", "<div>".repeat(depth), "</div>".repeat(depth));
+        assert_eq!(clean(&deep(256)), "x");
+        let error = sanitizer().sanitize(&deep(257)).unwrap_err();
+        assert_eq!(
+            error,
+            SanitizeError::TooDeep {
+                limit: 256,
+                line: 1
+            }
+        );
+        assert_eq!(error.code(), Some("content_too_deep"));
+        assert_eq!(
+            error.to_string(),
+            "the content nests elements more than 256 levels deep (line 1)"
+        );
+        let shallow = Sanitizer::new(SanitizePolicy {
+            max_nesting_depth: 32,
+            ..SanitizePolicy::content_v1()
+        })
+        .unwrap();
+        assert!(matches!(
+            shallow.sanitize(&deep(33)),
+            Err(SanitizeError::TooDeep { limit: 32, .. })
+        ));
+    }
+
+    #[test]
+    fn deep_input_that_leaves_foreign_content_is_refused_too() {
+        // Bodies that leave `svg` for HTML content, where a scan that misread
+        // foreign content would count too little (editor.md §7.2).
+        let divs = "<div>".repeat(2_000);
+        for input in [
+            format!("<svg>{}", "<div/>".repeat(2_000)),
+            format!("<svg><p><![CDATA[>{divs}"),
+            format!("<svg><g></svg><![CDATA[>{divs}"),
+            format!("<table><tr><td><svg><foreignObject><col><![CDATA[>{divs}"),
+        ] {
+            assert!(
+                matches!(
+                    sanitizer().sanitize(&input),
+                    Err(SanitizeError::TooDeep {
+                        limit: 256,
+                        line: 1
+                    })
+                ),
+                "{input:.60}"
+            );
+        }
+        // A body full of well-formed SVG icons is followed to the end, not
+        // refused, and the icons are removed with their content.
+        let icon =
+            r#"<p><svg viewBox="0 0 1 1"><title>Logo</title><path d="M0 0"/></svg> szöveg</p>"#;
+        assert_eq!(clean(&icon.repeat(500)), "<p> szöveg</p>".repeat(500));
+    }
+
+    #[test]
+    fn output_above_the_bound_is_refused() {
+        let policy = SanitizePolicy {
+            max_input_bytes: 1024,
+            max_output_bytes: 1024,
+            ..SanitizePolicy::content_v1()
+        };
+        let sanitizer = Sanitizer::new(policy).unwrap();
+        // Every link gains `target` and `rel`: 7 bytes become 50.
+        let error = sanitizer.sanitize(&"<a></a>".repeat(140)).unwrap_err();
+        assert!(
+            matches!(error, SanitizeError::OutputTooLarge { limit: 1024, actual } if actual > 1024),
+            "{error:?}"
+        );
+        assert_eq!(error.code(), Some("content_too_large"));
+        // A canonical body as large as the input bound is never refused for
+        // its output, which is the same size.
+        let body = format!("<p>{}</p>", "a".repeat(1017));
+        assert_eq!(body.len(), 1024);
+        assert_eq!(sanitizer.sanitize(&body).unwrap().html.as_str(), body);
+    }
+
+    #[test]
+    fn every_error_has_its_code() {
+        let violation = Violation::TableInsideParagraph;
+        let cases = [
+            (
+                SanitizeError::TooLarge {
+                    limit: 1,
+                    actual: 2,
+                },
+                Some("content_too_large"),
+            ),
+            (
+                SanitizeError::OutputTooLarge {
+                    limit: 1,
+                    actual: 2,
+                },
+                Some("content_too_large"),
+            ),
+            (
+                SanitizeError::TooDeep { limit: 1, line: 2 },
+                Some("content_too_deep"),
+            ),
+            (
+                SanitizeError::NotNormalisable { passes: 3 },
+                Some("content_not_normalisable"),
+            ),
+            (SanitizeError::InvariantViolated(violation.clone()), None),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.code(), code, "{error}");
+        }
+        assert_eq!(
+            SanitizeError::NotNormalisable { passes: 3 }.to_string(),
+            "the content did not reach a fixed point in 3 sanitiser passes"
+        );
+        assert_eq!(
+            SanitizeError::InvariantViolated(violation).to_string(),
+            "the sanitiser broke one of its own invariants: a `table` is inside a `p`"
         );
     }
 
@@ -798,9 +1305,33 @@ mod tests {
             let _ = sanitizer().sanitize(&input);
         }
 
-        // The report is checked against ammonia's real output: every input
-        // attribute that does not come out byte-identical has exactly one
-        // entry, and nothing else has one.
+        // The code depends on the kind of refusal only, never on the numbers
+        // it carries.
+        #[test]
+        fn the_code_ignores_the_numbers(limit in any::<usize>(), actual in any::<usize>(), line in any::<u64>()) {
+            prop_assert_eq!(SanitizeError::TooLarge { limit, actual }.code(), Some("content_too_large"));
+            prop_assert_eq!(SanitizeError::OutputTooLarge { limit, actual }.code(), Some("content_too_large"));
+            prop_assert_eq!(SanitizeError::TooDeep { limit, line }.code(), Some("content_too_deep"));
+            prop_assert_eq!(SanitizeError::NotNormalisable { passes: actual }.code(), Some("content_not_normalisable"));
+            let violation = SanitizeError::InvariantViolated(Violation::ElementOutsidePolicy { element: limit.to_string() });
+            prop_assert_eq!(violation.code(), None);
+        }
+
+        // Every error names its numbers, so the operator sees the limit.
+        #[test]
+        fn the_messages_name_the_limits(limit in any::<usize>(), actual in any::<usize>(), line in any::<u64>()) {
+            let too_large = SanitizeError::TooLarge { limit, actual }.to_string();
+            prop_assert!(too_large.contains(&limit.to_string()) && too_large.contains(&actual.to_string()));
+            let too_deep = SanitizeError::TooDeep { limit, line }.to_string();
+            prop_assert!(too_deep.contains(&limit.to_string()) && too_deep.contains(&line.to_string()));
+            let output = SanitizeError::OutputTooLarge { limit, actual }.to_string();
+            prop_assert!(output.contains(&limit.to_string()) && output.contains(&actual.to_string()));
+        }
+
+        // The ammonia part of the report is checked against ammonia's real
+        // output: every input attribute that does not come out of one
+        // ammonia pass byte-identical has exactly one entry in `explain`,
+        // and nothing else has one.
         #[test]
         fn the_report_accounts_for_every_changed_attribute(
             tag in prop::sample::select(&["a", "img", "iframe", "ol", "p", "span", "h2"][..]),
@@ -808,12 +1339,12 @@ mod tests {
         ) {
             let rendered = attributes.iter().map(|(n, v)| format!(r#" {n}="{}""#, v.replace('&', "&amp;").replace('"', "&quot;"))).collect::<Vec<_>>().concat();
             let input = if tag == "ol" { format!("<ol{rendered}><li>x</li></ol>") } else { format!("<{tag}{rendered}>x</{tag}>") };
-            let result = sanitizer().sanitize(&input).unwrap();
+            let output = ammonia(&input);
             let before = attributes_of(&input, tag).unwrap();
-            let after = attributes_of(result.html.as_str(), tag).unwrap();
+            let after = attributes_of(&output, tag).unwrap();
             let mut expected: Vec<String> = before.iter().filter(|attribute| !after.contains(attribute)).map(|(n, _)| n.clone()).collect();
             let mut reported = Vec::new();
-            for (removal, count) in result.report.entries() {
+            for (removal, count) in explain(&SanitizePolicy::content_v1(), &input).entries() {
                 prop_assert_eq!(removal.element.as_str(), tag);
                 let attribute = removal.attribute.clone();
                 prop_assert!(attribute.is_some(), "{:?}", removal);
@@ -821,30 +1352,57 @@ mod tests {
             }
             expected.sort();
             reported.sort();
-            prop_assert_eq!(expected, reported, "{} -> {}", input, result.html);
+            prop_assert_eq!(expected, reported, "{} -> {}", input, output);
+        }
+
+        // The full report holds the ammonia part and the structural part:
+        // the image without `src` and the iframe text are each counted once.
+        #[test]
+        fn the_full_report_adds_the_structural_removals(
+            tag in prop::sample::select(&["img", "iframe"][..]),
+            attributes in prop::collection::vec((prop::sample::select(POOL_NAMES), prop::sample::select(POOL_VALUES)), 0..8),
+        ) {
+            let rendered = attributes.iter().map(|(n, v)| format!(r#" {n}="{}""#, v.replace('&', "&amp;").replace('"', "&quot;"))).collect::<Vec<_>>().concat();
+            let input = format!("<p><{tag}{rendered}>x</{tag}></p>");
+            let result = sanitizer().sanitize(&input).unwrap();
+            let mut expected = explain(&SanitizePolicy::content_v1(), &input);
+            let single_pass = ammonia(&input);
+            if tag == "iframe" {
+                expected.record(RemovalRule::IframeContentRemoved, "iframe", None);
+            } else if attributes_of(&single_pass, "img").is_some_and(|kept| !kept.iter().any(|(n, _)| n == "src")) {
+                expected.record(RemovalRule::ImageWithoutSrcRemoved, "img", None);
+            }
+            prop_assert_eq!(&result.report, &expected, "{} -> {}", input, result.html);
         }
 
         // The element counts are checked against ammonia's real output: the
         // elements it kept and the text that survived must match the same
-        // prediction that the report's counts are compared with.
+        // prediction that the counts of `explain` are compared with.
         #[test]
         fn the_report_matches_ammonia_over_nested_trees(trees in prop::collection::vec(arb_tree(), 0..4)) {
             let (mut input, mut next, mut expected) = (String::new(), 0, Expected::default());
             for tree in &trees {
                 render(tree, &mut input, &mut next, true, &mut expected);
             }
-            let result = sanitizer().sanitize(&input).unwrap();
-            let (elements, text) = walk_output(result.html.as_str());
+            let (elements, text) = walk_output(&ammonia(&input));
             let survived: Vec<usize> = (0..next).filter(|id| text.contains(&format!("[{id}]"))).collect();
             prop_assert_eq!(&survived, &expected.texts, "{}", input);
             prop_assert_eq!(elements, expected.kept, "{}", input);
-            let report = result.report;
+            let report = explain(&SanitizePolicy::content_v1(), &input);
             prop_assert_eq!(report.count(RemovalRule::ElementRemoved), expected.removed, "{}", input);
             prop_assert_eq!(report.count(RemovalRule::ElementUnwrapped), expected.unwrapped, "{}", input);
             prop_assert_eq!(report.count(RemovalRule::CommentRemoved), expected.comments, "{}", input);
             prop_assert_eq!(report.count(RemovalRule::ImageSrcRejected), expected.images, "{}", input);
             let total: usize = report.per_rule().values().sum();
             prop_assert_eq!(total, expected.removed + expected.unwrapped + expected.comments + expected.images);
+            // The whole sanitiser keeps the same text, removes every one of
+            // those images, and reports each of them once more.
+            let result = sanitizer().sanitize(&input).unwrap();
+            let (_, text) = walk_output(result.html.as_str());
+            let survived: Vec<usize> = (0..next).filter(|id| text.contains(&format!("[{id}]"))).collect();
+            prop_assert_eq!(&survived, &expected.texts, "{}", input);
+            prop_assert!(!result.html.as_str().contains("<img"), "{}", result.html);
+            prop_assert_eq!(result.report.count(RemovalRule::ImageWithoutSrcRemoved), expected.images);
         }
 
         #[test]
@@ -855,13 +1413,64 @@ mod tests {
                 "<table>", "<caption>", "<tr>", "<td colspan=\"2\" style=\"x\">", "</td>", "</table>",
                 "<ol type=\"I\" start=\"0\">", "<li>", "<span class=\"x\">", "szöveg", "&amp;", "<br>",
                 "<svg>", "<iframe src=\"https://padlet.com/embed/k\" width=\"100%\">", "</iframe>",
-                "<h1>", "<sub>", "<o:p>", "<textarea>", "<plaintext>", "<g>", "<desc>", "<sum>",
+                "<h1>", "<sub>", "<sup>", "<o:p>", "<textarea>", "<plaintext>", "<g>", "<desc>", "<sum>",
+                "<img alt=\"x\">", "<thead>", "<h2>", "<h3>",
             ][..]), 0..24),
         ) {
-            // `explain` itself, not `sanitize`, whose shortcut would skip it here.
             let once = sanitizer().sanitize(&parts.concat()).unwrap().html;
+            // `explain` itself, not `sanitize`, whose shortcut would skip it.
             let again = explain(&SanitizePolicy::content_v1(), once.as_str());
             prop_assert!(again.is_empty(), "{} -> {:?}", once, again);
+            // And the whole sanitiser takes one pass and changes nothing.
+            prop_assert_eq!(passes(once.as_str()), (once.as_str().to_owned(), 1));
+            let twice = sanitizer().sanitize(once.as_str()).unwrap();
+            prop_assert_eq!(&twice.html, &once);
+            prop_assert!(twice.report.is_empty(), "{:?}", twice.report);
+        }
+
+        // P5 (editor.md §13.6): independent instances, each with its own
+        // hash seeds, write the same bytes and the same report.
+        #[test]
+        fn independent_instances_agree(
+            parts in prop::collection::vec(prop::sample::select(&[
+                "<iframe src=\"https://padlet.com/embed/k\">", "<iframe height=\"1\" title=\"t\">", "</iframe>",
+                "<a>", "<a href=\"//evil.example\" target=\"_self\" rel=\"x\">", "</a>",
+                "<img width=\"1\" alt=\"a\" src=\"data:x\" height=\"2\">", "<img alt=\"a\" src=\"/storage/uploads/a.jpg\" class=\"c\" width=\"9\">",
+                "<ol type=\"A\" class=\"x\" start=\"3\">", "<li>", "<td colspan=\"9\" rowspan=\"0\">", "<table>", "x",
+            ][..]), 0..16),
+        ) {
+            let input = parts.concat();
+            let first = sanitizer().sanitize(&input).unwrap();
+            for _ in 0..3 {
+                prop_assert_eq!(&sanitizer().sanitize(&input).unwrap(), &first, "{}", input);
+            }
+        }
+
+        // A link around nesting deeper than the adoption agency repairs in
+        // one parse, with a table at the bottom that fosters a second link
+        // into it, either at once or, from a `caption` that ammonia
+        // unwraps, in the structural pass's parse. The loop settles within
+        // its passes, and the output is a fixed point (module
+        // documentation). Before nested links were unwrapped, a link around
+        // 24 quotes was refused.
+        #[test]
+        fn nested_links_settle_at_any_depth(
+            levels in prop::collection::vec(prop::sample::select(&[
+                "<blockquote>", "<ul><li>", "<li>", "<h2>", "<h3>", "<p>", "<em>", "<sub>",
+                "<span>", "<div>", "<b>", "<a href=\"/z\">",
+            ][..]), 0..120),
+            caption in any::<bool>(),
+        ) {
+            let inner = if caption {
+                r#"<caption><a href="/y">x</a></caption>"#
+            } else {
+                r#"<a href="/y">x"#
+            };
+            let input = format!(r#"<a href="/x">{}<table>{inner}"#, levels.concat());
+            let result = sanitizer().sanitize(&input);
+            prop_assert!(result.is_ok(), "{}: {:?}", input, result);
+            let html = result.expect("checked above").html.into_string();
+            prop_assert_eq!(clean(&html), html);
         }
     }
 }

@@ -1,0 +1,31 @@
+# Sanitiser regression fixtures
+
+Permanent inputs for the content-v1 sanitiser (editor.md §13.6, P1). The
+runner is `tests/rich_text/regressions.rs`.
+
+Each fixture is a pair:
+
+- `<name>.html`: the input, read as bytes (a trailing newline is part of it);
+- `<name>.out.html`: what `Sanitizer::sanitize` must write for it. An empty
+  file means that nothing survives.
+
+For every pair the runner checks that the output equals `<name>.out.html`,
+that sanitising `<name>.out.html` again returns it unchanged with an empty
+removal report (`S(S(x)) == S(x)`), and that independent sanitiser instances
+write the same bytes and the same report (P5).
+
+## Adding a fixture
+
+- Every shrunk failure of the P1 or P5 proptests
+  (`tests/rich_text/properties.rs`) becomes a fixture, named after what it
+  exercises, in lower-case words joined by `-`.
+- Write the input by hand. Fixtures are invented markup, never copied from
+  production content (`CLAUDE.md`, public-safety rules).
+- Write the expected output only after checking it against editor.md §3 and
+  §7.5, not by copying whatever the sanitiser printed.
+
+## When an expected output changes
+
+A policy change that alters an output (for example the CSS grammar, which
+keeps `style` values that are dropped today) updates the `.out.html` file in
+the same PR and says why in the PR body.

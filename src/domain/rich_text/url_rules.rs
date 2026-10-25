@@ -91,8 +91,13 @@ pub fn same_origin_relative(value: &str) -> Option<Cow<'_, str>> {
 /// The prefix and the extension are compared with that serialisation, as
 /// editor.md §3.6 says, so a percent-encoded spelling of either
 /// (`/%73torage/`, `a%2Ejpg`) does not match, and one file has one spelling.
-/// No character is restricted beyond what the `url` crate serialises,
-/// because legacy image paths contain `(` and `)`.
+/// Characters are otherwise not restricted beyond what the `url` crate
+/// serialises, because legacy image paths contain `(` and `)`, with one
+/// exception ([`decoded_segments_are_plain`]): the path is refused when a
+/// segment, once percent-decoded, is `.` or `..`, holds a `/`, a `\` or a
+/// NUL, or is not UTF-8. A static server or a renderer that decodes the
+/// path would otherwise reach a file outside the image prefix, or a
+/// different file than the one the path names (research: DECISIONS R11).
 ///
 /// - `policy`: supplies the own hosts and the image prefix.
 /// - `value`: the attribute value.
@@ -122,8 +127,33 @@ pub fn image_src(policy: &SanitizePolicy, value: &str) -> Option<String> {
     // it keeps the result root-relative even under a policy prefix of `/`.
     (path.starts_with(policy.image_path_prefix.as_str())
         && !path.starts_with("//")
-        && ends_with_extension(path, IMAGE_EXTENSIONS))
+        && ends_with_extension(path, IMAGE_EXTENSIONS)
+        && decoded_segments_are_plain(path))
     .then(|| path.to_owned())
+}
+
+/// Whether every `/`-separated segment of the serialised `path`, once
+/// percent-decoded, is valid UTF-8, is neither `.` nor `..`, and holds no
+/// `/`, `\` or NUL.
+///
+/// The `url` crate already resolves the dot segments it recognises,
+/// including `%2e` spellings, so what this refuses is what only appears
+/// after decoding: an encoded separator (`a%2F..%2Fb`, `a%5Cb`), a NUL
+/// (`a.svg%00.jpg`), or bytes that are not UTF-8 (`%FF`). Each segment is
+/// decoded on its own, so a `/` in a decoded segment can only come from an
+/// encoded one. A literal `\` never survives the parser in an `http` path,
+/// so a decoded one was encoded too.
+///
+/// - `path`: a path as [`Url::path`] serialises it.
+#[must_use]
+pub fn decoded_segments_are_plain(path: &str) -> bool {
+    path.split('/').all(|segment| {
+        percent_decode_str(segment)
+            .decode_utf8()
+            .is_ok_and(|decoded| {
+                !matches!(&*decoded, "." | "..") && !decoded.contains(['/', '\\', '\0'])
+            })
+    })
 }
 
 /// The `iframe[src]` rule: the canonical spelling of an embed URL, or `None`
@@ -170,7 +200,9 @@ pub fn embed_src(policy: &SanitizePolicy, value: &str) -> Option<String> {
 /// maps it to a file: percent-decoded, with its dot segments resolved and
 /// repeated slashes merged after decoding (nginx normalises the decoded
 /// URI), and lower-cased. `/%73torage/x.svg`, `/x/..%2Fstorage/x.svg` and
-/// `/STORAGE/x.SVG` are refused with `/storage/x.svg`.
+/// `/STORAGE/x.SVG` are refused with `/storage/x.svg`. The maintainer
+/// confirmed this reading of editor.md §3.6's "resolves to" as built (item
+/// D87, research: DECISIONS R15).
 ///
 /// - `policy`: supplies the own hosts.
 /// - `value`: the attribute value.
@@ -398,8 +430,74 @@ mod tests {
         accept("/storage/uploads/a/../b.gif", "/storage/uploads/b.gif");
         accept("\\storage\\uploads\\c.jpg", "/storage/uploads/c.jpg");
         accept(" /storage/uploads/d.jpg ", "/storage/uploads/d.jpg");
-        // No character is restricted beyond the `url` crate's serialisation.
-        accept("/storage/uploads/%FF.jpg", "/storage/uploads/%FF.jpg");
+        // Characters the `url` crate serialises as they are, or encodes as
+        // UTF-8, are not restricted.
+        accept(
+            "/storage/uploads/a+b,c;d=e~f!g$h'i*j@k.png",
+            "/storage/uploads/a+b,c;d=e~f!g$h'i*j@k.png",
+        );
+        accept(
+            "/storage/uploads/%C3%A1rv%C3%ADz.jpg",
+            "/storage/uploads/%C3%A1rv%C3%ADz.jpg",
+        );
+        accept(
+            "/storage/uploads/a%2520b.jpg",
+            "/storage/uploads/a%2520b.jpg",
+        );
+    }
+
+    #[test]
+    fn image_src_refuses_what_only_decoding_reveals() {
+        // research: DECISIONS R11 (1), editor.md §3.6.
+        for value in [
+            // An encoded `/` or `\`, also forming a dot segment once decoded.
+            "/storage/uploads/a%2Fb.jpg",
+            "/storage/uploads/a%2fb.jpg",
+            "/storage/uploads/x%2F..%2F..%2Fsecret.jpg",
+            "/storage/uploads/a%5Cb.jpg",
+            "/storage/uploads/..%5C..%5Cx.jpg",
+            // A NUL.
+            "/storage/uploads/a.svg%00.jpg",
+            "/storage/uploads/%00/a.jpg",
+            // Bytes that are not UTF-8.
+            "/storage/uploads/%FF.jpg",
+            "/storage/uploads/%C3.jpg",
+            "/storage/uploads/%ED%A0%80.jpg",
+            "https://verseghy-gimnazium.net/storage/uploads/%FE/a.jpg",
+        ] {
+            assert_eq!(image_src(&policy(), value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn decoded_segments_are_plain_checks_each_segment() {
+        for path in [
+            "/storage/uploads/a.jpg",
+            "/",
+            "",
+            "/a/%C3%A9/b",
+            "/a%20b",
+            "/%2525",
+            "/a//b",
+            "/...",
+            "/.a",
+        ] {
+            assert!(decoded_segments_are_plain(path), "{path}");
+        }
+        for path in [
+            "/%2E",
+            "/%2e%2E/x",
+            "/a/./b",
+            "/a/../b",
+            "/a%2Fb",
+            "/a%5cb",
+            "/a\\b",
+            "/a%00",
+            "/%80",
+            "/%F0%9F%98",
+        ] {
+            assert!(!decoded_segments_are_plain(path), "{path}");
+        }
     }
 
     #[test]
@@ -565,6 +663,7 @@ mod tests {
         fn the_rules_never_panic(value in any::<String>()) {
             let _ = (scheme_admitted(&value), same_origin_relative(&value), is_relative(&value));
             let _ = (image_src(&policy(), &value), embed_src(&policy(), &value), link_href(&policy(), &value));
+            let _ = decoded_segments_are_plain(&value);
         }
 
         #[test]
@@ -574,6 +673,36 @@ mod tests {
                 prop_assert_eq!(image_src(&policy(), &path), Some(path.clone()));
                 prop_assert_eq!(same_origin_relative(&path), Some(Cow::Borrowed(path.as_str())));
             }
+        }
+
+        // Whatever is accepted decodes to UTF-8 segments without dot
+        // segments, separators or NUL, so a decoding server reaches the file
+        // the path names.
+        #[test]
+        fn accepted_image_sources_decode_to_plain_segments(
+            name in "([a-z0-9.]|%[0-9A-F]{2}){1,12}",
+            folder in proptest::option::of("([a-z]|%[0-9A-F]{2}){1,6}"),
+        ) {
+            let folder = folder.map(|f| format!("{f}/")).unwrap_or_default();
+            let value = format!("/storage/uploads/{folder}{name}.jpg");
+            if let Some(path) = image_src(&policy(), &value) {
+                for segment in path.split('/') {
+                    let decoded = percent_decode_str(segment).decode_utf8();
+                    prop_assert!(decoded.is_ok(), "{}", path);
+                    let decoded = decoded.unwrap_or_default();
+                    prop_assert!(decoded != "." && decoded != "..", "{}", path);
+                    prop_assert!(!decoded.contains(['/', '\\', '\0']), "{}", path);
+                }
+            }
+        }
+
+        #[test]
+        fn decoded_segments_are_plain_matches_a_per_segment_decode(path in "(/([a-z.]|%(2[EeFf]|5[Cc]|00|C3|A9|FF|41)){0,4}){0,4}") {
+            let expected = path.split('/').all(|segment| {
+                let bytes: Vec<u8> = percent_decode_str(segment).collect();
+                std::str::from_utf8(&bytes).is_ok_and(|text| text != "." && text != ".." && !text.contains(['/', '\\', '\0']))
+            });
+            prop_assert_eq!(decoded_segments_are_plain(&path), expected, "{}", path);
         }
 
         #[test]

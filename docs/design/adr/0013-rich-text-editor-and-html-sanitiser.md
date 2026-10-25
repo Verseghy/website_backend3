@@ -1,6 +1,6 @@
 # 0013. Rich-text editor and HTML sanitiser
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0037](0037-nested-links-unwrapped-by-the-sanitiser-s-structural-pass.md) (2026-10-31)
 - Decision questions: Q15 and the follow-up answers 15a-15g
 
 ## Context

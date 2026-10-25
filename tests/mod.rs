@@ -22,6 +22,7 @@ mod media_contract;
 mod migration;
 mod models;
 mod requests;
+mod rich_text;
 mod schema;
 mod support;
 mod tasks;
