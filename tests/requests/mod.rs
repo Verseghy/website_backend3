@@ -7,4 +7,5 @@ mod not_found;
 mod openapi;
 mod security_headers;
 mod site;
+mod starter_auth;
 mod trailing_slash;
