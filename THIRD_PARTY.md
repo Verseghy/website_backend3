@@ -7,14 +7,25 @@ such path, as [ADR 0012](docs/design/adr/0012-delivery-review-commits-and-licens
 section 4 requires. A PR that adds or re-syncs vendored code updates this file
 in the same PR.
 
-Dependencies that cargo or npm fetch are not vendored, so they are not listed
+Dependencies that cargo or npm fetch are not vendored, so they are not indexed
 here. CI checks their licences instead: `cargo-deny` against `deny.toml`, and
 the `Admin licenses` job against `admin/license-policy.json`
 ([ADR 0022](docs/design/adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md)
 section 4). The licences beyond ADR 0022's table are allowed for named crates
-and packages only, as
-[ADR 0027](docs/design/adr/0027-per-package-licence-exceptions-and-the-loco-advisory-ignores.md)
-lists them.
+and packages only, under the rule of
+[ADR 0027](docs/design/adr/0027-per-package-licence-exceptions-and-the-loco-advisory-ignores.md),
+and each entry in those two files states its reason. The one exception to not
+listing dependencies here is a notice that a dependency's licence requires in
+the documentation of the binaries built with it: those notices are listed in
+the next section.
+
+## Notices that dependencies require
+
+- **The Independent JPEG Group.** backend3 decodes and re-encodes JPEG
+  uploads with MozJPEG, which the `mozjpeg-sys` crate compiles into the
+  backend3 binary ([docs/design/image-encoders.md](docs/design/image-encoders.md)).
+  Its IJG licence asks that the documentation of a binary state it:
+  this software is based in part on the work of the Independent JPEG Group.
 
 ## Vendored code
 

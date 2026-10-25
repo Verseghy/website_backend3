@@ -10,7 +10,7 @@
 //! a reader index out of bounds or panic.
 
 mod gif;
-mod jpeg;
+pub(super) mod jpeg;
 mod png;
 mod webp;
 
@@ -122,7 +122,7 @@ fn dimensions(width: u32, height: u32) -> Result<Dimensions, HeaderError> {
 
 /// The `len` bytes of `bytes` that start at offset `at`, or
 /// [`HeaderError::Truncated`] when the input ends first.
-fn take(bytes: &[u8], at: usize, len: usize) -> Result<&[u8], HeaderError> {
+pub(super) fn take(bytes: &[u8], at: usize, len: usize) -> Result<&[u8], HeaderError> {
     at.checked_add(len)
         .and_then(|end| bytes.get(at..end))
         .ok_or(HeaderError::Truncated)
@@ -130,7 +130,7 @@ fn take(bytes: &[u8], at: usize, len: usize) -> Result<&[u8], HeaderError> {
 
 /// The `N` bytes of `bytes` that start at offset `at`, as an array, or
 /// [`HeaderError::Truncated`] when the input ends first.
-fn bytes_at<const N: usize>(bytes: &[u8], at: usize) -> Result<[u8; N], HeaderError> {
+pub(super) fn bytes_at<const N: usize>(bytes: &[u8], at: usize) -> Result<[u8; N], HeaderError> {
     take(bytes, at, N)?
         .try_into()
         .map_err(|_| HeaderError::Truncated)

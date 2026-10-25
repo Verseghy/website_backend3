@@ -69,8 +69,13 @@ pub(super) fn read(bytes: &[u8]) -> Result<Dimensions, HeaderError> {
 /// The code of the next marker at or after offset `at`, and the offset just
 /// past it, as libjpeg's `next_marker` finds them: bytes before an `FF` are
 /// skipped, any number of `FF` fill bytes may come before the code (T.81
-/// B.1.1.2), and a stuffed `FF 00` pair is data, so it is skipped too.
-fn next_marker(bytes: &[u8], mut at: usize) -> Result<(u8, usize), HeaderError> {
+/// B.1.1.2), and a stuffed `FF 00` pair is data, so it is skipped too. The
+/// JPEG metadata strip walks the segments with it as well, so both see the
+/// same markers.
+pub(in crate::domain::image_optimise) fn next_marker(
+    bytes: &[u8],
+    mut at: usize,
+) -> Result<(u8, usize), HeaderError> {
     loop {
         let rest = bytes.get(at..).unwrap_or_default();
         at += rest
