@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2df8ae6ef7d2f1548a3ae8673fd15be963cd0ae56afed4a5ecbf6921608fe484 # shrinks to objects = [Object { kind: Extension, table: None, position: 0, name: "\n", definition: "a" }]
+cc 8425d556cd1c023c268d9fcebd990743338deb7777f0d54502b0fe25bea66859 # shrinks to (objects, shuffled) = ([Object { kind: Constraint, table: None, position: 1, name: "", definition: "â\u{9755b}\u{5a613}\u{1b}\u{b3dc9}𤜪" }, Object { kind: Constraint, table: None, position: 1, name: "", definition: "|a\n|" }], [Object { kind: Constraint, table: None, position: 1, name: "", definition: "|a\n|" }, Object { kind: Constraint, table: None, position: 1, name: "", definition: "â\u{9755b}\u{5a613}\u{1b}\u{b3dc9}𤜪" }])

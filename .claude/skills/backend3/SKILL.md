@@ -43,7 +43,23 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    PR: recipe 2. The slice adds only its own tables to `App::truncate` in
    `src/app.rs`, never `users`, `activity_log` or `revisions` (the
    `AGENTS.md` commands say why and how to start a development database
-   over).
+   over). Every migration updates the schema snapshot in the same PR
+   (ADR 0009): `tests/schema/snapshot.rs` reads the migrated schema from
+   `pg_catalog` and fails until `tests/schema/snapshots/schema.snap` matches.
+   Read the `.snap.new` it writes (each object is one line that starts with
+   its kind and name), accept it with `cargo insta review`, and commit it.
+   The snapshot shows only what the module doc of `tests/schema/catalog.rs`
+   lists. Before it compares, the test runs the guard of
+   `tests/schema/guard.rs`, which fails on anything else in the schema (a
+   view, a sequence, a grant, a policy, a storage parameter, a comment on an
+   index, a disabled foreign-key trigger, ...), within the limits that its
+   module documentation lists, and names each object and the rule that found
+   it. A migration
+   that needs such an object, in the same PR: extends that reader to show it,
+   narrows the guard rule so it no longer reports it, changes the guard case
+   in `tests/schema/guard_cases.rs` that expected it, and updates the
+   snapshot. A new extension goes into the guard's `EXTENSIONS` with every
+   object it owns.
 3. **Entities**: `cargo loco db migrate`, then `cargo loco db entities`. Never
    edit `src/models/_entities/`; `src/models/mod.rs` allows `missing_docs` for
    it, so the generated code needs no doc comments. The entities derive no

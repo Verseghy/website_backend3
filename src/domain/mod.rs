@@ -34,6 +34,7 @@ pub mod proc_stat;
 pub mod rich_text;
 pub mod route_coverage;
 pub mod runtime_metrics;
+pub mod schema_snapshot;
 pub mod session_cookie;
 pub mod task_lock_key;
 pub mod totp;
