@@ -168,6 +168,14 @@ jobs:
         run: yq --version
       - name: rust-toolchain.toml, Containerfile and admin/.node-version agree
         run: bash scripts/ci/check-toolchain.sh
+      - name: jq version
+        run: jq --version
+      - name: Every Cargo requirement is in [workspace.dependencies]
+        # Dependabot rewrites only that table of the root Cargo.toml, and only
+        # the entry forms it finds there (.github/dependabot.yml); a static
+        # check of the manifests, run here because it needs no Rust toolchain
+        # (yq, jq and git only).
+        run: bash scripts/ci/check-workspace-deps.sh
 
   admin-lint:
     name: Admin lint

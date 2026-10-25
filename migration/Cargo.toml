@@ -17,14 +17,12 @@ workspace = true
 name = "migration"
 path = "src/lib.rs"
 
+# The requirements, features and reasons are in [workspace.dependencies] of
+# the root Cargo.toml; a new dependency goes there first (the header of that
+# file says why).
 [dependencies]
 # loco-rs with the workspace features; `with-db` brings sea-orm-migration
 # with the PostgreSQL driver.
 loco-rs = { workspace = true }
-async-trait = "0.1"
-
-[dependencies.sea-orm-migration]
-version = "2.0"
-# The async runtime feature; the PostgreSQL driver feature comes in through
-# loco-rs (`with-db`), and no SQLite or MySQL driver is enabled here.
-features = ["runtime-tokio-rustls", "sqlx-postgres"]
+async-trait = { workspace = true }
+sea-orm-migration = { workspace = true }

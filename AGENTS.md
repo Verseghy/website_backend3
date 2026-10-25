@@ -119,6 +119,24 @@ which makes any missing Hungarian string fail the run as in CI; then, from the
 repository root, `LOCO_ENV=e2e cargo loco start`, which migrates backend3_e2e
 on boot, and `LOCO_ENV=e2e cargo loco db seed`).
 
+## Rust dependencies
+
+Every requirement of the workspace is declared once, in
+`[workspace.dependencies]` of the root `Cargo.toml`, with a comment that says
+why it is there. The crate that uses it inherits it with
+`<crate> = { workspace = true }`, adding only the `features` or the
+`optional = true` that this crate alone needs. Dependabot rewrites no other
+table of the root manifest, so a requirement in backend3's own dependency
+tables would get every update beyond it as a Cargo.lock-only PR that fails
+every `--locked` job. `migration/` inherits as well, so that each requirement
+and its reason live in one place and the two crates cannot drift apart. Write
+the workspace entry with bare keys, `<crate> = "<requirement>"` or
+`<crate> = { version = "<requirement>", ... }`: Dependabot does not find a
+dotted or quoted key. `scripts/ci/check-workspace-deps.sh` (the `Toolchain`
+job) rejects a requirement declared anywhere else, or written in a form that
+Dependabot does not find, and says how to fix it. The steps are recipe 5 of
+`.claude/skills/backend3/SKILL.md`.
+
 ## Before you call it done
 
 Run the same gate as CI, from the repository root:
