@@ -68,3 +68,9 @@ settings:
     # never need a Node build (ADR 0004 §4). Relative to the package root,
     # the working directory of cargo test and nextest.
     dist_dir: tests/fixtures/admin-dist
+  # The /metrics listener (ADR 0023 §9). Tests never bind this port: the
+  # serve test binds ephemeral listeners of its own, so parallel tests do not
+  # collide (tests/requests/metrics.rs).
+  metrics:
+    binding: 127.0.0.1
+    port: 9464

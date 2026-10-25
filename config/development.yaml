@@ -73,3 +73,10 @@ database:
 settings:
   admin_ui:
     dist_dir: admin/dist
+  # /metrics on a port of its own, never on the server port (ADR 0023 §9):
+  # curl http://127.0.0.1:9464/metrics. An IP address, not localhost, so a
+  # second server refuses to start on a taken port; set METRICS_PORT together
+  # with PORT to run one next to the first.
+  metrics:
+    binding: 127.0.0.1
+    port: <%= get_env(name="METRICS_PORT", default="9464") %>

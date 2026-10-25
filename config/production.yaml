@@ -94,3 +94,9 @@ settings:
     # (ADR 0004 §2). The server refuses to start when it or its index.html
     # is missing.
     dist_dir: /app/admin/dist
+  # /metrics, OpenMetrics text, on the pod's `metrics` port (ADR 0023 §9).
+  # All interfaces, like the server, so the Service reaches it. No Route
+  # ever targets this port: the metrics are never public (ADR 0014).
+  metrics:
+    binding: 0.0.0.0
+    port: 9464

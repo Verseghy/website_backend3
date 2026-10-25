@@ -14,7 +14,10 @@ async fn build_router(environment: Environment, dist_dir: &str) -> Result<(), St
     let dist_dir = dist_dir.to_owned();
     with_app(|_router, mut ctx| async move {
         ctx.environment = environment;
-        ctx.config.settings = Some(json!({ "admin_ui": { "dist_dir": dist_dir } }));
+        ctx.config.settings = Some(json!({
+            "admin_ui": { "dist_dir": dist_dir },
+            "metrics": { "binding": "127.0.0.1", "port": 9464 }
+        }));
         App::before_routes(&ctx)
             .await
             .map(|_| ())

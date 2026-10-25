@@ -1,14 +1,18 @@
 //! The Loco hooks of backend3: how the application loads its configuration,
 //! builds its router and registers workers and tasks.
 //!
-//! Four hooks carry project decisions:
+//! Five hooks carry project decisions:
 //!
 //! - `after_context` registers the app clock, the one source of "now"
 //!   (ADR 0010 point 7). Handlers, workers and tasks read it with [`clock`]
-//!   and pass the instant down; tests replace it with [`set_clock`].
+//!   and pass the instant down; tests replace it with [`set_clock`]. It also
+//!   creates the metrics registry, registers every metric family on it and
+//!   puts the [`Metrics`] into the shared store, from where the hooks below
+//!   hand it down (ADR 0023 §9, ADR 0008 rule 3).
 //! - `load_config` runs the database-target guard of ADR 0024 §4 (layer 3)
-//!   and validates the typed settings. Every Loco entry point calls it before
-//!   it connects anywhere: the test boot helpers, `cargo loco` and the
+//!   and validates the typed settings, including that `settings.metrics.port`
+//!   is not `server.port`. Every Loco entry point calls it before it
+//!   connects anywhere: the test boot helpers, `cargo loco` and the
 //!   `backend3-cli` binary.
 //! - `before_routes` mounts the `/admin` router and the JSON `404` fallback.
 //!   In loco-rs 1.2.0 the router returned here receives Loco's routes and is
@@ -16,9 +20,12 @@
 //!   fallback get the same request id, logging, compression and secure
 //!   headers as the API (`boot::setup_routes`). A router added in
 //!   `after_routes` would get none of them (ADR 0004 §3).
+//! - `after_routes` wraps the finished router, middleware stack included, in
+//!   the HTTP request metrics layer.
 //! - `serve` puts [`trim_trailing_slash`] in front of the finished router,
 //!   so `/api/v1/posts/` is served exactly like `/api/v1/posts`
-//!   (public-api.md DEC-10, open item O-2).
+//!   (public-api.md DEC-10, open item O-2), and runs the `/metrics` listener
+//!   of `settings.metrics` next to it ([`serve_until`]).
 //!
 //! The session `TimeZone = UTC` of ADR 0002 ("Session settings") and ADR 0010
 //! rule 9 needs no hook: every connection backend3 opens goes through
@@ -35,7 +42,7 @@
 //! the names the injected lines use are imported below even before anything
 //! uses them.
 
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{future::IntoFuture, net::SocketAddr, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{Router as AxumRouter, ServiceExt, extract::Request};
@@ -61,6 +68,8 @@ use loco_rs::{
     task::Tasks,
 };
 use migration::Migrator;
+use prometheus_client::registry::Registry;
+use tokio::{net::TcpListener, sync::watch};
 use tower::Layer;
 use tower_http::normalize_path::{NormalizePath, NormalizePathLayer};
 
@@ -78,13 +87,14 @@ use crate::{
     controllers::{
         self,
         admin_ui::{self, DistRequirement},
+        metrics::{self, HttpMetrics, Metrics},
         not_found,
     },
     domain::{
         clock::Clock,
         database_target::{self, Connection},
     },
-    settings::Settings,
+    settings::{METRICS_BINDING_KEY, METRICS_PORT_KEY, MetricsSettings, Settings},
 };
 
 /// The Loco application.
@@ -238,6 +248,109 @@ pub fn enforce_database_guard(environment: &Environment, config: &Config) -> Res
     database_target::check(&environment.to_string(), &connections).map_err(Error::msg)
 }
 
+/// The bound listener of `settings.metrics`, from [`bind_metrics_listener`].
+///
+/// A type of its own, so that [`serve_until`] cannot be handed its two
+/// listeners the wrong way round: that would serve `/metrics` on the routed
+/// HTTP port (ADR 0023 §9).
+#[derive(Debug)]
+pub struct MetricsListener(TcpListener);
+
+impl MetricsListener {
+    /// The address the listener is bound to.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when it cannot be read.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.0.local_addr()
+    }
+}
+
+/// Binds the `/metrics` listener of `settings.metrics`.
+///
+/// - `settings`: the IP address and port to listen on. Exactly that one
+///   address is bound, never a fallback: [`Settings`] accepts no host name.
+///
+/// # Errors
+///
+/// Returns an [`Error::Message`] naming the address and both setting keys
+/// when the address cannot be bound, for example because a second server
+/// started with the same `settings.metrics.port`.
+pub async fn bind_metrics_listener(settings: &MetricsSettings) -> Result<MetricsListener> {
+    let address = SocketAddr::new(settings.binding, settings.port);
+    match TcpListener::bind(address).await {
+        Ok(listener) => Ok(MetricsListener(listener)),
+        Err(error) => Err(Error::Message(format!(
+            "Refusing to start: cannot listen for /metrics on {address} \
+             ({METRICS_BINDING_KEY}, {METRICS_PORT_KEY}; the port must be free): {error}"
+        ))),
+    }
+}
+
+/// Serves the application router on `http` and [`metrics::router`] on
+/// `metrics_listener` until `shutdown` resolves, then shuts both down
+/// gracefully.
+///
+/// - `http`: the HTTP server's listener.
+/// - `app`: the router Loco built; [`trim_trailing_slash`] goes in front of
+///   it, with the client address as connect info, as in Loco's `serve`.
+/// - `metrics_listener`: the listener of `settings.metrics`.
+/// - `metrics`: the registry that the metrics listener serves.
+/// - `shutdown`: resolves when the process should stop (Loco's
+///   `shutdown_signal`, or a channel in tests).
+/// - `on_shutdown`: `Hooks::on_shutdown`.
+///
+/// The public and the metrics side take different types, so they cannot be
+/// swapped. On shutdown it keeps Loco's order (log, `on_shutdown`, then
+/// drain), and a watch channel stops the metrics listener on the same signal.
+/// Both servers run in this task with [`tokio::try_join!`], never
+/// `tokio::spawn` (ADR 0008 "Enforcement", ADR 0016 §3); an initializer's
+/// `before_run` would need a spawn, because Loco awaits it before serving.
+///
+/// # Errors
+///
+/// Returns the I/O error of the server that failed first; the other is
+/// dropped.
+pub async fn serve_until(
+    http: TcpListener,
+    app: AxumRouter,
+    metrics_listener: MetricsListener,
+    metrics: Metrics,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+    on_shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let (stop_metrics, mut metrics_stopping) = watch::channel(false);
+    let service = ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(
+        trim_trailing_slash(app),
+    );
+    let http_server = axum::serve(http, service).with_graceful_shutdown(async move {
+        shutdown.await;
+        tracing::info!("shutting down...");
+        // `send_replace` succeeds even if the metrics server already ended.
+        stop_metrics.send_replace(true);
+        on_shutdown.await;
+    });
+    let metrics_server = axum::serve(metrics_listener.0, metrics::router(metrics))
+        .with_graceful_shutdown(async move {
+            // An error means the sender was dropped together with the HTTP
+            // server's future; the metrics listener stops then as well.
+            let _ = metrics_stopping.wait_for(|stopping| *stopping).await;
+        });
+    tokio::try_join!(http_server.into_future(), metrics_server.into_future())?;
+    Ok(())
+}
+
+/// The [`Metrics`] that `after_context` put into the shared store.
+fn shared_metrics(ctx: &AppContext) -> Result<Metrics> {
+    ctx.shared_store.get::<Metrics>().ok_or_else(|| {
+        Error::string(
+            "the metrics registry is missing from the shared store; App::after_context \
+             registers it, so this context was not built by App::boot",
+        )
+    })
+}
+
 #[async_trait]
 impl Hooks for App {
     fn app_name() -> &'static str {
@@ -255,20 +368,30 @@ impl Hooks for App {
         )
     }
 
-    /// Registers the system clock as the app clock. Loco calls this hook at
-    /// the end of `create_context`, where every entry point builds its
-    /// context (server, workers, tasks, CLI and test harness; loco-rs 1.2.0
-    /// `src/boot.rs`, `src/cli.rs`), so the clock is there before any other
-    /// hook, initializer, route or worker runs.
+    /// Registers the system clock as the app clock, then creates the metrics
+    /// registry of this context and registers every metric family on it
+    /// (ADR 0023 §9). Loco calls this hook at the end of `create_context`,
+    /// where every entry point builds its context (server, workers, tasks,
+    /// CLI and test harness; loco-rs 1.2.0 `src/boot.rs`, `src/cli.rs`), so
+    /// the clock and the registry are there before any other hook,
+    /// initializer, route or worker runs. Tasks get a registry as well; an
+    /// unused one costs a few allocations.
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
         set_clock(&ctx, Arc::new(SystemClock));
+        let mut registry = Registry::default();
+        let http = HttpMetrics::register(&mut registry);
+        // Later families (pool, queue, logins, uploads) register here, on
+        // the same registry, before it is frozen.
+        ctx.shared_store.insert(Metrics::new(registry, http));
         Ok(ctx)
     }
 
     async fn load_config(env: &Environment) -> Result<Config> {
         let config = env.load()?;
         enforce_database_guard(env, &config)?;
-        Settings::from_section(config.settings.as_ref()).map_err(Error::msg)?;
+        Settings::from_section(config.settings.as_ref())
+            .and_then(|settings| settings.check_server_port(config.server.port))
+            .map_err(Error::msg)?;
         Ok(config)
     }
 
@@ -282,26 +405,39 @@ impl Hooks for App {
 
     /// Serves the router like Loco's default `serve` (same listener, connect
     /// info and graceful shutdown), with [`trim_trailing_slash`] in front of
-    /// it.
+    /// it, and `/metrics` on the listener of `settings.metrics`
+    /// ([`serve_until`]).
     async fn serve(app: AxumRouter, ctx: &AppContext, serve_params: &ServeParams) -> Result<()> {
+        let settings = Settings::from_section(ctx.config.settings.as_ref()).map_err(Error::msg)?;
+        let metrics = shared_metrics(ctx)?;
         // Same address format as loco-rs 1.2.0's default implementation.
-        let listener = tokio::net::TcpListener::bind(&format!(
-            "{}:{}",
-            serve_params.binding, serve_params.port
-        ))
-        .await?;
-        let service = ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(
-            trim_trailing_slash(app),
+        let http =
+            TcpListener::bind(&format!("{}:{}", serve_params.binding, serve_params.port)).await?;
+        let metrics_listener = bind_metrics_listener(&settings.metrics).await?;
+        // Loco's banner names only the HTTP address.
+        tracing::info!(
+            binding = %settings.metrics.binding,
+            port = settings.metrics.port,
+            "serving /metrics on its own port"
         );
         let shutdown_ctx = ctx.clone();
-        axum::serve(listener, service)
-            .with_graceful_shutdown(async move {
-                shutdown_signal().await;
-                tracing::info!("shutting down...");
-                Self::on_shutdown(&shutdown_ctx).await;
-            })
-            .await?;
+        serve_until(
+            http,
+            app,
+            metrics_listener,
+            metrics,
+            shutdown_signal(),
+            async move { Self::on_shutdown(&shutdown_ctx).await },
+        )
+        .await?;
         Ok(())
+    }
+
+    /// Wraps the router, after Loco's middleware stack, in the HTTP request
+    /// metrics layer ([`metrics::with_http_metrics`]).
+    async fn after_routes(router: AxumRouter, ctx: &AppContext) -> Result<AxumRouter> {
+        let metrics = shared_metrics(ctx)?;
+        Ok(metrics::with_http_metrics(router, metrics.http().clone()))
     }
 
     async fn before_routes(ctx: &AppContext) -> Result<AxumRouter<AppContext>> {
