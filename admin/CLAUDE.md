@@ -65,6 +65,15 @@ ADR 0005 (bindings) before changing anything here.
   A new production dependency must pass `npm run licenses`; a licence that is
   not in `license-policy.json` is added only in a PR that states why it may be
   combined with AGPL-3.0-only (ADR 0022 §4).
+- **Pinned majors.** `../.github/dependabot.yml` keeps Dependabot's version
+  updates off the majors the ADRs pin: `@types/node` on the `.node-version`
+  major, react-router 7, ra-core 5 and its peers, React 19, Vite 8,
+  Tailwind 4 and tailwind-merge 3, the kit's `shadcn` and `@base-ui/react`,
+  and TipTap 3 with its ProseMirror pins. A PR that moves one of them on
+  purpose (a Node.js LTS move, a kit re-sync) bumps the package itself and
+  adjusts its rule there. Security updates are not filtered by these rules;
+  close a security PR that leaves a pinned major and fix the advisory with a
+  deliberate bump.
 - **Configuration is explicit.** Only `src/main.tsx` reads `import.meta.env`
   or `window`; everything else gets its configuration as arguments or props.
 - **The build-time source commit.** `VITE_SOURCE_COMMIT` is empty or a full

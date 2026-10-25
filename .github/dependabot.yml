@@ -3,15 +3,69 @@
 # Commit-message prefixes (ADR 0012 section 3): Dependabot's prefix sets both
 # the commit message and the PR title, and it inserts ": " after a prefix that
 # ends in ")". The resulting titles, for example
-# "build(api): bump serde from 1.0.1 to 1.0.2", pass the "PR title" check.
+# "build(api): Bump serde from 1.0.1 to 1.0.2", pass the "PR title" check.
 # `include: scope` is deliberately not set; it would add a second scope.
 #
-# Ignored on purpose (ADR 0024 section 3): loco-rs and the sea-orm crates.
-# loco-rs is pinned exactly and its agent skill is vendored from the locked
-# crate, so a bump is a dedicated PR that re-syncs and re-reads the skill;
-# Sea-ORM moves with Loco.
+# Ignore rules. backend3 follows version decisions that Dependabot cannot see:
+# Loco 1.2.0 fixes the versions of the crates whose types cross its API
+# (ADR 0024 section 3; loco-rs@1.2.0:Cargo.toml), and the ADRs pin the majors
+# of the admin stack and the editor (ADR 0004, ADR 0005, ADR 0013). How the
+# rules are written:
+# - Every rule carries its reason and the ADR or upstream fact behind it.
+# - A rule ignores update types, not the dependency, so patch releases (and
+#   minor releases of packages at 1.0 or later) keep flowing. `update-types`
+#   is relative to the version in use, so after a deliberate bump moves a
+#   dependency, its rule keeps holding at the new version.
+# - Dependabot's Cargo support follows Cargo's rule for 0.x crates: from
+#   0.y.z, a move to 0.(y+1) is a semver-major update, and a semver-major rule
+#   ignores every version from 0.(y+1) on (`ignored_major_versions` and
+#   `update_type` in dependabot-core@77f70df:cargo/lib/dependabot/cargo/version.rb).
+#   So semver-major alone keeps a 0.x crate on its minor line, and its patch
+#   releases still flow. The commit metadata of a Dependabot PR may still call
+#   such a move "semver-minor" (#188's did); the ignore rules do not use it.
+# - Only loco-rs and the Sea-ORM crates are ignored entirely (ADR 0024
+#   section 3).
+# - The `update-types` rules filter version updates only. A security-update
+#   job applies a rule's version ranges but not its `update-types`
+#   (`ignored_versions` in
+#   dependabot-core@77f70df:common/lib/dependabot/config/ignore_condition.rb).
+#   The whole-dependency rules reach the job as the range ">= 0" (the job
+#   definition of Dependabot's cargo run lists them so, and
+#   `calculate_update_config` in
+#   dependabot-core@77f70df:updater/lib/dependabot/job.rb turns that range
+#   into the rule's versions), so they hold back security PRs as well. Close
+#   a security PR that leaves Loco's versions or an ADR pin, and fix the
+#   advisory with a deliberate bump (for a crate that Loco fixes, the Loco
+#   bump). Dependabot alerts, and for crates the weekly
+#   `cargo-deny check advisories` job (ADR 0022), report the advisory either
+#   way.
+# - A rule for a package that is not a dependency yet (marked "not a
+#   dependency yet" below) does nothing until the slice that adds the package.
+#   It is listed now so that the first run after that slice already follows
+#   the ADR; that slice checks that the rule's reason still holds.
+# - A rule is lifted or changed by the PR that moves the coupled stack on
+#   purpose (a Loco bump, a Node.js LTS move, a kit re-sync); that PR bumps the
+#   dependency itself and edits the rule. Dependabot's ignore comment commands
+#   are not used: GitHub stores them centrally, outside the repository (GitHub
+#   docs, "Managing pull requests for dependency updates"), so no review sees
+#   them and removing a rule here does not clear them.
 version: 2
 updates:
+  # The Rust workspace: Cargo.toml (backend3) and migration/Cargo.toml.
+  #
+  # Dependabot rewrites only the [workspace.dependencies] table of this root
+  # manifest, never the requirements in backend3's own [dependencies] and
+  # [dev-dependencies] (`workspace_root_manifest?` in
+  # dependabot-core@77f70df:cargo/lib/dependabot/cargo/file_updater.rb,
+  # which hands the root manifest to the workspace-only updater in
+  # file_updater/workspace_manifest_updater.rb). An update outside such a
+  # requirement therefore arrives as a Cargo.lock-only PR that fails every
+  # `--locked` job, as #188 and #190 did. Close such a PR and make the bump by
+  # hand: raise the requirement in Cargo.toml, then run `cargo update -p <crate>`.
+  #
+  # Not listed, so all their updates flow: thiserror, serde_path_to_error,
+  # proptest and futures-util. None of their types cross Loco's API, and no
+  # ADR pins them.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -20,10 +74,151 @@ updates:
     commit-message:
       prefix: build(api)
     ignore:
+      # loco-rs is pinned exactly ("=1.2.0"), and the vendored skill in
+      # .claude/skills/loco/ is a byte copy of that crate version. Every bump,
+      # patches included, is a dedicated PR that re-syncs and re-reads the
+      # skill (ADR 0024 section 3, scripts/sync-loco-skill.sh).
       - dependency-name: loco-rs
+      # Sea-ORM moves with Loco, in the same kind of dedicated PR (ADR 0024
+      # section 3; loco-rs 1.2.0 requires sea-orm "2.0"). `sea-orm-*` covers
+      # sea-orm-migration in migration/Cargo.toml.
       - dependency-name: sea-orm
       - dependency-name: sea-orm-*
 
+      # Loco's HTTP stack. loco-rs 1.2.0 requires axum "0.8.1", tower "0.5"
+      # and tower-http "0.6.8", and backend3 hands routers, layers and services
+      # across Loco's API (`Hooks::serve`, `Hooks::before_routes`, ADR 0004
+      # section 3). Cargo.toml asks for the same minor, so the graph keeps one
+      # copy of each. A new 0.x minor line comes with the Loco bump that moves
+      # Loco's own requirement. #188 showed why for tower-http: with the
+      # requirement raised, 0.7.1 builds as a second copy next to Loco's
+      # 0.6.11, and it changes how ServeDir reports I/O errors
+      # (tower-rs/tower-http#718), which the /admin routing table of ADR 0004
+      # section 3 is built on.
+      - dependency-name: axum
+        update-types: ["version-update:semver-major"]
+      - dependency-name: tower
+        update-types: ["version-update:semver-major"]
+      - dependency-name: tower-http
+        update-types: ["version-update:semver-major"]
+      # Loco's test harness (feature `testing`) is built on axum-test
+      # "17.0.1": loco_rs::testing::RequestConfig converts only into axum-test
+      # 17's TestServerConfig, which tests/support/mod.rs passes to
+      # TestServer. Another major does not compile (tried with 21.1.0, #190).
+      - dependency-name: axum-test
+        update-types: ["version-update:semver-major"]
+      # loco-rs 1.2.0 requires tokio "1.45". backend3's #[tokio::main]
+      # runtime and the listener of `App::serve` must be the tokio that Loco's
+      # server, queue and connection pool run on; a tokio 2 comes with Loco.
+      - dependency-name: tokio
+        update-types: ["version-update:semver-major"]
+      # Loco's API is written in serde 1 and serde_json 1: the `settings:`
+      # section reaches src/settings.rs as a serde_json::Value, and Loco's
+      # `format::json` takes a serde::Serialize. A new major would be a second,
+      # unrelated set of traits and types; it comes with Loco.
+      - dependency-name: serde
+        update-types: ["version-update:semver-major"]
+      - dependency-name: serde_json
+        update-types: ["version-update:semver-major"]
+      # backend3 implements Loco's and sea-orm-migration's traits (Hooks,
+      # MigrationTrait) with #[async_trait], and each impl must expand the way
+      # the trait itself was expanded (loco-rs 1.2.0 requires async-trait
+      # "0.1.74"). A new 0.x minor line comes with Loco.
+      - dependency-name: async-trait
+        update-types: ["version-update:semver-major"]
+      # Loco installs the log subscriber (tracing-subscriber 0.3 on
+      # tracing-core 0.1; loco-rs 1.2.0 requires tracing "0.1.40"). Events
+      # from a tracing release on another tracing-core line would reach a
+      # dispatcher with no subscriber, so backend3's logs would vanish without
+      # a compile error. A new 0.x minor line comes with Loco.
+      - dependency-name: tracing
+        update-types: ["version-update:semver-major"]
+      # The database-target guard (src/domain/database_target.rs, ADR 0024
+      # section 4) parses connection URIs with the url crate that sqlx 0.9
+      # uses. The guard and the /admin path classifier
+      # (src/domain/admin_path.rs) decode with the percent-encoding crate that
+      # sqlx and tower-http's ServeDir use. So they see hosts and paths
+      # exactly as the driver and the file server do (Cargo.toml). A new major
+      # would split them; it comes with the Loco bump that moves sqlx and
+      # tower-http.
+      - dependency-name: url
+        update-types: ["version-update:semver-major"]
+      - dependency-name: percent-encoding
+        update-types: ["version-update:semver-major"]
+      # ts-rs is pinned at major 12, as in Loco's template (ADR 0005
+      # section 2). A new major can rewrite the committed admin/src/bindings/
+      # (the `Contract` job), so it is a contract decision, not a routine bump.
+      - dependency-name: ts-rs
+        update-types: ["version-update:semver-major"]
+      # utoipa is pinned at major 6 for the /api/v1 OpenAPI document
+      # (ADR 0005 section 2). Not a dependency yet: the ADR 0005 section 5
+      # spike adds it.
+      - dependency-name: utoipa
+        update-types: ["version-update:semver-major"]
+      # The importer's MySQL driver is sqlx with its `mysql` feature, behind
+      # the `import-mysql` Cargo feature (ADR 0022 section 2). It must be the
+      # sqlx that Sea-ORM 2.0 and loco-rs 1.2.0 use (0.9), so that the feature
+      # unifies into that one copy (ADR 0002). A new 0.x minor line comes with
+      # Loco. Not a dependency yet: the importer slice adds it.
+      - dependency-name: sqlx
+        update-types: ["version-update:semver-major"]
+      # More crates whose types cross Loco 1.2.0's API (loco-rs@1.2.0:
+      # Cargo.toml and src/prelude.rs). Each must stay on the line loco-rs
+      # 1.2.0 requires; another major would be a second copy whose types do
+      # not fit Loco's, and it comes with Loco. Not dependencies yet: the
+      # slices that use them add them.
+      # - validator "0.20.0": `Validatable::validator` returns a
+      #   Box<dyn validator::Validate>, and models declare their field rules
+      #   through Validatable (CLAUDE.md rule 4).
+      # - chrono "0.4": the prelude's DateTime is chrono::NaiveDateTime, and
+      #   Sea-ORM 2.0's DateTimeWithTimeZone, ts-rs's `chrono-impl` and the
+      #   DTOs' instants are chrono 0.4 types (ADR 0005 section 3, ADR 0010).
+      # - uuid "1.10.0": users.pid is a sea_orm::prelude::Uuid, which is
+      #   uuid 1 (ADR 0006 section 1, ADR 0009).
+      # - axum-extra "0.10": the prelude re-exports
+      #   axum_extra::extract::cookie, the cookie types for the admin session
+      #   cookie (ADR 0006 section 1).
+      # - jsonwebtoken "10.3.0" (feature `auth`): `auth::jwt::JWT::validate`
+      #   returns a jsonwebtoken TokenData, and backend3 keeps Loco's JWT
+      #   (ADR 0006 section 1).
+      - dependency-name: validator
+        update-types: ["version-update:semver-major"]
+      - dependency-name: chrono
+        update-types: ["version-update:semver-major"]
+      - dependency-name: uuid
+        update-types: ["version-update:semver-major"]
+      - dependency-name: axum-extra
+        update-types: ["version-update:semver-major"]
+      - dependency-name: jsonwebtoken
+        update-types: ["version-update:semver-major"]
+      # The server sanitiser (ADR 0013 section 5, docs/design/editor.md
+      # section 7) is pinned: ammonia 4.2.4, html5ever 0.40.1 (whose
+      # serialiser defines the stored HTML, editor.md section 3.8), scraper
+      # 0.29 and cssparser 0.38. scraper and the sanitiser's own parser and
+      # CSS tokenizer must be the copies ammonia uses (ammonia 4.2.4 and
+      # scraper 0.29.0 both require html5ever "^0.40" and cssparser "^0.38.0";
+      # editor.md sections 7.3, 7.5 and 7.6), and the canonical output relies
+      # on ammonia internals, so every upgrade goes through the corpus job
+      # (ADR 0013, "Consequences"). A new major of any of them comes with a
+      # deliberate editor PR; the updates that remain still arrive as PRs and
+      # must pass that job. Not dependencies yet: the editor slice adds them.
+      - dependency-name: ammonia
+        update-types: ["version-update:semver-major"]
+      - dependency-name: html5ever
+        update-types: ["version-update:semver-major"]
+      - dependency-name: scraper
+        update-types: ["version-update:semver-major"]
+      - dependency-name: cssparser
+        update-types: ["version-update:semver-major"]
+
+  # The admin UI's npm project (admin/, ADR 0004).
+  #
+  # Not listed, so all their updates flow: the build and test tools without an
+  # ADR pin (eslint, typescript, typescript-eslint, vitest,
+  # @vitejs/plugin-react, prettier, Playwright and the rest) and the kit's
+  # other runtime libraries (lucide-react, cmdk, sonner and the rest). A
+  # breaking major of one of them fails lint, typecheck, the unit tests or
+  # E2E, and npm refuses an install outside a declared peer range.
   - package-ecosystem: npm
     directory: /admin
     schedule:
@@ -31,6 +226,124 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: build(admin)
+    ignore:
+      # Node.js 24: admin/.node-version pins the major, and the Containerfile's
+      # NODE_VERSION ARG and UBI 9 nodejs-24 image must equal it (ADR 0004
+      # section 2; the `Toolchain` job, ADR 0022 section 3). @types/node
+      # describes one Node.js major, so a newer one lets code type-check
+      # against APIs the runtime lacks; #187 (@types/node 26) passed every
+      # check. The Node.js LTS move is its own PR that changes .node-version,
+      # the Containerfile and @types/node together.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # react-router 7 (ADR 0004 sections 1 and 3, admin/CLAUDE.md): ra-core
+      # 5.15.5 accepts react-router and react-router-dom "^6.28.1 || ^7.1.1"
+      # only, and npm's latest is 8.
+      - dependency-name: react-router
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-router-dom
+        update-types: ["version-update:semver-major"]
+      # ra-core 5 (ADR 0004 section 1): shadcn-admin-kit v2.0.0, vendored in
+      # src/components/admin/, is written against it (the kit needs 5.15.2 or
+      # later). ra-i18n-polyglot and ra-language-english ship with ra-core and
+      # depend on ^5.15.5. A ra-core 6 comes with a re-sync of the kit
+      # (ADR 0004: kit updates are manual).
+      - dependency-name: ra-*
+        update-types: ["version-update:semver-major"]
+      # ra-core 5.15.5's other peer ranges (admin/package-lock.json):
+      # react-hook-form "^7.72.0" and @tanstack/react-query "^5.83.0".
+      - dependency-name: react-hook-form
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tanstack/react-query"
+        update-types: ["version-update:semver-major"]
+      # React 19 (ADR 0004 section 1); ra-core 5.15.5 accepts
+      # "^18.0.0 || ^19.0.0". The type packages follow the runtime major.
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+      # Vite 8 (ADR 0004 section 1; section 2 derives the Node.js floor from
+      # Vite 8's requirement).
+      - dependency-name: vite
+        update-types: ["version-update:semver-major"]
+      # Tailwind 4 (ADR 0004 section 1). @tailwindcss/vite requires the exact
+      # tailwindcss version it ships with.
+      - dependency-name: tailwindcss
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tailwindcss/*"
+        update-types: ["version-update:semver-major"]
+      # tailwind-merge does the class merging in the kit's cn() helper
+      # (src/lib/utils.ts, from the shadcn-admin-kit v2.0.0 registry block,
+      # THIRD_PARTY.md), which the vendored components call. Its 3.x line is
+      # the one for Tailwind 4 (tailwind-merge 3.7.0 README: "Supports Tailwind
+      # v4.0 up to v4.3", with v2.6.0 for Tailwind v3). Its majors do not
+      # follow Tailwind's (1.x and 2.x both support Tailwind v3), so a new
+      # major is a change to the kit's helper: it comes with a kit re-sync
+      # (ADR 0004: kit updates are manual), not as a version bump.
+      - dependency-name: tailwind-merge
+        update-types: ["version-update:semver-major"]
+      # The vendored shadcn/ui primitives in src/components/ui/ (style
+      # base-vega, THIRD_PARTY.md) wrap @base-ui/react 1, and src/index.css
+      # imports the tailwind.css of the `shadcn` package they were installed
+      # with (CLI 4.22.1). The type checker covers neither that CSS nor the
+      # primitives' behaviour, so a new major comes with a registry re-sync of
+      # the kit and its primitives (ADR 0004: kit updates are manual), not as a
+      # version bump.
+      - dependency-name: shadcn
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@base-ui/react"
+        update-types: ["version-update:semver-major"]
+      # TipTap 3 (ADR 0013 section 2, docs/design/editor.md section 4.1): every
+      # @tiptap/* package is pinned exactly, and so are prosemirror-view,
+      # prosemirror-model and prosemirror-tables under them, because the
+      # serialiser relies on a prosemirror-model internal and the paste filter
+      # on prosemirror-view's paste order. Each minor or patch update must pass
+      # the private corpus job before it merges. Not dependencies yet: the
+      # editor slice adds them. If it pins prosemirror-* through npm overrides
+      # only, Dependabot's version updates (direct dependencies only) never
+      # propose them, and their rule stays idle.
+      - dependency-name: "@tiptap/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: prosemirror-*
+        update-types: ["version-update:semver-major"]
+    # Groups only for packages that are released together and require each
+    # other's exact version (admin/package-lock.json): one PR per release keeps
+    # them in step, where separate PRs would install a second copy or break a
+    # peer range. Nothing else is grouped, because a combined PR that fails
+    # hides which package broke it and holds back the others. Majors stay out
+    # of the groups, so a deliberate major is always its own PR. Group names
+    # stay short: they go into the PR title, which the "PR title" check limits
+    # to 90 characters (ADR 0012 section 3).
+    groups:
+      # react-dom 19.3.1 requires react "^19.3.1".
+      react:
+        patterns: ["react", "react-dom"]
+        update-types: ["minor", "patch"]
+      # @types/react-dom 19.3.0 requires @types/react "^19.3.0".
+      react-types:
+        patterns: ["@types/react", "@types/react-dom"]
+        update-types: ["minor", "patch"]
+      # react-router-dom 7.18.4 depends on react-router "7.18.4" exactly.
+      react-router:
+        patterns: ["react-router", "react-router-dom"]
+        update-types: ["minor", "patch"]
+      # ra-core, ra-i18n-polyglot and ra-language-english share one version.
+      react-admin:
+        patterns: ["ra-*"]
+        update-types: ["minor", "patch"]
+      # @tailwindcss/vite 4.3.3 depends on tailwindcss "4.3.3" exactly.
+      tailwind:
+        patterns: ["tailwindcss", "@tailwindcss/*"]
+        update-types: ["minor", "patch"]
+      # Every @tiptap/* package is the same exact version (editor.md
+      # section 4.1).
+      tiptap:
+        patterns: ["@tiptap/*"]
+        update-types: ["minor", "patch"]
 
   # Keeps the commit-SHA pins in .github/workflows/ current and rewrites their
   # version comments.
