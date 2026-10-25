@@ -3,8 +3,14 @@
 //!
 //! [`decide`] is the whole decision, with the rule kept for the removal
 //! report; [`filter`] is its shape for ammonia's `attribute_filter`. Both
-//! read only the tables of [`super::policy`], so a table change is the only
-//! way to change what the filter does.
+//! read only policy data: the tables of [`super::policy`] and, for `style`,
+//! the CSS grammar of [`super::css::grammar`]. A change to either is a
+//! policy change and the only way to change what the filter does.
+//!
+//! The removal report classifies a `style` with the same grammar:
+//! [`decide_style`] for the styles the filter decides, and
+//! [`forced_style_rule`] for the `table` and `tbody` styles, which ammonia
+//! forces before the filter sees them.
 //!
 //! ammonia also calls the filter for the attributes of elements it is about
 //! to unwrap or remove; those answers are never written, so the filter drops
@@ -13,6 +19,7 @@
 
 use std::borrow::Cow;
 
+use super::css;
 use super::policy::{SanitizePolicy, ValueRule, element_rule};
 use super::report::RemovalRule;
 use super::url_rules;
@@ -45,9 +52,7 @@ pub fn decide<'a>(
     };
     let keep = |kept: &'a str| Decision::Keep(Cow::Borrowed(kept));
     match rule.rule {
-        // The CSS grammar of editor.md §3.3 is not part of this policy yet,
-        // so no style is stored.
-        ValueRule::Style => Decision::Drop(RemovalRule::StyleRejected),
+        ValueRule::Style => decide_style(element, value).0,
         // `rel` passes through: ammonia's `link_rel` wrote it.
         ValueRule::Text | ValueRule::LinkRel => keep(value),
         ValueRule::Marker => Decision::Keep(Cow::Borrowed("")),
@@ -72,6 +77,76 @@ pub fn decide<'a>(
             Decision::Drop(RemovalRule::LinkHrefRejected),
             Decision::Keep,
         ),
+    }
+}
+
+/// Decides a `style` attribute with the CSS grammar, and names the rule the
+/// removal report records for it, if any.
+///
+/// The rule is [`RemovalRule::StyleRejected`] when no declaration is left
+/// because some were removed, [`RemovalRule::DefaultValueOmitted`] when none
+/// is left because the attribute was empty or held only defaults,
+/// [`RemovalRule::StyleDeclarationRejected`] when some declarations were
+/// removed and others kept, and [`RemovalRule::ValueCanonicalised`] when
+/// every declaration was kept but the value was re-spelled. The report and
+/// the filter both call this, so they cannot disagree. A forced style never
+/// reaches it: see [`forced_style_rule`].
+///
+/// - `element`: the tag name, as the HTML parser reports it.
+/// - `value`: the `style` value, after character references are decoded.
+#[must_use]
+pub fn decide_style<'a>(element: &str, value: &'a str) -> (Decision<'a>, Option<RemovalRule>) {
+    let style = css::sanitize_style(element, value);
+    match style.css {
+        None => {
+            let rule = if style.rejected > 0 {
+                RemovalRule::StyleRejected
+            } else {
+                RemovalRule::DefaultValueOmitted
+            };
+            (Decision::Drop(rule), Some(rule))
+        }
+        Some(kept) => {
+            let rule = if style.rejected > 0 {
+                Some(RemovalRule::StyleDeclarationRejected)
+            } else {
+                (kept != value).then_some(RemovalRule::ValueCanonicalised)
+            };
+            let kept = if kept == value {
+                Cow::Borrowed(value)
+            } else {
+                Cow::Owned(kept)
+            };
+            (Decision::Keep(kept), rule)
+        }
+    }
+}
+
+/// The rule the removal report records for a `style` that the policy
+/// forces (`table` and `tbody`, editor.md §7.3), or `None` when the input
+/// already held the forced value.
+///
+/// ammonia writes `forced` whatever the input held, so the filter never
+/// decides this attribute. The grammar still classifies what the input
+/// lost: [`RemovalRule::StyleDeclarationRejected`] when it rejects a
+/// declaration (a legacy `width: 100%` on a table), and otherwise
+/// [`RemovalRule::ValueCanonicalised`] when the value is not `forced` byte
+/// for byte (an empty style, another order, another case). The attribute is
+/// never removed, so [`RemovalRule::StyleRejected`] cannot occur here.
+///
+/// - `element`: the tag name, as the HTML parser reports it.
+/// - `value`: the `style` value in the input, after character references
+///   are decoded.
+/// - `forced`: the value the policy forces on the element
+///   ([`super::policy::TABLE_STYLE`] or [`super::policy::TBODY_STYLE`]).
+#[must_use]
+pub fn forced_style_rule(element: &str, value: &str, forced: &str) -> Option<RemovalRule> {
+    if css::sanitize_style(element, value).rejected > 0 {
+        Some(RemovalRule::StyleDeclarationRejected)
+    } else {
+        // Compared with the forced value, not with the grammar's output: the
+        // grammar keeps the source order, ammonia writes the one spelling.
+        (value != forced).then_some(RemovalRule::ValueCanonicalised)
     }
 }
 
@@ -121,7 +196,9 @@ fn integer(value: &str, min: u32, max: u32, default: Option<u32>) -> Decision<'_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::rich_text::policy::{ELEMENTS, IFRAME_ALLOW, IFRAME_REFERRER_POLICY};
+    use crate::domain::rich_text::policy::{
+        ELEMENTS, IFRAME_ALLOW, IFRAME_REFERRER_POLICY, TABLE_STYLE, TBODY_STYLE,
+    };
     use proptest::prelude::*;
 
     fn run<'a>(element: &str, attribute: &str, value: &'a str) -> Decision<'a> {
@@ -241,15 +318,102 @@ mod tests {
     }
 
     #[test]
-    fn style_and_unlisted_attributes_are_dropped() {
+    fn styles_go_through_the_css_grammar() {
+        assert_eq!(run("td", "style", "width: 10px"), kept("width: 10px"));
         assert_eq!(
-            run("td", "style", "width: 10px"),
+            run("span", "style", "COLOR: red"),
+            Decision::Keep(Cow::Owned("color: #ff0000".into()))
+        );
+        assert_eq!(
+            run("p", "style", "color: red"),
             Decision::Drop(RemovalRule::StyleRejected)
         );
         assert_eq!(
             run("p", "style", ""),
-            Decision::Drop(RemovalRule::StyleRejected)
+            Decision::Drop(RemovalRule::DefaultValueOmitted)
         );
+        // The table styles are forced: ammonia writes the one value.
+        assert_eq!(run("table", "style", "width: 100%"), kept(TABLE_STYLE));
+        assert_eq!(run("tbody", "style", ""), kept(TBODY_STYLE));
+    }
+
+    #[test]
+    fn the_style_rule_says_what_happened() {
+        let rule = |element, value| decide_style(element, value).1;
+        assert_eq!(rule("span", "color: #ff0000"), None);
+        assert_eq!(
+            rule("span", "color: red"),
+            Some(RemovalRule::ValueCanonicalised)
+        );
+        assert_eq!(
+            rule("span", "color: #ff0000; font-family: Calibri"),
+            Some(RemovalRule::StyleDeclarationRejected)
+        );
+        assert_eq!(
+            rule("span", "font-family: Calibri"),
+            Some(RemovalRule::StyleRejected)
+        );
+        assert_eq!(
+            rule("ul", "list-style-type: disc"),
+            Some(RemovalRule::DefaultValueOmitted)
+        );
+        assert_eq!(
+            rule("img", "width: 350px"),
+            Some(RemovalRule::ValueCanonicalised),
+            "the locked declarations are added"
+        );
+        assert_eq!(
+            decide_style("span", "color: #ff0000; font-family: Calibri").0,
+            Decision::Keep(Cow::Owned("color: #ff0000".into()))
+        );
+    }
+
+    #[test]
+    fn a_forced_style_names_what_it_lost() {
+        let table = |value| forced_style_rule("table", value, TABLE_STYLE);
+        assert_eq!(table(TABLE_STYLE), None);
+        // The legacy table width of editor.md §3.4 is a removal.
+        assert_eq!(
+            table("width: 100%"),
+            Some(RemovalRule::StyleDeclarationRejected)
+        );
+        assert_eq!(
+            table("width: 100%; border-collapse: collapse"),
+            Some(RemovalRule::StyleDeclarationRejected)
+        );
+        assert_eq!(
+            table("border-collapse: separate; max-width: fit-content"),
+            Some(RemovalRule::StyleDeclarationRejected)
+        );
+        // Nothing lost, but not the one spelling.
+        assert_eq!(table(""), Some(RemovalRule::ValueCanonicalised));
+        assert_eq!(
+            table("border-collapse: collapse"),
+            Some(RemovalRule::ValueCanonicalised)
+        );
+        assert_eq!(
+            table("max-width: fit-content; border-collapse: collapse"),
+            Some(RemovalRule::ValueCanonicalised),
+            "the grammar keeps this order, ammonia does not"
+        );
+        assert_eq!(
+            table(&TABLE_STYLE.to_uppercase()),
+            Some(RemovalRule::ValueCanonicalised)
+        );
+        let tbody = |value| forced_style_rule("tbody", value, TBODY_STYLE);
+        assert_eq!(tbody(TBODY_STYLE), None);
+        assert_eq!(
+            tbody("display: table"),
+            Some(RemovalRule::StyleDeclarationRejected)
+        );
+        assert_eq!(
+            tbody("display: TABLE-ROW-GROUP"),
+            Some(RemovalRule::ValueCanonicalised)
+        );
+    }
+
+    #[test]
+    fn unlisted_attributes_are_dropped() {
         for (element, attribute) in [
             ("p", "class"),
             ("a", "onclick"),
@@ -328,6 +492,36 @@ mod tests {
         fn integers_outside_the_range_are_rejected(number in 5001u64..10_000_000_000) {
             let value = number.to_string();
             prop_assert_eq!(run("img", "height", &value), Decision::Drop(RemovalRule::AttributeValueRejected));
+        }
+
+        #[test]
+        fn the_style_rule_is_none_exactly_when_nothing_changed(
+            element in prop::sample::select(&["p", "span", "td", "img", "iframe", "ul", "li"][..]),
+            value in "[a-z0-9:;#. %()/!-]{0,40}",
+        ) {
+            let (decision, rule) = decide_style(element, &value);
+            let unchanged = decision == Decision::Keep(Cow::Borrowed(value.as_str()));
+            prop_assert_eq!(rule.is_none(), unchanged, "{} {:?}", value, decision);
+            if let Decision::Drop(dropped) = decision {
+                prop_assert_eq!(rule, Some(dropped));
+            }
+        }
+
+        #[test]
+        fn a_forced_style_rule_is_none_exactly_for_the_forced_value(
+            forced in prop::sample::select(&[("table", TABLE_STYLE), ("tbody", TBODY_STYLE)][..]),
+            parts in prop::collection::vec(prop::sample::select(&[
+                "border-collapse: collapse", "max-width: fit-content", "display: table-row-group",
+                "BORDER-COLLAPSE: COLLAPSE", "width: 100%", "display: table", "color: red", "", " ",
+            ][..]), 0..4),
+        ) {
+            let (element, forced) = forced;
+            let value = parts.join("; ");
+            let rule = forced_style_rule(element, &value, forced);
+            prop_assert_eq!(rule.is_none(), value == forced, "{}", value);
+            let lost = css::sanitize_style(element, &value).rejected > 0;
+            prop_assert_eq!(rule == Some(RemovalRule::StyleDeclarationRejected), lost, "{}", value);
+            prop_assert_ne!(rule, Some(RemovalRule::StyleRejected));
         }
 
         #[test]

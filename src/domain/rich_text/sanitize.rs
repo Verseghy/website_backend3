@@ -48,8 +48,10 @@
 //! field is set here explicitly; an ammonia default can never decide what is
 //! stored. `filter_style_properties` is the one setting never called: its
 //! filter re-serialises tokens without a grammar and keeps `https:` `url()`
-//! values (ADR 0013 §5), and `style` goes through the attribute filter
-//! instead.
+//! values (ADR 0013 §5), and `style` goes through the attribute filter and
+//! its own grammar, [`super::css`], instead. The `style` of `table` and
+//! `tbody` is wholly locked, so it is a forced attribute like the iframe
+//! ones, which puts it on every table.
 //!
 //! The byte-exact output relies on ammonia internals that the tests below
 //! pin (editor.md §7.4, §13.6, "Pinned ammonia behaviour"):
@@ -408,7 +410,9 @@ fn allow_list() -> Builder<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::rich_text::policy::{IFRAME_ALLOW, IFRAME_REFERRER_POLICY, element_rule};
+    use crate::domain::rich_text::policy::{
+        IFRAME_ALLOW, IFRAME_REFERRER_POLICY, TABLE_STYLE, TBODY_STYLE, element_rule,
+    };
     use crate::domain::rich_text::report::{AMMONIA_FOREIGN_TAGS, RemovalRule, parse_like_ammonia};
     use proptest::prelude::*;
     use scraper::Node;
@@ -445,6 +449,8 @@ mod tests {
 
     const YOUTUBE: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/VIDEOID?start=30" width="640" height="360" title="Videó" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
     const LINK: &str = r#"<p><a href="https://example.org/" target="_blank" rel="noopener noreferrer">link</a></p>"#;
+    const YOUTUBE_STYLED: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/VIDEOID?start=30" width="640" height="360" title="Videó" style="aspect-ratio: 16 / 9; height: auto; max-width: 640px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
+    const PADLET_STYLED: &str = r#"<p data-padlet-embed=""><iframe src="https://padlet.com/embed/KEY" width="100%" height="608" title="Padlet" style="height: 608px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
 
     // editor.md §13.6, "Pinned ammonia behaviour". An ammonia upgrade that
     // changes any of these fails here.
@@ -563,8 +569,68 @@ mod tests {
     #[test]
     fn no_empty_style_is_ever_emitted() {
         assert_eq!(clean(r#"<p style="">x</p>"#), "<p>x</p>");
-        assert_eq!(clean(r#"<p style="text-align: center">x</p>"#), "<p>x</p>");
-        assert!(!clean(r#"<table style="border-collapse: collapse"><tbody><tr><td style="width: 10px">x</td></tr></tbody></table>"#).contains("style"));
+        assert_eq!(clean(r#"<p style=" ; ">x</p>"#), "<p>x</p>");
+        assert_eq!(clean(r#"<p style="color: red">x</p>"#), "<p>x</p>");
+        assert_eq!(
+            clean(r#"<span style="font-family: Calibri; mso-ansi-language: HU">x</span>"#),
+            "<span>x</span>"
+        );
+        assert_eq!(
+            clean(r#"<ul style="list-style-type: disc"><li>x</li></ul>"#),
+            "<ul><li>x</li></ul>"
+        );
+        assert_eq!(
+            clean(r#"<p style="text-align: center">x</p>"#),
+            r#"<p style="text-align: center">x</p>"#
+        );
+    }
+
+    #[test]
+    fn styles_keep_their_allowed_declarations_in_place() {
+        // The filter rewrites the value where it stands, so no attribute
+        // moves (no `swap_remove`).
+        assert_eq!(
+            clean(
+                r#"<img src="/storage/uploads/a.jpg" alt="a" width="350" style="WIDTH: 262.5pt; float: left; height: 495px">"#
+            ),
+            r#"<img src="/storage/uploads/a.jpg" alt="a" width="350" style="width: 350px; display: block; height: auto; margin: 0 auto; max-width: 100%">"#
+        );
+        assert_eq!(
+            clean(r#"<p style="text-align:CENTER; margin-bottom: 0" class="MsoNormal">x</p>"#),
+            r#"<p style="text-align: center">x</p>"#
+        );
+        // ammonia hands the filter the decoded value, so a character
+        // reference cannot hide a string or a URL.
+        assert_eq!(
+            clean(r#"<span style="color: red; background: &#117;rl(x)">x</span>"#),
+            r#"<span style="color: #ff0000">x</span>"#
+        );
+        assert_eq!(
+            clean(r#"<span style="color: &quot;red&quot;">x</span>"#),
+            "<span>x</span>"
+        );
+    }
+
+    #[test]
+    fn every_table_gets_its_locked_style() {
+        assert_eq!(
+            clean(
+                r#"<table style="width: 100%; border-collapse: separate"><tbody><tr><td style="width: 10px">x</td></tr></tbody></table>"#
+            ),
+            format!(
+                r#"<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><td style="width: 10px">x</td></tr></tbody></table>"#
+            )
+        );
+        // A case variant matches the allow-list and is overwritten in place.
+        assert_eq!(
+            clean(&format!(
+                r#"<table style="{}"><tbody><tr><td>x</td></tr></tbody></table>"#,
+                TABLE_STYLE.to_uppercase()
+            )),
+            format!(
+                r#"<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><td>x</td></tr></tbody></table>"#
+            )
+        );
     }
 
     #[test]
@@ -572,7 +638,9 @@ mod tests {
         let input = "<table><caption>Cím</caption><tbody><tr><td>x</td></tr></tbody></table>";
         assert_eq!(
             ammonia(input),
-            "<table>Cím<tbody><tr><td>x</td></tr></tbody></table>"
+            format!(
+                r#"<table style="{TABLE_STYLE}">Cím<tbody style="{TBODY_STYLE}"><tr><td>x</td></tr></tbody></table>"#
+            )
         );
         // The structural pass parses that again, and the parser moves the
         // text in front of the table (editor.md §3.5): the second pass
@@ -580,7 +648,9 @@ mod tests {
         assert_eq!(
             passes(input),
             (
-                "Cím<table><tbody><tr><td>x</td></tr></tbody></table>".to_owned(),
+                format!(
+                    r#"Cím<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><td>x</td></tr></tbody></table>"#
+                ),
                 2
             )
         );
@@ -641,7 +711,10 @@ mod tests {
             clean(
                 r#"<table style="s" width="1"><tbody style="s"><tr style="s"><th colspan="c" rowspan="r" style="s" width="1">x</th></tr></tbody></table>"#
             ),
-            r#"<table style="s"><tbody style="s"><tr><th colspan="c" rowspan="r" style="s">x</th></tr></tbody></table>"#
+            format!(
+                r#"<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><th colspan="c" rowspan="r" style="s">x</th></tr></tbody></table>"#
+            ),
+            "the table styles are forced: any other value is dropped, then re-appended"
         );
         assert_eq!(
             clean(r#"<a href="/x" target="_self" title="t">x</a>"#),
@@ -801,10 +874,14 @@ mod tests {
         );
         // Tag soup that the parser repairs by foster parenting: ammonia
         // writes the repaired tree, and the structural pass's fresh parse
-        // turns it into its final shape in the same pass.
+        // turns it into its final shape in the same pass. The table keeps
+        // its forced style; it has no `tbody` to carry one.
         assert_eq!(
             passes("<ul><li><table><li>x</table></ul>"),
-            ("<ul><li></li><li>x</li><table></table></ul>".to_owned(), 2)
+            (
+                format!(r#"<ul><li></li><li>x</li><table style="{TABLE_STYLE}"></table></ul>"#),
+                2
+            )
         );
         // The structural pass's own unwrapping can leave a tree that parses
         // differently: the inner `sub` goes, the two headings become parent
@@ -817,9 +894,13 @@ mod tests {
         // ammonia unwraps the `caption`, and the structural pass's parse
         // fosters the heading it held into the outer heading; the second
         // pass's first parse closes the outer one, and the third confirms.
+        // Here and below, the tables keep their forced style.
         assert_eq!(
             passes("<h2><table><caption><h3>x</h3></caption></table></h2>"),
-            ("<h2></h2><h3>x</h3><table></table>".to_owned(), 3)
+            (
+                format!(r#"<h2></h2><h3>x</h3><table style="{TABLE_STYLE}"></table>"#),
+                3
+            )
         );
         // ammonia's parse fosters the second link out of the table into the
         // inner heading, inside the first link. The structural pass's parse
@@ -831,7 +912,7 @@ mod tests {
             passes(r#"<h2><a href="/x"><h3><table><a href="/x">"#),
             (
                 format!(
-                    "<h2><a {link}></a></h2><h3><a {link}></a><a {link}></a><table></table></h3>"
+                    r#"<h2><a {link}></a></h2><h3><a {link}></a><a {link}></a><table style="{TABLE_STYLE}"></table></h3>"#
                 ),
                 3
             )
@@ -871,7 +952,7 @@ mod tests {
         assert_eq!(
             output,
             format!(
-                "<a {link}></a>{}<blockquote><a {link}>{}x<table></table>{}</a></blockquote>{}",
+                r#"<a {link}></a>{}<blockquote><a {link}>{}x<table style="{TABLE_STYLE}"></table>{}</a></blockquote>{}"#,
                 format!("<blockquote><a {link}></a>").repeat(7),
                 "<blockquote>".repeat(16),
                 "</blockquote>".repeat(16),
@@ -1038,21 +1119,56 @@ mod tests {
     }
 
     #[test]
-    fn style_free_canonical_shapes_are_fixed_points() {
+    fn canonical_shapes_are_fixed_points() {
+        let styled_table = format!(
+            r#"<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><td colspan="2" style="background-color: #d9d9d9; border-bottom: 1px solid #000000; border-left: none; border-right: 1px solid #000000; border-top: 1px solid #000000; box-sizing: content-box; height: 20px; text-align: center; vertical-align: middle; white-space: nowrap; width: 128px"><strong>Eredmény</strong></td></tr></tbody></table>"#
+        );
+        let plain_table = format!(
+            r#"<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><th colspan="2">Fej</th></tr><tr><td rowspan="3">a</td><td>b &amp; c &lt; d</td></tr></tbody></table>"#
+        );
         for shape in [
+            // The shapes of editor.md §3.7, as written there.
+            YOUTUBE_STYLED,
+            PADLET_STYLED,
+            r#"<p><img src="/storage/uploads/posts/612/kep.jpg" alt="A díjazottak a színpadon" width="350" height="495" style="display: block; height: auto; margin: 0 auto; max-width: 100%; width: 350px"></p>"#,
+            r#"<h2 style="text-align: center">Eredmények</h2>"#,
+            r#"<p>Szöveg <strong>félkövér</strong>, <span style="color: #c00000; font-size: 1.25em">piros és nagy</span>.</p>"#,
+            r#"<ul style="list-style-type: circle"><li>pont</li></ul>"#,
+            styled_table.as_str(),
+            plain_table.as_str(),
             YOUTUBE,
             LINK,
             r#"<p data-padlet-embed=""><iframe src="https://padlet.com/embed/KEY" width="100%" height="608" title="Padlet" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#,
             "<h2>Eredmények</h2><p>Szöveg <strong>félkövér</strong>, <em>dőlt</em>, <u>a</u> <s>b</s> H<sub>2</sub>O x<sup>2</sup><br>új sor</p><hr>",
             r#"<ol start="5" type="a"><li>első</li><li><p>két</p><p>bekezdés</p></li></ol><ul><li>pont</li></ul><blockquote>Idézet</blockquote>"#,
-            r#"<table><tbody><tr><th colspan="2">Fej</th></tr><tr><td rowspan="3">a</td><td>b &amp; c &lt; d</td></tr></tbody></table>"#,
-            r#"<p><img src="/storage/uploads/posts/612/kep.jpg" alt="A díjazottak a színpadon" width="350" height="495"></p>"#,
             "<p>a\u{a0}b</p>",
         ] {
             let result = sanitizer().sanitize(shape).unwrap();
             assert_eq!(result.html.as_str(), shape.replace('\u{a0}', "&nbsp;"));
             assert!(result.report.is_empty(), "{shape}: {:?}", result.report);
         }
+    }
+
+    /// An `img` without a `style` is not content-v1: its four locked
+    /// declarations are always present (editor.md §3.3). ammonia calls the
+    /// attribute filter only for attributes that exist, so the grammar never
+    /// sees this image, and the structural pass (`structure.rs`) does not
+    /// have the editor.md §7.5 rule that adds them yet. This pins
+    /// the gap, so the slice that adds the rule changes the expected output
+    /// here instead of meeting it by surprise. The same image with an empty
+    /// `style` reaches the grammar, which adds the declarations: that is the
+    /// output the rule is to give the image without one, which is why the
+    /// rule decides nothing new (editor.md §7.5).
+    #[test]
+    fn an_image_without_a_style_keeps_none_until_its_structural_rule() {
+        let image = r#"<p><img src="/storage/uploads/posts/612/kep.jpg" alt="A díjazottak a színpadon" width="350" height="495"></p>"#;
+        assert_eq!(clean(image), image);
+        let locked =
+            r#" style="display: block; height: auto; margin: 0 auto; max-width: 100%"></p>"#;
+        assert_eq!(
+            clean(&image.replace("></p>", r#" style=""></p>"#)),
+            image.replace("></p>", locked)
+        );
     }
 
     #[test]
@@ -1164,6 +1280,9 @@ mod tests {
         "mailto:a@b.example",
         "#top",
         "color: red",
+        "width: 100%; color: red",
+        "text-align: CENTER",
+        TABLE_STYLE,
         IFRAME_ALLOW,
         IFRAME_REFERRER_POLICY,
         // Case variants that ammonia admits and then overwrites.
@@ -1334,7 +1453,7 @@ mod tests {
         // and nothing else has one.
         #[test]
         fn the_report_accounts_for_every_changed_attribute(
-            tag in prop::sample::select(&["a", "img", "iframe", "ol", "p", "span", "h2"][..]),
+            tag in prop::sample::select(&["a", "img", "iframe", "ol", "p", "span", "h2", "table"][..]),
             attributes in prop::collection::vec((prop::sample::select(POOL_NAMES), prop::sample::select(POOL_VALUES)), 0..8),
         ) {
             let rendered = attributes.iter().map(|(n, v)| format!(r#" {n}="{}""#, v.replace('&', "&amp;").replace('"', "&quot;"))).collect::<Vec<_>>().concat();
@@ -1415,6 +1534,11 @@ mod tests {
                 "<svg>", "<iframe src=\"https://padlet.com/embed/k\" width=\"100%\">", "</iframe>",
                 "<h1>", "<sub>", "<sup>", "<o:p>", "<textarea>", "<plaintext>", "<g>", "<desc>", "<sum>",
                 "<img alt=\"x\">", "<thead>", "<h2>", "<h3>",
+                "<span style=\"COLOR: Red; font-size: 1.256em; font-family: Calibri\">",
+                "<td style=\"border: thin solid; width: 10.5pt; color: red\">", "<tbody style=\"display: table\">",
+                "<img src=\"/storage/uploads/b.png\" alt=\"b\" style=\"width: 350px\">",
+                "<ul style=\"list-style-type: disc\">", "<p style=\"text-align: center; margin: 0\">",
+                "<iframe src=\"https://padlet.com/embed/k\" style=\"height: 608px\">",
             ][..]), 0..24),
         ) {
             let once = sanitizer().sanitize(&parts.concat()).unwrap().html;
