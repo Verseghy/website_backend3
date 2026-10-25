@@ -310,6 +310,12 @@ jobs:
           # smoke-test mode of ADR 0021 section 7. Production images never
           # set it (admin/src/i18n/report-missing-keys.ts).
           VITE_REPORT_MISSING_KEYS: "1"
+          # Adds the development-only clipboard recorder, so its paste flow
+          # runs in Chromium (admin/e2e/clipboard-recorder.spec.ts). The
+          # Containerfile pins it to 0 for images; the Admin test job's
+          # admin/src/recorder/production-bundle.test.ts checks that pin and
+          # that such a build leaves the recorder out.
+          VITE_CLIPBOARD_RECORDER: "1"
         run: npm run build
       - name: Build backend3 (debug)
         run: cargo build --locked

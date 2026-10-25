@@ -90,7 +90,10 @@ RUN npm ci --no-audit --no-fund
 COPY --chown=1001:0 admin/ ./
 # The ts-rs bindings in admin/src/bindings/ are committed, so this stage needs
 # no Rust (ADR 0004 section 2). The chmod makes dist readable for any UID.
-RUN VITE_SOURCE_COMMIT="$SOURCE_COMMIT" npm run build \
+# VITE_CLIPBOARD_RECORDER=0 keeps the development-only clipboard recorder out
+# of every image: an explicit variable wins over any admin/.env* file that
+# the context carries (admin/src/recorder/production-bundle.test.ts).
+RUN VITE_CLIPBOARD_RECORDER=0 VITE_SOURCE_COMMIT="$SOURCE_COMMIT" npm run build \
  && test -f dist/index.html \
  && chmod -R a+rX dist
 

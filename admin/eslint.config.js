@@ -85,6 +85,34 @@ export default defineConfig([
     },
   },
   {
+    // The development-only clipboard recorder (src/recorder/) is reached
+    // only through the dynamic import that main.tsx guards with
+    // __CLIPBOARD_RECORDER__, which the image build drops (admin/CLAUDE.md).
+    // A static import from any other application module would ship its code
+    // in every build. Tests may import it; vite.config.ts is not under src/.
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/main.tsx", "src/recorder/**", "src/**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: [
+                "@/recorder",
+                "@/recorder/*",
+                "**/recorder",
+                "**/recorder/*",
+              ],
+              message:
+                "src/recorder/ is development-only: only main.tsx may load it, through its guarded dynamic import.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // ADR 0021 §7 "No literals": every UI string comes from src/i18n/hu.ts.
     files: ["src/**/*.tsx"],
     ignores: ["src/i18n/**", "src/**/*.test.tsx", "src/test/**"],

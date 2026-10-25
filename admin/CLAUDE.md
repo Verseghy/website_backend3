@@ -76,8 +76,19 @@ ADR 0005 (bindings) before changing anything here.
   adjusts its rule there. Security updates are not filtered by these rules;
   close a security PR that leaves a pinned major and fix the advisory with a
   deliberate bump.
-- **Configuration is explicit.** Only `src/main.tsx` reads `import.meta.env`
-  or `window`; everything else gets its configuration as arguments or props.
+- **Configuration is explicit.** Only `src/main.tsx` reads `import.meta.env`,
+  `window` or the constants `vite.config.ts` defines
+  (`__CLIPBOARD_RECORDER__`); everything else gets its configuration as
+  arguments or props.
+- **Development-only code stays out of production.** The clipboard recorder
+  (`src/recorder/`, editor.md §13.1) is reachable only through the dynamic
+  import that `src/main.tsx` guards with `__CLIPBOARD_RECORDER__`: always on
+  the dev server, in a build only with `VITE_CLIPBOARD_RECORDER=1`, never in
+  an image (the Containerfile pins it to `0`). No other application module
+  imports `src/recorder/`; ESLint's `no-restricted-imports` fails one that
+  does. Only `vite.config.ts` (for `recorder-flag.ts`) and tests may import
+  it. `src/recorder/production-bundle.test.ts` fails if the image build holds
+  the recorder's route or code.
 - **The build-time source commit.** `VITE_SOURCE_COMMIT` is empty or a full
   40-character commit SHA; `vite.config.ts` rejects anything else. The footer
   links to the running commit (ADR 0012 §4).
@@ -97,4 +108,6 @@ npm run e2e         # Playwright (Chromium) against http://localhost:5150/admin
 ```
 
 `npm run e2e` needs backend3 already running with `LOCO_ENV=e2e` and serving
-the built `dist/`; it fails on any CSP violation or console error.
+a `dist/` built as CI builds it
+(`VITE_REPORT_MISSING_KEYS=1 VITE_CLIPBOARD_RECORDER=1 npm run build`); it
+fails on any CSP violation or console error.

@@ -5,7 +5,7 @@
  * composition root (`main.tsx`), so tests mount the same component with stubs
  * and a memory router.
  */
-import { useMemo } from "react"
+import { useMemo, type ReactNode } from "react"
 import { CustomRoutes, type DataProvider, type I18nProvider } from "ra-core"
 import { Route } from "react-router-dom"
 
@@ -24,6 +24,13 @@ export interface AdminAppProps {
   readonly i18nProvider: I18nProvider
   /** The build's raw `VITE_SOURCE_COMMIT`, for the source links. */
   readonly sourceCommit: string | undefined
+  /**
+   * Extra `<Route>` elements that only development builds register, inside
+   * the layout (the clipboard recorder). `main.tsx` builds them behind a
+   * build-time constant, so a production build passes nothing and carries
+   * none of their code.
+   */
+  readonly developmentRoutes?: ReactNode
 }
 
 /**
@@ -36,6 +43,7 @@ export function AdminApp({
   dataProvider,
   i18nProvider,
   sourceCommit,
+  developmentRoutes,
 }: AdminAppProps) {
   const layout = useMemo(() => createAppLayout(sourceCommit), [sourceCommit])
   return (
@@ -56,6 +64,7 @@ export function AdminApp({
           path={ABOUT_PATH}
           element={<AboutPage sourceCommit={sourceCommit} />}
         />
+        {developmentRoutes}
       </CustomRoutes>
     </Admin>
   )
