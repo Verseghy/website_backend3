@@ -16,3 +16,8 @@ disallowed-methods = [
   { path = "tokio::spawn", reason = "use a Loco BackgroundWorker on the Postgres queue (ADR 0016)" },
   { path = "tokio::task::spawn", reason = "use a Loco BackgroundWorker on the Postgres queue (ADR 0016)" },
 ]
+
+# Words that `clippy::doc_markdown` (pedantic) accepts without backticks. ".."
+# keeps clippy's default list (OpenGL, OpenSSL, ...), which lacks OpenAPI, the
+# name of the public API's document format (ADR 0005).
+doc-valid-idents = ["OpenAPI", ".."]

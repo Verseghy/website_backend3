@@ -1,0 +1,54 @@
+# The utoipa spike
+
+- Status: Passed (2026-10-25). The spec note that [ADR 0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) §5 asks the spike to leave behind. ADR 0005's decision does not change, so the ADR is not edited ([ADR 0001](adr/0001-record-architecture-decisions.md) §6).
+- Parity: PLT-12 ([parity.md](parity.md)).
+- Code that stayed: `src/controllers/v1/openapi.rs` (the document builder and `GET /api/v1/openapi.json`), `src/domain/route_coverage.rs` (the coverage comparison), `tests/requests/openapi.rs` and its snapshot `tests/requests/snapshots/openapi_document.snap`.
+
+ADR 0005 makes the Rust DTOs the contract of `/api/v1` and generates the OpenAPI document with utoipa. When it was written, nobody had tried utoipa 6 with Loco's `Routes`. The one-day spike tried it on loco-rs `=1.2.0` before the first `/api/v1` slice, against the five pass criteria of ADR 0005 §5. All five hold. This note records how the spike was built, the evidence for each criterion, the measurements, and the rules the spike found for public DTOs and operations.
+
+## 1. What the spike built
+
+| Part | Setup |
+|---|---|
+| Versions | loco-rs 1.2.0 with backend3's features, utoipa 6.0.0 (utoipa-gen 6.0.1) with its default features only, Rust 1.99.1 from `rust-toolchain.toml`. |
+| Routing | Two throwaway handlers, each with `#[utoipa::path(...)]`, registered through Loco: `Routes::new().prefix("/api/v1").add("/posts", get(list)).add("/posts/{id}", get(show))`. Loco itself, its middleware configuration and its route table were not touched. |
+| `GET /api/v1/posts` | An `IntoParams` query struct (`limit`, `before`, `featured`) and the list envelope `PostList { items: PostSummary[], pageInfo }`, with the nested `AuthorRef` and `LabelRef` of [public-api.md](public-api.md) §6.1. |
+| `GET /api/v1/posts/{id}` | An `i64` path parameter, an optional `token` query parameter, `PostDetail` (the summary flattened with `#[serde(flatten)]`, plus `content` and `images`) and a `404` error body `{ error, description }`. |
+| Field cases of criterion P4 | `i64` ids, one of them served at 2^53 − 1; `Option<String>`; an optional nested object; and a naive wall-time newtype `EventWallTime` that serializes as `YYYY-MM-DD HH:MM:SS`, as a required and as an `Option` field. |
+| Data | Synthetic values in the handlers; no database. |
+
+The endpoints and their DTOs were removed before the merge (ADR 0005 §5). `public-post-detail` re-adds `GET /api/v1/posts/{id}` and `public-posts-list` re-adds `GET /api/v1/posts`, each with the full tests of public-api.md ([ADR 0025](adr/0025-delivery-exceptions-for-the-backend3-slice-plan.md) §5). The real wall-time newtype comes with its own slice; its utoipa schema follows rule 3 of section 3.
+
+## 2. Pass criteria
+
+| # | Result | Evidence |
+|---|---|---|
+| P1 | Pass | It compiles with loco-rs 1.2.0. `cargo tree -d` lists neither `axum` nor `http`: the graph has one `axum` (0.8.9) and one `http` (1.5.0). utoipa adds no duplicate crate: the `cargo tree -d` list is the same with and without it. |
+| P2 | Pass | `#[utoipa::path]` sits on plain Loco handlers (`#[debug_handler]`, `Query`, `Path`, `Result<Response>`), which Loco `Routes` registers. Nothing in Loco is patched or forked, and the middleware stack is unchanged: the request tests sent every spike request through Loco's test server and the whole stack. utoipa-axum's `OpenApiRouter` was not needed, so it was not tried (ADR 0005 §5). |
+| P3 | Pass | Two independent validators accept the spike document. `@seriousme/openapi-schema-validator` 2.11.0, which checks a document against the official OpenAPI JSON schemas, reports it valid as version 3.1. Redocly CLI 2.71.0 with its `spec` ruleset reports it valid. Every path starts with `/api/v1`. Redocly's stricter `recommended` ruleset adds three style findings, none about validity: `no-empty-servers` (by design: the paths carry `/api/v1`, as the module documentation of `src/controllers/v1/openapi.rs` explains), `security-defined` (the API needs no credentials, public-api.md §2.1) and `operation-4xx-response` (the throwaway list declared no `400`; real endpoints document every error, ADR 0005 §3). The merged document, which has no operations yet, passes both validators as well. |
+| P4 | Pass, with rule 1 below | Names agree: serde's `rename_all = "camelCase"` reaches the schema (`pageInfo`, `hasPreviousPage`, `startsAt`), and `#[serde(flatten)]` becomes an `allOf`. Types agree: `i64` is `integer` with format `int64`, `Vec<T>` is `array`, the newtype is `string` with its pattern. Nullability agrees: `Option<String>` is `type: [string, null]`, and an optional object is `oneOf` its `$ref` and `null`. Optionality did not agree at first: utoipa leaves `Option` fields out of `required`, while serde always writes them, as `null`, and public-api.md §2.1 says every field is always present. With `#[schema(required = true)]` on each `Option` field they agree. A JSON Schema 2020-12 validator (Ajv 8.20.0) then accepted every body the handlers emitted against the component schema the document declares for it, and rejected each of these changes: an `Option` field left out, `null` in a field that is not an `Option`, an RFC 3339 instant in the wall-time field, an id as a string or with a fraction, and a nested author without `image`. ts-rs 12 declares the newtype as `type EventWallTime = string;`. |
+| P5 | Pass | The route-coverage test reads Loco's route table (`App::routes(&ctx).collect()`, what `cargo loco routes` prints) and the served document, and compares them with `src/domain/route_coverage.rs`. With both spike endpoints it passed. With `show` left out of the derive it failed, naming `GET /api/v1/posts/{id}` as a route without an operation; with the route left out of `Routes` it failed, naming the same pair as an operation without a route. axum 0.8 and OpenAPI both write the path parameter as `{id}`, so the paths compared directly. `Routes::add` takes a route's methods from the `Debug` text of its axum `MethodRouter` and records none for `any(...)`, so the test also fails for a route under `/api/v1` without a recorded method; `Routes::get` and the other verb methods record the method directly. |
+
+## 3. Rules for public DTOs and operations
+
+The spike's findings, for every slice that adds to the document. Recipe 3 of `.claude/skills/backend3/SKILL.md` points here.
+
+1. **Every `Option` field of a public DTO carries `#[schema(required = true)]`.** serde writes the field as `null`, so it is present; without the attribute, the schema says it may be absent. A field that can really be absent has a serde skip attribute and no `required = true`, and the snapshot shows the difference (ADR 0005 §3).
+2. **Every `#[utoipa::path]` sets `tag` and `operation_id`.** utoipa's default tag is the module path as the derive names the handler (the spike's operations were tagged `super::spike_posts`), and the default operation id is the bare function name (`list`, `show`), which two controllers can share. OpenAPI requires operation ids to be unique in a document.
+3. **A newtype states its pattern on the derive.** `#[derive(ToSchema)]` on the tuple struct with `#[schema(value_type = String, pattern = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", example = "2026-09-28 08:00:00")]` gives a `string` component named after the type, with the pattern, the example and the doc comment as its `description` (checked on utoipa-gen 6.0.1). `value_type = String` is needed because the inner value is a chrono type, which utoipa does not know without its `chrono` feature and would describe as an RFC 3339 `date-time` with it; a wall time is neither. The spike wrote the same schema by hand with `utoipa::PartialSchema`; the derive keeps it on the type.
+4. **Bounds go into the schema explicitly.** The schema comes from the Rust type: `u32` became `integer`, format `int32`, `minimum: 0`, which neither states the documented range of `limit` (1 to 100, public-api.md §7.1) nor fits `int32` above 2^31 − 1. Parameters and fields with a documented range state it with `minimum` and `maximum`.
+5. **Doc comments are published.** The first paragraph of a handler's doc comment becomes the operation's `summary` and the rest its `description`; a field's doc comment becomes the property's `description`. They are written for API users, in English.
+6. **Paths are written in full**, `/api/v1/...`, in `#[utoipa::path(path = ...)]`. The document has no `servers` entry, so a path without the prefix would point at the host root; the coverage test reports it as an operation without a route.
+
+## 4. Measurements
+
+The cold release build is measured the way research: gap-14 §6.2 measures it: the CPU seconds (user + system) of `cargo build --release --locked` from an empty `target/`, under `/usr/bin/time`, with `CARGO_INCREMENTAL=0`. CPU seconds approximate the wall time of the same build on one CPU. "Without" is `master` at `ad496da`; "with" is the tree of this change, which adds utoipa and the document builder. The two were built alternately, three times each, on a 24-thread x86-64 workstation that was running other builds at the same time, so the absolute figures carry noise and the difference between the two is what the table is for.
+
+| Build | Round 1 | Round 2 | Round 3 | Mean | Wall time, 24 threads | Peak RSS of one process | Compiled crates |
+|---|---|---|---|---|---|---|---|
+| Without utoipa | 755.8 s | 760.5 s | 764.4 s | **760.3 s** | 52-55 s | 1.32 GiB | 440 |
+| With utoipa | 770.4 s | 799.4 s | 795.8 s | **788.5 s** | 51-65 s | 1.33 GiB | 442 |
+
+- **CPU time:** utoipa adds about 28 CPU seconds to the cold release build, **3.7 %** of the mean (1.9 %, 5.1 % and 4.1 % per round; the machine was busiest during rounds 2 and 3). That is below the 10 % that ADR 0005 §5 asks the spike to report, so the build-capacity rule of ADR 0022 §1 is not triggered.
+- **Crates:** the release build compiles 2 more crates, `utoipa` 6.0.0 and the proc-macro `utoipa-gen` 6.0.1 (440 to 442 in the normal and build graph of backend3, `cargo tree -e normal,build`). Their dependencies (`serde`, `serde_json`, `indexmap`, `proc-macro2`, `quote` and `syn` 3) are already in the graph. Test builds also compile `insta` 1.49.0 with `console` and `similar`, for the snapshot (`encode_unicode`, the fourth new entry in `Cargo.lock`, is built on Windows only). `Cargo.lock` grows from 603 to 609 packages.
+- **The hub's build:** Pipelines-as-Code builds `master` only ([ADR 0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md)), so a branch has no BuildRun to compare. The first BuildRun took 10m52s at 4 CPU / 6Gi (#196). The duration of the first `master` BuildRun after this change is added here in the next docs change.

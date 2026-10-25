@@ -120,6 +120,14 @@ percent-encoding = "2"
 # DTO-to-TypeScript bindings for the admin API (ADR 0005 §2): major 12 with
 # chrono-impl and serde-compat, as in Loco's own template.
 ts-rs = { version = "12", features = ["chrono-impl", "serde-compat"] }
+# The /api/v1 OpenAPI document (ADR 0005 §2, §4): the `OpenApi` derive of
+# src/controllers/v1/openapi.rs and `#[utoipa::path]` on Loco handlers. Major
+# 6, which the ADR 0005 §5 spike tried with loco-rs 1.2.0
+# (docs/design/openapi-spike.md). Default features only; a slice that needs a
+# type feature adds it with its reason. `preserve_path_order` and
+# `preserve_order` stay off, so paths and properties are sorted by name and
+# the snapshot does not depend on declaration order.
+utoipa = "6"
 # Metrics library (ADR 0023 §9), picked by the bootstrap PR after checking the
 # releases on 2026-10-24: `prometheus-client` (0.25.1 of 2026-09-01), the
 # Prometheus project's own client. Its `Registry` is an explicit value that
@@ -139,6 +147,10 @@ axum-test = "17"
 # `catch_unwind` on futures, so the per-test database is dropped even when a
 # test panics (tests/support).
 futures-util = "0.3"
+# The committed snapshot of the /api/v1 OpenAPI document (ADR 0005 §4): "a
+# snapshot change is an API change". CI sets CI=true and INSTA_UPDATE=no, so
+# a mismatch fails and no .snap.new is written. No extra features.
+insta = "1"
 
 [package]
 name = "backend3"
@@ -185,6 +197,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 percent-encoding = { workspace = true }
 ts-rs = { workspace = true }
+utoipa = { workspace = true }
 
 [[bin]]
 name = "backend3-cli"
@@ -197,3 +210,4 @@ tokio = { workspace = true }
 proptest = { workspace = true }
 axum-test = { workspace = true }
 futures-util = { workspace = true }
+insta = { workspace = true }

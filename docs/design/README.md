@@ -12,6 +12,7 @@ The design was written on 2026-10-24, before any code. Every decision in it come
 | [adr/README.md](adr/README.md) | ADR index, ADR template, how to add or change a decision |
 | [adr/](adr/) | The architecture decision records, one file per decision |
 | [public-api.md](public-api.md) | The public read REST API (`/api/v1`) that replaces backend2's GraphQL API |
+| [openapi-spike.md](openapi-spike.md) | The utoipa spike of ADR 0005 §5: its result, its measurements and the rules for public DTOs |
 | [parity.md](parity.md) | The backend1 feature inventory as parity IDs, and which features are retired |
 | [data-migration.md](data-migration.md) | How the MySQL data and the stored HTML are imported into PostgreSQL |
 | [editor.md](editor.md) | content-v1, the rich-text editor, the Office paste filter, the server sanitiser and the integrity rule for stored HTML |
@@ -523,6 +524,7 @@ ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the ma
 | Spec | Covers |
 |---|---|
 | [public-api.md](public-api.md) | Every `/api/v1` endpoint: parameters, response shapes, errors, paging, caching headers, CORS, and the intended changes from backend2. |
+| [openapi-spike.md](openapi-spike.md) | How the OpenAPI document is built from the DTOs, the spike's evidence for the pass criteria P1-P5, the build-cost measurements, and the rules every public DTO and operation follows. |
 | [parity.md](parity.md) | Every backend1 feature as a parity ID, its target behaviour, and the documented exceptions. Progress is tracked as one GitHub issue per ID. |
 | [data-migration.md](data-migration.md) | Table and column mapping, the HTML normalisation rules, the defect resolution list, verification of an import. |
 | [editor.md](editor.md) | content-v1 (elements, attributes, CSS and URL rules), the TipTap schema, the paste filter, the serialiser, the sanitiser, the integrity rule, the editor image upload and `/storage` headers, the editor stylesheet and preview, and the test plan. |
@@ -530,14 +532,14 @@ ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the ma
 
 ## Open questions
 
-These facts were not known when the design was written (research: SYNTHESIS §8, QUESTIONS 4, DECISIONS 15). Most items only change a setting or pick between two branches that an ADR already names. If the utoipa spike fails, ADR 0005 §5 applies: an agent writes a Proposed ADR that names the failing criterion, and the maintainer chooses between ADR 0005's two candidates.
+These facts were not known when the design was written (research: SYNTHESIS §8, QUESTIONS 4, DECISIONS 15). Most items only change a setting or pick between two branches that an ADR already names. The utoipa spike of ADR 0005 §5 has passed ([openapi-spike.md](openapi-spike.md)), so ADR 0005's failure path, a Proposed ADR and a choice between its two candidates, is not needed.
 
 | Unknown | Why it matters | How it is settled | ADR |
 |---|---|---|---|
 | The edge node's MicroShift version, CPU, memory and free storage | Sizes the PostgreSQL PVC and memory limits, and selects the documentation version for router settings. | Read on the node with read-only commands before the first platform PR. | [0002](adr/0002-postgresql-as-the-database.md), [0023](adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) |
 | Whether two pods can mount the uploads volume at once | Chooses the separate media server or the backend3 `ServeDir` fallback. | A co-mount test with a throwaway PVC and two pods on the node; never the production claim. | [0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md) |
 | Which PostgreSQL image runs under the `restricted-v2` SCC, and whether it has `unaccent` and ICU `hu` | Image choice, and the search and ordering design. | A dry run in a scratch namespace. | [0002](adr/0002-postgresql-as-the-database.md), [0020](adr/0020-search-and-hungarian-ordering.md) |
-| Whether utoipa 6 works with Loco's routing | How the OpenAPI document is generated. | A one-day spike after the bootstrap PR and before the first `/api/v1` slice. On failure, an agent writes a Proposed ADR with the evidence, and no `/api/v1` slice merges until the maintainer chooses between a hand-maintained OpenAPI 3.1 document served at the same URL (research: QUESTIONS 4 B) and utoipa-axum's `OpenApiRouter`; the accepted choice amends ADR 0005 (ADR 0005 §5). Admin slices are not blocked. | [0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) |
+| Whether utoipa 6 works with Loco's routing | How the OpenAPI document is generated. | Settled: the one-day spike passed all five criteria of ADR 0005 §5 ([openapi-spike.md](openapi-spike.md)), so neither fallback, a hand-maintained OpenAPI 3.1 document (research: QUESTIONS 4 B) or utoipa-axum's `OpenApiRouter`, is needed. | [0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) |
 | Whether the Angular SSR pod reaches the backend3 host | The public site renders on the server through `/api/v1`. | A request from the frontend pod to `/_ping` once the Route exists. | [0014](adr/0014-one-host-backend3-microshift-verseghy-gimnazium-net.md) |
 | The real cold build time on the hub | PipelineRun timeouts. A projection put a Loco build at 51-77 min at the current 1 CPU / 2Gi step default, which ADR 0022 raises to about 4 CPU / 6Gi (research: SYNTHESIS §1.8.3). | Measure the first master build at the raised capacity. | [0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md) |
 | HAProxy rate-limit and timeout annotations | Router-level limits and large uploads. | Check them against the MicroShift documentation for the node's confirmed version. | [0023](adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) |
