@@ -7,7 +7,8 @@
 #
 # Changing this file: adding a license, a ban exception or an advisory ignore
 # needs a PR that states the reason, and every entry below carries that reason
-# as a comment.
+# as a comment. A license that is not on ADR 0022 §4's allow-list enters only
+# as an exception for one named crate, never on `allow` (ADR 0027).
 
 [graph]
 # Resolve the graph with every feature of the workspace crates enabled, so an
@@ -24,10 +25,15 @@ version = 2
 # Every ignore entry needs a comment with the reason and a linked issue
 # (ADR 0022 §4). Each entry is removed by the PR that removes its cause,
 # normally a Loco bump (ADR 0024 §3). All three below have no patched release
-# that loco-rs 1.2.0's dependency tree can use, and come in through
-# non-optional dependencies of loco-rs 1.2.0. Each entry links its backend3
+# that loco-rs 1.2.0's dependency tree can use, and come in through loco-rs
+# 1.2.0 dependencies that backend3 needs: jsonwebtoken through the `auth`
+# feature, which backend3's JWTs need (ADR 0006), and Loco's YAML loaders,
+# which are not optional. The maintainer accepted all three until the Loco
+# bump that removes their cause (ADR 0027 §4). Each entry links its backend3
 # tracking issue, which the PR that removes the entry closes, and the
 # upstream issues and pull requests that track its cause.
+# cargo-deny reports an ignore that no crate matches any more as
+# `advisory-not-detected`, which tells a bump which entries to drop.
 ignore = [
   # rsa 0.9: Marvin attack, timing side channel in RSA private-key
   # operations. Pulled in by jsonwebtoken's `rust_crypto` backend, which
@@ -37,6 +43,7 @@ ignore = [
   # Upstream: https://github.com/RustCrypto/RSA/issues/626 (the fix) and
   # https://github.com/Keats/jsonwebtoken/issues/495 (jsonwebtoken moving to
   # rsa 0.10).
+  # Accepted until the Loco bump (ADR 0027 §4).
   # Tracking issue: https://github.com/Verseghy/website_backend3/issues/192
   { id = "RUSTSEC-2023-0071", reason = "RSA is unused: backend3 uses HS512 JWTs only (ADR 0006); no patched rsa release" },
   # crypto-bigint 0.5: timing variability in constant-time operations, fixed
@@ -45,6 +52,7 @@ ignore = [
   # operation, as above. No upstream issue tracks jsonwebtoken's move to the
   # 0.14 curves yet, so the backend3 tracking issue carries it.
   # Upstream fix: https://github.com/RustCrypto/crypto-bigint/pull/1365
+  # Accepted until the Loco bump (ADR 0027 §4).
   # Tracking issue: https://github.com/Verseghy/website_backend3/issues/193
   { id = "RUSTSEC-2026-0387", reason = "ECDSA is unused: backend3 uses HS512 JWTs only (ADR 0006); no patched 0.5 release" },
   # unsafe-libyaml is unmaintained (informational, no known vulnerability).
@@ -52,6 +60,7 @@ ignore = [
   # via rrgen). It only parses the repository's own config/*.yaml and seed
   # fixtures, never request input.
   # Upstream: https://github.com/loco-rs/loco/issues/1859
+  # Accepted until the Loco bump (ADR 0027 §4).
   # Tracking issue: https://github.com/Verseghy/website_backend3/issues/194
   { id = "RUSTSEC-2024-0449", reason = "unmaintained, no vulnerability; parses only committed config and fixtures; required by loco-rs 1.2.0" },
 ]
@@ -100,16 +109,20 @@ exceptions = [
   # for the Mozilla CA root data in webpki-roots only (ADR 0022 §4).
   { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
   # CC0-1.0: the FSF list names CC0 a GPL-compatible public domain dedication
-  # with a lax permissive fallback license. (The FSF advises against CC0 for
-  # one's own programs because it grants no patent license; that concerns
-  # choosing a license, not combining with code under it.) Allowed for the
-  # file watcher notify only, a non-optional dependency of loco-rs 1.2.0.
+  # with a lax permissive fallback license. It does not recommend CC0 for
+  # software, and asks users to be careful about using software under it,
+  # because CC0 expressly grants no patent license. That is a caution about
+  # patents, not a bar to combining. Allowed for the file watcher notify
+  # only, a non-optional dependency of loco-rs 1.2.0 (ADR 0027 §2).
   { allow = ["CC0-1.0"], crate = "notify" },
   # 0BSD (Zero-Clause BSD): the FSF list names it ("Zero-clause BSD
   # license") among the GPL-compatible free software licenses. It grants
   # every permission with no condition at all, less than ISC asks, so it adds
-  # nothing that conflicts with AGPL-3.0. Allowed for quoted_printable only,
-  # which loco-rs 1.2.0 pulls in through its non-optional lettre dependency.
+  # nothing that conflicts with AGPL-3.0. The FSF adds that a copy whose
+  # copyright or license notice was removed cannot safely be relied on; the
+  # crate ships with its LICENSE file. Allowed for quoted_printable only,
+  # which loco-rs 1.2.0 pulls in through its non-optional lettre dependency
+  # (ADR 0027 §2).
   { allow = ["0BSD"], crate = "quoted_printable" },
 ]
 
