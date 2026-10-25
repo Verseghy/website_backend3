@@ -3,7 +3,12 @@
 #
 # The real .tekton/push.yaml must pass; copies of it with one invariant
 # broken must fail: the nested timeouts, the SHA image tag, the build arg,
-# the strategy, master-only triggering and the absence of a PR pipeline.
+# the strategy, the BuildRun fields that Shipwright forbids with an inline
+# build spec (the overrides, a trigger and a named Build), master-only
+# triggering and the absence of a PR pipeline. One copy restores the
+# BuildRun of the first PAC build (spec.timeout beside spec.build.spec),
+# which the controller failed on 2026-10-24 with
+# BuildRunBuildFieldOverrideForbidden.
 # Run from the repository root:
 #   bash scripts/tests/test-check-tekton.sh
 # Needs mikefarah yq v4 and jq; no network access.
@@ -61,7 +66,11 @@ run_case "the real .tekton/push.yaml passes" 0 --contains "Tekton OK" -- bash "$
 run_case "an unchanged copy passes" 0 -- bash "$SCRIPT" --root "$(variant same 's/^$//')"
 
 # Rule 4: nested timeouts.
-run_case "BuildRun timeout equal to oc wait fails" 1 --contains "BuildRun spec.timeout (100m) must be smaller than oc wait --timeout (100m)" -- \
+# The innermost layer is spec.build.spec.timeout: another value there that
+# still nests passes, so the check reads that field and not spec.timeout.
+run_case "a shorter spec.build.spec.timeout passes" 0 --contains "Tekton OK" -- \
+  bash "$SCRIPT" --root "$(variant br-shorter 's/,"timeout":"1h30m0s"}}}}/,"timeout":"1h0m0s"}}}}/')"
+run_case "BuildRun timeout equal to oc wait fails" 1 --contains "BuildRun spec.build.spec.timeout (100m) must be smaller than oc wait --timeout (100m)" -- \
   bash "$SCRIPT" --root "$(variant br-equal 's/"timeout":"1h30m0s"/"timeout":"100m"/')"
 run_case "oc wait longer than the task fails" 1 --contains "oc wait --timeout (2h) must be smaller than task timeout (1h45m0s)" -- \
   bash "$SCRIPT" --root "$(variant wait-long 's/--timeout=100m/--timeout=2h/')"
@@ -69,8 +78,8 @@ run_case "task longer than the PipelineRun fails" 1 --contains "task timeout (3h
   bash "$SCRIPT" --root "$(variant task-long "s/timeout: '1h45m0s'/timeout: '3h0m0s'/")"
 run_case "a missing task timeout fails" 1 --contains "task timeout is missing" -- \
   bash "$SCRIPT" --root "$(variant task-missing "/timeout: '1h45m0s'/d")"
-run_case "a missing BuildRun timeout fails" 1 --contains "BuildRun spec.timeout is missing" -- \
-  bash "$SCRIPT" --root "$(variant br-missing 's/"timeout":"1h30m0s",//')"
+run_case "a missing BuildRun timeout fails" 1 --contains "BuildRun spec.build.spec.timeout is missing" -- \
+  bash "$SCRIPT" --root "$(variant br-missing 's/,"timeout":"1h30m0s"}}}}/}}}}/')"
 run_case "a missing oc wait timeout fails" 1 --contains "oc wait --timeout is missing" -- \
   bash "$SCRIPT" --root "$(variant wait-missing 's/ --timeout=100m//')"
 run_case "a missing pipeline timeout fails" 1 --contains "PipelineRun timeouts.pipeline is missing" -- \
@@ -90,7 +99,55 @@ run_case "a wrong generateName fails" 1 --contains "backend3-pac-" -- \
 run_case "a pinned branch revision fails" 1 --contains "source.git.revision" -- \
   bash "$SCRIPT" --root "$(variant revision 's/"revision":"{{ revision }}"/"revision":"master"/')"
 run_case "stepResources fail" 1 --contains "stepResources must not be set" -- \
-  bash "$SCRIPT" --root "$(variant step-resources 's/"timeout":"1h30m0s",/"timeout":"1h30m0s","stepResources":[],/')"
+  bash "$SCRIPT" --root "$(variant step-resources 's/,"timeout":"1h30m0s"}}}}/,"timeout":"1h30m0s","stepResources":[]}}}}/')"
+
+# Rule 3: no BuildRun-level override next to the inline build spec.
+# Regression: the BuildRun of the first PAC build, with the timeout in
+# spec.timeout beside spec.build.spec instead of inside it. The fixture is
+# made once, before the two cases that read it, so neither depends on the
+# other; under set -e a stale sed script stops the run here.
+br_override=$(variant br-override 's/"spec":{"build":{"spec":{/"spec":{"timeout":"1h30m0s","build":{"spec":{/; s/,"timeout":"1h30m0s"}}}}/}}}}/')
+run_case "spec.timeout beside spec.build.spec (the first PAC build) fails" 1 \
+  --contains "spec.timeout must not be set next to the inline spec.build.spec; Shipwright fails such a BuildRun with reason BuildRunBuildFieldOverrideForbidden: \"cannot use 'timeout' override and 'buildSpec' simultaneously\"" -- \
+  bash "$SCRIPT" --root "$br_override"
+run_case "the first PAC build's BuildRun also lacks the innermost timeout" 1 --contains "BuildRun spec.build.spec.timeout is missing" -- \
+  bash "$SCRIPT" --root "$br_override"
+run_case "spec.timeout fails even beside a valid spec.build.spec.timeout" 1 --contains "cannot use 'timeout' override and 'buildSpec' simultaneously" -- \
+  bash "$SCRIPT" --root "$(variant br-both 's/"spec":{"build":{"spec":{/"spec":{"timeout":"1h30m0s","build":{"spec":{/')"
+
+# The other overrides Shipwright rejects next to spec.build.spec, one copy
+# each. Each entry is "fixture|JSON to insert|Shipwright's message"; the JSON
+# lands at the start of the BuildRun spec, beside spec.build.
+overrides=(
+  "ovr-output|\"output\":{\"image\":\"ghcr.io/verseghy/website_backend3:latest\"},|cannot use 'output' override and 'buildSpec' simultaneously"
+  "ovr-params|\"paramValues\":[{\"name\":\"dockerfile\",\"value\":\"Containerfile\"}],|cannot use 'paramValues' override and 'buildSpec' simultaneously"
+  "ovr-env|\"env\":[{\"name\":\"A\",\"value\":\"b\"}],|cannot use 'env' override and 'buildSpec' simultaneously"
+  "ovr-node-selector|\"nodeSelector\":{\"kubernetes.io/arch\":\"amd64\"},|cannot use 'nodeSelector' override and 'buildSpec' simultaneously"
+  "ovr-tolerations|\"tolerations\":[{\"key\":\"a\",\"operator\":\"Exists\"}],|cannot use 'tolerations' override and 'buildSpec' simultaneously"
+  "ovr-scheduler|\"schedulerName\":\"default-scheduler\",|cannot use 'schedulerName' override and 'buildSpec' simultaneously"
+  "ovr-runtime-class|\"runtimeClassName\":\"runc\",|cannot use 'runtimeClassName' override and 'buildSpec' simultaneously"
+)
+for entry in "${overrides[@]}"; do
+  IFS='|' read -r fixture insert message <<<"$entry"
+  edit="s|\"spec\":{\"build\":{\"spec\":{|\"spec\":{$insert\"build\":{\"spec\":{|"
+  run_case "${fixture#ovr-} beside spec.build.spec fails" 1 --contains "$message" -- \
+    bash "$SCRIPT" --root "$(variant "$fixture" "$edit")"
+done
+# A trigger is rejected from inside the inline build spec, so its fixture puts
+# it there and the message says "in", not "next to".
+run_case "trigger inside spec.build.spec fails" 1 \
+  --contains "spec.build.spec.trigger must not be set in a BuildRun's inline build spec; Shipwright fails such a BuildRun with reason BuildRunBuildFieldOverrideForbidden: \"cannot use 'triggers' override in the 'BuildRun', only allowed in the 'Build'\"" -- \
+  bash "$SCRIPT" --root "$(variant ovr-trigger 's/"spec":{"build":{"spec":{/&"trigger":{"when":[]},/')"
+# A Build named in spec.build.name beside the inline spec is ambiguous, a
+# different reason from the overrides; admission accepts it too.
+run_case "spec.build.name beside spec.build.spec fails" 1 \
+  --contains "spec.build.name must not be set next to the inline spec.build.spec; Shipwright fails such a BuildRun with reason BuildRunAmbiguousBuild: \"fields 'buildRef' and 'buildSpec' are mutually exclusive\"" -- \
+  bash "$SCRIPT" --root "$(variant build-name 's/"spec":{"build":{"spec":{/"spec":{"build":{"name":"backend3","spec":{/')"
+# Shipwright rejects a list or map override only when it is non-empty, and the
+# check mirrors that, so its message never claims a rejection that does not
+# happen.
+run_case "an empty spec.env list passes, as Shipwright accepts it" 0 --contains "Tekton OK" -- \
+  bash "$SCRIPT" --root "$(variant ovr-env-empty 's/"spec":{"build":{"spec":{/"spec":{"env":[],"build":{"spec":{/')"
 run_case "broken BuildRun JSON fails" 1 --contains "not valid JSON" -- \
   bash "$SCRIPT" --root "$(variant bad-json 's/"kind":"BuildRun",/"kind":"BuildRun"/')"
 

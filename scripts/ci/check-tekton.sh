@@ -4,8 +4,10 @@
 # Why this exists: .tekton/push.yaml is the only production delivery path
 # (ADR 0022 section 1), and a mistake in it shows up only after a merge, when
 # PAC runs it on the hub. Its rules are easy to break by hand: the image tag
-# must be the commit SHA, the four timeouts must nest, and there must be no PR
-# build. scripts/tests/test-check-tekton.sh runs this script against the real
+# must be the commit SHA, the four timeouts must nest, the inline build spec
+# takes no BuildRun-level overrides (admission accepts them; the Shipwright
+# controller then fails the BuildRun), and there must be no PR build.
+# scripts/tests/test-check-tekton.sh runs this script against the real
 # file, so the "Test" CI job enforces it on every pull request.
 #
 # Rules (ADR 0022 section 1):
@@ -20,8 +22,14 @@
 #      kind BuildStrategy, dockerfile=Containerfile, the build arg
 #      SOURCE_COMMIT={{ revision }}, output
 #      ghcr.io/verseghy/website_backend3:{{ revision }}, and no stepResources.
+#      Because the build spec is inline (spec.build.spec), the BuildRun names
+#      no Build (spec.build.name), sets none of Shipwright's BuildRun-level
+#      overrides of a referenced Build (spec.timeout, spec.output,
+#      spec.paramValues, spec.env, spec.nodeSelector, spec.tolerations,
+#      spec.schedulerName, spec.runtimeClassName) and no
+#      spec.build.spec.trigger.
 #   4. Each timeout is set and strictly larger than the one inside it:
-#      BuildRun spec.timeout < oc wait --timeout < task timeout <
+#      BuildRun spec.build.spec.timeout < oc wait --timeout < task timeout <
 #      PipelineRun timeouts.pipeline.
 #
 # Usage: check-tekton.sh [--root DIR]   (default: the current directory)
@@ -69,6 +77,87 @@ duration_seconds() {
 # yq_get FILE EXPR: print the scalar EXPR selects in FILE ("" when absent).
 yq_get() {
   yq -r "($2) // \"\"" "$1"
+}
+
+# shipwright_rejects TEST WHAT REASON MESSAGE HINT: record a violation when
+# the jq boolean TEST is true for BUILDRUN_JSON.
+#   TEST     jq expression that mirrors Shipwright's own condition (a pointer
+#            field is set, or a list or map is non-empty), so this check
+#            rejects exactly what the controller rejects.
+#   WHAT     the clause that names the offending field and where it is.
+#   REASON   Shipwright's condition reason, such as
+#            BuildRunBuildFieldOverrideForbidden.
+#   MESSAGE  Shipwright's condition message, verbatim, so the CI output can
+#            be matched against a failed BuildRun's status.
+#   HINT     what to write instead.
+shipwright_rejects() {
+  local test=$1 what=$2 reason=$3 message=$4 hint=$5
+  if [[ $(buildrun_get "$test") == true ]]; then
+    problem "BuildRun: $what; Shipwright fails such a BuildRun with reason $reason: \"$message\". $hint"
+  fi
+}
+
+# forbid_override TEST FIELD MESSAGE HINT: shipwright_rejects for a
+# BuildRun-level FIELD that overrides a referenced Build, which Shipwright
+# rejects with reason BuildRunBuildFieldOverrideForbidden. TEST, MESSAGE and
+# HINT are as for shipwright_rejects; FIELD is the field path to name.
+forbid_override() {
+  local test=$1 field=$2 message=$3 hint=$4
+  shipwright_rejects "$test" "$field must not be set next to the inline spec.build.spec" \
+    BuildRunBuildFieldOverrideForbidden "$message" "$hint"
+}
+
+# check_inline_overrides: apply the last sentence of rule 3.
+#
+# Why: a BuildRun's spec.timeout, spec.output, spec.paramValues and the other
+# fields below override the values of a Build it references by name. With an
+# inline spec.build.spec there is nothing to override, and the Shipwright
+# controller fails the BuildRun at once, before any build pod exists. Naming a
+# Build in spec.build.name beside the inline spec fails the same way, as an
+# ambiguous build. The CRD schema and the Shipwright conversion webhook accept
+# all of these (oc create --dry-run=server passes), so only this check catches
+# the mistake before the merge. The first PAC build of backend3 failed this
+# way on 2026-10-24, on Builds for Red Hat OpenShift 1.8.2, with spec.timeout.
+#
+# The conditions, reasons and messages are those that BuildRunFields in
+# pkg/validate/validate.go returns for a BuildRun with spec.build.spec set, in
+# the Shipwright source that the 1.8.2 controller image is built from
+# (redhat-openshift-builds/shipwright-io-build@99ba109). Two of its results
+# are not repeated here: stepResources, because rule 3 already rejects it at
+# every level of the BuildRun, and BuildRunNoRefOrSpec (neither name nor
+# spec), because without an inline spec the source and strategy checks of
+# rule 3 already fail.
+check_inline_overrides() {
+  [[ $(buildrun_get '.spec.build.spec != null') == true ]] || return 0
+  local inside="Set it inside spec.build.spec instead."
+  shipwright_rejects '.spec.build.name != null' \
+    "spec.build.name must not be set next to the inline spec.build.spec" \
+    BuildRunAmbiguousBuild "fields 'buildRef' and 'buildSpec' are mutually exclusive" \
+    "Remove it; this BuildRun builds from its inline spec, not from a Build object."
+  forbid_override '.spec.timeout != null' spec.timeout \
+    "cannot use 'timeout' override and 'buildSpec' simultaneously" \
+    "Set the build timeout in spec.build.spec.timeout instead (ADR 0022 section 1)."
+  forbid_override '.spec.output != null' spec.output \
+    "cannot use 'output' override and 'buildSpec' simultaneously" "$inside"
+  forbid_override '(.spec.paramValues // [] | length) > 0' spec.paramValues \
+    "cannot use 'paramValues' override and 'buildSpec' simultaneously" "$inside"
+  forbid_override '(.spec.env // [] | length) > 0' spec.env \
+    "cannot use 'env' override and 'buildSpec' simultaneously" "$inside"
+  # The trigger sits inside the inline spec, not beside it, so it gets its own
+  # wording; the reason is the same override reason.
+  shipwright_rejects '.spec.build.spec.trigger != null' \
+    "spec.build.spec.trigger must not be set in a BuildRun's inline build spec" \
+    BuildRunBuildFieldOverrideForbidden \
+    "cannot use 'triggers' override in the 'BuildRun', only allowed in the 'Build'" \
+    "Remove it; PAC already triggers this build."
+  forbid_override '(.spec.nodeSelector // {} | length) > 0' spec.nodeSelector \
+    "cannot use 'nodeSelector' override and 'buildSpec' simultaneously" "$inside"
+  forbid_override '(.spec.tolerations // [] | length) > 0' spec.tolerations \
+    "cannot use 'tolerations' override and 'buildSpec' simultaneously" "$inside"
+  forbid_override '.spec.schedulerName != null' spec.schedulerName \
+    "cannot use 'schedulerName' override and 'buildSpec' simultaneously" "$inside"
+  forbid_override '.spec.runtimeClassName != null' spec.runtimeClassName \
+    "cannot use 'runtimeClassName' override and 'buildSpec' simultaneously" "$inside"
 }
 
 # check_push_yaml FILE: apply rules 2-4 to the PipelineRun in FILE.
@@ -124,14 +213,17 @@ check_push_yaml() {
     problem "BuildRun: output.image must be $IMAGE; Image Updater only accepts full commit SHA tags."
   [[ $(buildrun_get '[.. | objects | select(has("stepResources"))] | length') == 0 ]] ||
     problem "BuildRun: stepResources must not be set; capacity comes from the buildah-ubi9 strategy (ADR 0022 section 1)."
+  check_inline_overrides
 
-  # Rule 4: nested timeouts.
+  # Rule 4: nested timeouts. The innermost layer is the inline build spec's
+  # timeout, which the Shipwright controller copies onto the build TaskRun;
+  # the BuildRun's own spec.timeout is forbidden next to it (rule 3).
   local build_t wait_t task_t pipe_t
-  build_t=$(buildrun_get .spec.timeout)
+  build_t=$(buildrun_get .spec.build.spec.timeout)
   wait_t=$(printf '%s\n' "$script" | sed -n 's/.*oc wait .*--timeout=\([0-9hms]*\).*/\1/p' | head -n 1)
   task_t=$(yq_get "$file" '.spec.pipelineSpec.tasks[0].timeout')
   pipe_t=$(yq_get "$file" '.spec.timeouts.pipeline')
-  local -a names=("BuildRun spec.timeout" "oc wait --timeout" "task timeout" "PipelineRun timeouts.pipeline")
+  local -a names=("BuildRun spec.build.spec.timeout" "oc wait --timeout" "task timeout" "PipelineRun timeouts.pipeline")
   local -a values=("$build_t" "$wait_t" "$task_t" "$pipe_t")
   local -a secs=()
   local i ok=1
