@@ -10,7 +10,7 @@ The design was written on 2026-10-24, before any code. Every decision in it come
 |---|---|
 | `README.md` (this file) | Architecture overview, diagrams, index |
 | [adr/README.md](adr/README.md) | ADR index, ADR template, how to add or change a decision |
-| [adr/](adr/) | The 24 architecture decision records |
+| [adr/](adr/) | The 25 architecture decision records |
 | [public-api.md](public-api.md) | The public read REST API (`/api/v1`) that replaces backend2's GraphQL API |
 | [parity.md](parity.md) | The backend1 feature inventory as parity IDs, and which features are retired |
 | [data-migration.md](data-migration.md) | How the MySQL data and the stored HTML are imported into PostgreSQL |
@@ -487,7 +487,7 @@ The Containerfile stays on UBI 9 because the hub's build nodes cannot run UBI 10
 
 ## Architecture decision records
 
-All 24 ADRs were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). The [ADR index](adr/README.md) has longer summaries and the template.
+ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). ADR 0025 was accepted on 2026-10-25; it amends ADR 0012 §1 and one sentence of ADR 0005 §5. The [ADR index](adr/README.md) has longer summaries and the template.
 
 | ADR | Decision | Status | Summary |
 |---|---|---|---|
@@ -495,14 +495,14 @@ All 24 ADRs were accepted on 2026-10-24. ADR 0013 was accepted once the maintain
 | [0002](adr/0002-postgresql-as-the-database.md) | PostgreSQL as the database | Accepted | A new PostgreSQL Deployment and PVC with a clean schema, filled by an import task. |
 | [0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) | Cut-over: one rehearsed flip, then a read-only parallel run | Accepted | Nightly rehearsals, production MySQL left unaltered and dumped with `--lock-all-tables`, every credential rotated once at the start of the window, one evening write freeze, no GraphQL shim, backend1 and MySQL kept read-only until the maintainer decommissions them. |
 | [0004](adr/0004-admin-ui-lives-in-admin-and-ships-in-the-backend3-image.md) | Admin UI lives in admin/ and ships in the backend3 image | Accepted | `admin/` in this repository, one image, served same-origin at `/admin` by `ServeDir`. |
-| [0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) | Rust DTOs are the API contract (ts-rs + utoipa OpenAPI) | Accepted | Rust DTOs generate the admin's TypeScript types and an OpenAPI 3.1 document at `/api/v1/openapi.json`. |
+| [0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) | Rust DTOs are the API contract (ts-rs + utoipa OpenAPI) | Amended | Rust DTOs generate the admin's TypeScript types and an OpenAPI 3.1 document at `/api/v1/openapi.json`. |
 | [0006](adr/0006-admin-authentication-and-account-lifecycle.md) | Admin authentication and account lifecycle | Accepted | Cookie JWT with `token_version`, bcrypt-to-Argon2id rehash, admin-issued resets, 12 characters, optional TOTP, active flag. |
 | [0007](adr/0007-authorization-four-roles-enforced-on-every-operation.md) | Authorization: four roles, enforced on every operation | Accepted | The 4 roles and their permissions, checked on every operation, defined in code. |
 | [0008](adr/0008-code-layout-a-pure-src-domain-beside-loco-models.md) | Code layout: a pure src/domain/ beside Loco models | Accepted | Pure `src/domain/`, explicit arguments for external systems, fat models. |
 | [0009](adr/0009-clean-domain-schema-with-preserved-integer-ids.md) | Clean domain schema with preserved integer ids | Accepted | snake_case domain tables, dead tables dropped, legacy ids kept, UUID `pid` on users only. |
 | [0010](adr/0010-all-instants-stored-as-timestamptz.md) | All instants stored as timestamptz | Accepted | Event times included; the API renders them as naive Budapest time. |
 | [0011](adr/0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md) | Safety net: soft delete, revisions and an activity log for every entity | Accepted | One generic convention for every admin-editable entity, with clean-room trash, history and audit screens. |
-| [0012](adr/0012-delivery-review-commits-and-licensing.md) | Delivery, review, commits and licensing | Accepted | Design first, vertical slices, self-merge with a final human review, conventional commits, AGPL-3.0-only. |
+| [0012](adr/0012-delivery-review-commits-and-licensing.md) | Delivery, review, commits and licensing | Amended | Design first, vertical slices, self-merge with a final human review, conventional commits, AGPL-3.0-only. |
 | [0013](adr/0013-rich-text-editor-and-html-sanitiser.md) | Rich-text editor and HTML sanitiser | Accepted | content-v1 as the one stored HTML format; TipTap 3 with MIT packages only; Windows desktop Word and Excel paste that keeps styling; no outside pictures pasted; an ammonia sanitiser on every write; stored bytes served verbatim only with a valid integrity tag; strict image uploads and `/storage` headers; an editor styled like website_frontend2 with an Angular preview. |
 | [0014](adr/0014-one-host-backend3-microshift-verseghy-gimnazium-net.md) | One host: backend3.microshift.verseghy-gimnazium.net | Accepted | `/admin`, `/api/admin` and `/api/v1` on one host. |
 | [0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md) | Media: separate static server, media library, image optimisation | Accepted | nginx serves `/storage` on both public hosts and for the admin; a minimal media library; a visually lossless re-encode, no resize. |
@@ -515,6 +515,7 @@ All 24 ADRs were accepted on 2026-10-24. ADR 0013 was accepted once the maintain
 | [0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md) | Builds and CI: PAC for production images, GitHub Actions for PR checks | Accepted | Hub builds the images; GitHub Actions checks the PRs. |
 | [0023](adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) | Operations: hardening, rate limits, monitoring, backups, secrets | Accepted | Hardened internet-facing admin, router limits from day one, hub-only monitoring, backups extended to the new parts, backend3's keys in the shared `backend-secrets`. |
 | [0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) | AI maintainability: instruction files, the Loco skill, guardrails | Accepted | Tracked instruction files, exact-pinned vendored skill with a CI check, committed guardrails. |
+| [0025](adr/0025-delivery-exceptions-for-the-backend3-slice-plan.md) | Delivery exceptions for the backend3 slice plan | Accepted | Amends ADR 0012 §1 and ADR 0005 §5: six named slice classes of about 500 lines each, the users screens after labels, the spike endpoints re-added by the two posts slices. |
 
 ## Specs
 
@@ -554,4 +555,4 @@ These facts were not known when the design was written (research: SYNTHESIS §8,
 | The flip | The one evening window in which data, public API and admin move to backend3. |
 | Parallel run | The period after the flip in which backend1 and MySQL stay up read-only as a reference view. |
 | Parity ID | A stable identifier for one backend1 feature, tracked as one GitHub issue. |
-| Slice | One PR that delivers one entity or feature end to end: migration, model, API, admin screen, tests. |
+| Slice | One PR that delivers one entity or feature end to end: migration, model, API, admin screen, tests. [ADR 0025](adr/0025-delivery-exceptions-for-the-backend3-slice-plan.md) names the slice classes that carry part of a feature, within one entity, about 500 lines each. |

@@ -28,8 +28,11 @@ Before any recipe:
 
 ## 1. Add a vertical slice
 
-A slice carries one feature end to end in one PR (ADR 0012 section 1). A slice
-that needs a new crate adds it with recipe 5.
+A slice carries one feature end to end in one PR (ADR 0012 section 1). ADR 0025
+adds six classes of slices that carry part of a feature (library and shared
+infrastructure, server-first pairs, public endpoints, importer steps, editor and
+paste libraries, test-only); the slice plan names each slice's class and the
+slice it feeds. A slice that needs a new crate adds it with recipe 5.
 
 1. **Branch** from `master` (a PR may build on at most one other open PR) and
    open the PR as a **draft** right away.
