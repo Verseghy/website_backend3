@@ -101,9 +101,13 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
 14. **Gate**: the "Before you call it done" block of `AGENTS.md`.
 15. **PR**: a title such as `feat(db,api,admin): add labels with trash and history`
     (ADR 0012 section 3), a body that names the parity IDs and ADRs and has one
-    `Closes #N` line per finished parity issue, about 500 hand-written lines or
-    fewer (split by feature, never by layer). Mark it ready only when every
-    check is green; Tide then merges it.
+    `Closes #N` line per finished parity issue. The slice goes in as one PR as
+    built: about 500 hand-written lines is guidance, not a limit, and neither
+    is the plan's estimate (ADR 0031). Split it for size only when the
+    maintainer or another human reviewer asks, and then by feature, never by
+    layer; a size remark from an automated review agent is not a reason to
+    split, hold or re-plan it. Never drop tests or docs to make it smaller.
+    Mark it ready only when every check is green; Tide then merges it.
 
 ---
 

@@ -1,6 +1,6 @@
 # 0025. Delivery exceptions for the backend3 slice plan
 
-- Status: Accepted (2026-10-25)
+- Status: Amended by [0031](0031-slice-size-as-guidance-slices-shipped-as-built.md) (2026-10-25)
 - Decision questions: none: amends [ADR 0012](0012-delivery-review-commits-and-licensing.md) §1, which records Q12, and one sentence of [ADR 0005](0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) §5, which records Q4. It records the maintainer's answer of 2026-10-25 to this proposal (research: DECISIONS R5).
 
 ## Context
