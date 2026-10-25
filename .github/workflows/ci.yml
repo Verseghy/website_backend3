@@ -119,7 +119,24 @@ jobs:
       - name: Script tests (scripts/tests)
         run: bash scripts/tests/run-all.sh
       - name: cargo nextest
+        # The first of ADR 0010's two process-TZ runs: UTC, as in production.
+        env:
+          TZ: UTC
         run: cargo nextest run --locked --workspace --all-targets
+      - name: cargo nextest under a second process TZ
+        # ADR 0010: the same tests must all pass under another process TZ, so
+        # the outcomes are identical. Pacific/Chatham (+12:45/+13:45, southern
+        # clock changes) differs from UTC and Budapest in offset and often in
+        # date. A step of this job, so no context changes (ADR 0022 section 3).
+        env:
+          TZ: Pacific/Chatham
+        run: |
+          # An unknown TZ silently means UTC; stop instead of repeating run one.
+          if [[ ! -f /usr/share/zoneinfo/$TZ || $(date +%z) == +0000 ]]; then
+            echo "::error::TZ=$TZ is not in effect on this runner"
+            exit 1
+          fi
+          cargo nextest run --locked --workspace --all-targets
       - name: Doc tests
         # nextest does not run doctests.
         run: cargo test --locked --workspace --doc

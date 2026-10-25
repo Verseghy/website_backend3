@@ -145,7 +145,8 @@ Run the same gate as CI, from the repository root:
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 podman-compose up -d postgres
-cargo nextest run --locked --workspace --all-targets
+TZ=UTC cargo nextest run --locked --workspace --all-targets
+TZ=Pacific/Chatham cargo nextest run --locked --workspace --all-targets  # a second process TZ (ADR 0010)
 cargo test --locked --workspace --doc     # nextest does not run doctests
 bash scripts/tests/run-all.sh             # the shell-script tests
 bash scripts/sync-loco-skill.sh --check   # the vendored Loco skill is unchanged

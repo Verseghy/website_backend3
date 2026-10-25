@@ -192,7 +192,7 @@ Decision 9 says everything is `timestamptz` (research: DECISIONS 9). [ADR 0010](
 - "Now" and "today" are Europe/Budapest. They are used by `/canteen/current`, notice expiry and the undated-draft preview rule (7.3).
 - Code in `src/domain/` takes "now" as an argument; it never reads the clock ([ADR 0008](adr/0008-code-layout-a-pure-src-domain-beside-loco-models.md)). Tests inject fixed instants.
 - Rendering an instant in Europe/Budapest is always well defined. In the autumn fall-back hour two different instants render to the same wall time (for example both `2026-10-25 02:30:00`); that is correct and expected.
-- Grid and range bounds that this API defines as local midnights (the events grid, section 7.10) are converted to instants with the zone. Midnight is never skipped or repeated in Europe/Budapest, because the clock changes at 02:00 and 03:00.
+- Grid and range bounds that this API defines as local midnights (the events grid, section 7.10) are converted to instants with the zone. Since 1984 midnight is never skipped or repeated in Europe/Budapest, because the clocks change at 02:00 and 03:00; the ADR 0010 conversion module refuses the few earlier days that have no midnight.
 - Converting legacy wall times to instants, including wall times that fall into the spring gap or the autumn overlap, is the importer's job ([ADR 0017](adr/0017-legacy-data-import-normalisation-and-defect-resolution.md); [data-migration.md](data-migration.md) §5.2 takes the earlier instant in the autumn overlap). The importer must round-trip: for every imported event, rendering the stored instant gives back the legacy wall time.
 
 ## 5. Pagination
