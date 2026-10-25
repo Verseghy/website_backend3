@@ -11,6 +11,20 @@
       "Bash(oc delete application *)",
       "Bash(oc delete applications *)",
       "Bash(oc delete applications.argoproj.io *)",
+      "Bash(oc delete namespace *)",
+      "Bash(oc delete namespace/*)",
+      "Bash(oc delete namespaces *)",
+      "Bash(oc delete ns *)",
+      "Bash(oc delete ns/*)",
+      "Bash(oc delete project *)",
+      "Bash(oc delete project/*)",
+      "Bash(oc delete projects *)",
+      "Bash(argocd app delete *)",
+      "Bash(argocd app delete-resource *)",
+      "Bash(argocd appset delete *)",
+      "Bash(oc patch *finalizers*)",
+      "Bash(oc patch *persistentVolumeReclaimPolicy*Delete*)",
+      "Bash(oc patch *persistentVolumeReclaimPolicy*Recycle*)",
       "Bash(* --force --grace-period=0*)",
       "Bash(* --grace-period=0 --force*)",
       "Bash(kubectl *)"
@@ -21,7 +35,12 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-bash.sh" }
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-bash.sh",
+            "args": [],
+            "onFailure": "block"
+          }
         ]
       }
     ]

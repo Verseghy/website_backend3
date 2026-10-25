@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
 # test-guard-bash.sh: tests for .claude/hooks/guard-bash.sh, the PreToolUse
-# hook of the guardrails (ADR 0024 section 4, layer 2).
+# hook of the guardrails (ADR 0024 section 4, layer 2, as amended by ADR 0028).
 #
 # Why it exists
 #   The hook runs before every Bash command an agent runs in this repository.
 #   A bug in it either lets a destructive command through or blocks legitimate
-#   work, so every rule of ADR 0024 section 4 is pinned here: each check 1
-#   command in the cargo loco, app-binary, oc exec, oc rsh and oc debug forms;
-#   each check 2 target source (inline variables, -h, -d URIs, host= strings,
-#   positional URIs, -u, the environment, IMPORT_SOURCE_DATABASE_URL, plus
-#   PGHOSTADDR and PGSERVICE); a command with no target; wrapped forms (sh -c,
-#   also with `--` and other options, here-strings, scripts piped into a
-#   shell, heredocs, also those that oc exec, oc rsh or oc debug run in the
-#   cluster, piped through further stages and line breaks too, in pipelines
-#   longer than 16 KiB, and as xargs arguments); the command part of oc exec,
-#   oc rsh and oc debug (rsh's --shell and -f included), so that pod,
-#   container and namespace names, data paths and search patterns do not
-#   count; oc delete of what an oc get of a protected kind produces; allowed
-#   commands; a missing jq; and the cost of long commands.
+#   work, so every rule of ADR 0024 section 4 and ADR 0028 is pinned here:
+#   each check 1 command in the cargo loco, app-binary, oc exec, oc rsh and
+#   oc debug forms; each check 2 target source (inline variables, -h, -d URIs,
+#   host= strings, positional URIs, -u, the environment,
+#   IMPORT_SOURCE_DATABASE_URL, plus PGHOSTADDR and PGSERVICE); a command with
+#   no target; wrapped forms (sh -c, also with `--` and other options,
+#   here-strings, scripts piped into a shell, heredocs, also those that
+#   oc exec, oc rsh or oc debug run in the cluster, piped through further
+#   stages and line breaks too, in pipelines longer than 16 KiB, and as xargs
+#   arguments); the command part of oc exec, oc rsh and oc debug (rsh's
+#   --shell and -f included), so that pod, container and namespace names, data
+#   paths and search patterns do not count; oc delete of what an oc get of a
+#   protected kind produces; the words after an unquoted $(...), `...` or
+#   <(...), which still belong to the command around it; the checks ADR 0028
+#   adds (namespace and project deletion, argocd app delete, app
+#   delete-resource and appset delete, finalizer patches and Delete or Recycle
+#   reclaim-policy patches, port-forwards to PostgreSQL, MySQL, MariaDB and
+#   Redis ports, the mariadb client), each with the commit, PR and search
+#   texts that only mention them; the cargo aliases that check 2 counts
+#   (cargo run, r, loco-tool and t); allowed commands; a missing jq; the cost
+#   of long commands;
+#   and the hook entry of .claude/settings.json, which must equal ADR 0028's
+#   layer-1 block and run the hook in exec form with "onFailure": "block".
 #
 # How it works
 #   Each case builds a PreToolUse payload with jq (the shape Claude Code sends,
@@ -157,30 +167,71 @@ fi
 # ------------------------------------------------------------- the wiring in .claude/settings.json
 
 settings="$repo_root/.claude/settings.json"
-adr="$repo_root/docs/design/adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md"
-# The layer-1 JSON block of ADR 0024 section 4 must be the committed settings.
+adr="$repo_root/docs/design/adr/0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md"
+# The layer-1 JSON block of ADR 0028 section 3, which replaces the block of
+# ADR 0024 section 4, must be the committed settings.
 adr_settings="$(awk '/^\*\*Layer 1: deny rules/{f=1} f && /^```json$/{g=1; next} g && /^```$/{exit} g{print}' "$adr")"
 if [[ -n "$adr_settings" ]] && [[ "$(jq -S . <<<"$adr_settings")" == "$(jq -S . "$settings")" ]]; then
-  report ok ".claude/settings.json equals the layer-1 block of ADR 0024 section 4" ""
+  report ok ".claude/settings.json equals the layer-1 block of ADR 0028 section 3" ""
 else
-  report fail ".claude/settings.json equals the layer-1 block of ADR 0024 section 4" \
+  report fail ".claude/settings.json equals the layer-1 block of ADR 0028 section 3" \
     "  diff: $(diff <(jq -S . <<<"$adr_settings" 2>&1) <(jq -S . "$settings" 2>&1) || true)"
 fi
-# Claude Code runs a shell-form hook command with `sh -c` and exports
-# CLAUDE_PROJECT_DIR (Claude Code docs, "Hooks reference"); do the same.
-hook_command="$(jq -r '.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[0].command' "$settings")"
-set +e
-env "${clean_db_env[@]}" CLAUDE_PROJECT_DIR="$repo_root" sh -c "$hook_command" <"$fixtures/pretooluse-bash-kubectl.json" >/dev/null 2>&1
-wired_block=$?
-env "${clean_db_env[@]}" CLAUDE_PROJECT_DIR="$repo_root" sh -c "$hook_command" <"$fixtures/pretooluse-bash-allowed.json" >/dev/null 2>&1
-wired_allow=$?
-set -e
-if [[ "$wired_block" == 2 && "$wired_allow" == 0 ]]; then
-  report ok "the hook command in settings.json runs the hook under sh -c" ""
+
+# The hook entry (ADR 0028 section 3): one command handler for Bash, in exec
+# form with the script itself as the command and an empty args array (so a
+# client that predates args still starts the hook in shell form, rather than
+# a bare `bash` reading the JSON input as a script), with "onFailure":
+# "block", and not a background hook, on which onFailure has no effect
+# (Claude Code docs, "Hooks reference", "Block the action when a hook fails").
+handlers="$(jq -c '[.hooks.PreToolUse[]? | select(.matcher == "Bash") | .hooks[]?]' "$settings")"
+if jq -e 'length == 1 and (.[0] | .type == "command" and .args == []
+          and (.command | type == "string" and endswith("/.claude/hooks/guard-bash.sh"))
+          and .onFailure == "block" and (has("async") | not) and (has("asyncRewake") | not))' \
+  <<<"$handlers" >/dev/null; then
+  report ok "the Bash hook entry is one exec-form command hook with onFailure block" ""
 else
-  report fail "the hook command in settings.json runs the hook under sh -c" \
-    "  command: $hook_command; exits: $wired_block (want 2) and $wired_allow (want 0)"
+  report fail "the Bash hook entry is one exec-form command hook with onFailure block" "  handlers: $handlers"
 fi
+
+# Runs the Bash hook entry of settings.json the way Claude Code runs an
+# exec-form command hook (Claude Code docs, "Hooks reference", "Exec form and
+# shell form"): ${CLAUDE_PROJECT_DIR} is substituted into command and into
+# every args element as a plain string, the result is spawned directly with no
+# shell, and CLAUDE_PROJECT_DIR is exported to the process.
+#   $1 - the project directory; $2 - the payload file.
+# Sets: status (the exit code).
+run_wired_hook() {
+  local dir="$1" payload="$2" word
+  local -a argv=()
+  while IFS= read -r -d '' word; do argv+=("$word"); done < <(
+    jq -j --arg dir "$dir" '.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[0]
+      | ([.command] + .args)[] | (split("${CLAUDE_PROJECT_DIR}") | join($dir)) + "\u0000"' "$settings")
+  set +e
+  env "${clean_db_env[@]}" CLAUDE_PROJECT_DIR="$dir" "${argv[@]}" <"$payload" >/dev/null 2>&1
+  status=$?
+  set -e
+}
+
+# The project directory may hold a space: exec form passes the path as one
+# argument, which the old shell form needed quotes for.
+spaced_project="$work/project dir"
+mkdir -p "$spaced_project/.claude/hooks"
+cp -p "$hook" "$spaced_project/.claude/hooks/guard-bash.sh"
+for project in "$repo_root" "$spaced_project"; do
+  where="the repository"
+  [[ "$project" == "$repo_root" ]] || where="a project path with a space"
+  label="the exec-form hook entry runs the hook from $where"
+  run_wired_hook "$project" "$fixtures/pretooluse-bash-kubectl.json"
+  wired_block=$status
+  run_wired_hook "$project" "$fixtures/pretooluse-bash-allowed.json"
+  wired_allow=$status
+  if [[ "$wired_block" == 2 && "$wired_allow" == 0 ]]; then
+    report ok "$label" ""
+  else
+    report fail "$label" "  exits: $wired_block (want 2) and $wired_allow (want 0); handlers: $handlers"
+  fi
+done
 
 # ------------------------------------------------------------- hook input
 
@@ -350,6 +401,10 @@ blocks 'names=$(oc get app -o name); oc delete $names'
 blocks 'oc get pvc -o yaml | oc delete -f -'
 blocks 'oc get pvc -o yaml | oc delete --filename=/dev/stdin'
 blocks 'oc delete -f <(oc get pv -o yaml)'
+# Options after the substitution do not hide it.
+blocks 'oc delete -f <(oc get pv -o yaml) --wait=false'
+blocks 'oc delete `oc get pv -o name` --wait=false'
+blocks 'oc delete $(oc get pvc -o name) --wait=false'
 blocks "sh -c 'oc get pvc -o name | xargs oc delete'"
 # The producer names another kind, the oc delete fixes its type in the text
 # (kubectl refuses to mix `pod` with the `persistentvolumeclaim/...` names),
@@ -358,6 +413,7 @@ allows 'oc delete $(oc get pods -o name)'
 allows 'oc get deployments -o name | xargs oc delete'
 allows 'oc get pods data-pvc -o name | xargs oc delete'
 allows 'oc delete pod $(oc get pvc -o name)'
+allows 'oc delete pod `oc get pvc -o name` --wait=false'
 allows 'oc get pvc -o name | xargs oc describe'
 allows 'oc get pvc && oc delete pod web-0'
 allows 'oc get pvc; oc delete pod "$POD" -n web'
@@ -371,6 +427,227 @@ blocks 'oc get pv -o name | xargs --replace=R oc delete R'
 allows 'oc get pvc -o name | xargs oc delete pod'
 allows 'oc get pvc -n verseghy && oc get pods --no-headers | awk '\''/Evicted/{print $1}'\'' | xargs oc delete pod -n verseghy'
 reason_mentions 'oc get pvc -o name | xargs oc delete' 'runs `oc get pvc`'
+
+# ------------------------------------------------------------- check 1: oc delete of namespaces and projects (ADR 0028)
+
+# Deleting a namespace or an OpenShift project deletes everything in it, its
+# PVCs included, so both count like a PVC in every spelling and position.
+blocks 'oc delete namespace web'
+blocks 'oc delete namespaces web'
+blocks 'oc delete ns web'
+blocks 'oc delete ns/web'
+blocks 'oc delete namespace/web'
+blocks 'oc delete Namespace web'
+blocks 'oc delete namespace.v1/web'
+blocks 'oc delete project web'
+blocks 'oc delete projects web'
+blocks 'oc delete project/web'
+blocks 'oc delete projects.project.openshift.io web'
+blocks 'oc delete pods,ns --all'
+blocks 'oc delete pod/web-0 project/web'
+blocks 'oc -n web delete ns verseghy-staging'
+blocks "sh -c 'oc delete project web'"
+blocks 'oc exec toolbox -- oc delete ns web'
+blocks 'oc get ns -o name | grep staging | xargs oc delete'
+blocks 'oc delete $(oc get projects -o name)'
+blocks 'for n in $(oc get namespaces -o name); do oc delete "$n"; done'
+allows 'oc get ns'
+allows 'oc get projects'
+allows 'oc describe namespace web'
+allows 'oc project web'
+allows 'oc delete pod web-0 -n web'
+allows 'oc delete pod web-0 --namespace=web'
+allows 'oc delete configmap ns-config'
+allows 'oc delete deployment project'
+allows 'oc get ns && oc delete pod "$POD" -n web'
+allows "git commit -m 'fix(deploy): block oc delete namespace and oc delete project'"
+allows "gh pr create --title 'fix(deploy): widen the guardrails' --body 'oc delete ns web is blocked now'"
+allows "grep -rn 'oc delete project' docs"
+allows $'git commit -F - <<\'EOF\'\nfix(deploy): block namespace deletes\n\noc delete ns web\noc delete project web\nEOF'
+reason_mentions 'oc delete ns web' 'namespace or project'
+reason_mentions 'oc delete project web' 'deletes everything in it'
+
+# ------------------------------------------------------------- check 1: argocd app delete (ADR 0028)
+
+blocks 'argocd app delete backend3'
+blocks 'argocd app delete backend3 --cascade=false'
+blocks 'argocd app delete backend3 -y'
+blocks 'argocd app delete -l app.kubernetes.io/part-of=website'
+blocks 'argocd app delete openshift-gitops/backend3 --app-namespace openshift-gitops'
+blocks 'argocd --grpc-web --server argocd.example.org app delete backend3'
+blocks 'argocd --core app delete backend3'
+blocks 'argocd app --server argocd.example.org delete backend3'
+blocks '/usr/local/bin/argocd app delete backend3'
+# An option the hook does not know cannot hide the subcommands: before `app`
+# its value is only one more positional word, and between `app` and `delete`
+# it may take the word after it as its value.
+blocks 'argocd --some-new-option value app delete backend3'
+blocks 'argocd app --some-new-option v delete backend3'
+blocks 'argocd app --some-new-option delete backend3'
+blocks 'argocd app --grpc-web --some-new-option v delete backend3'
+blocks "sh -c 'argocd app delete backend3'"
+blocks 'echo backend3 | xargs argocd app delete'
+blocks 'oc exec toolbox -- argocd app delete backend3'
+# The hook skips each option of argocd_value_options together with its value.
+# An unknown option alone is covered by the rule above, so each listed option
+# is tested next to one: if a listed option were dropped from the list, its
+# value would be a second positional word before the subcommand, and the
+# subcommand would be missed. argocd's global value options (root.go at
+# argoproj/argo-cd@17b98d9b6) count for all three deleting commands; each
+# subcommand's own value options are tested in its section.
+argocd_global_value_options=(--config --server --server-crt --client-crt --client-crt-key --auth-token
+  --grpc-web-root-path --logformat --loglevel --header -H --port-forward-namespace --http-retry-max
+  --argocd-context --server-name --controller-name --redis-haproxy-name --redis-name
+  --repo-server-name --redis-compress --kube-context)
+for opt in "${argocd_global_value_options[@]}"; do
+  blocks "argocd app --some-new-option v $opt x delete backend3"
+  blocks "argocd app --some-new-option v $opt x delete-resource backend3 --kind Pod"
+  blocks "argocd appset --some-new-option v $opt x delete website"
+done
+for opt in --propagation-policy -p --selector -l --app-namespace -N; do
+  blocks "argocd app --some-new-option v $opt x delete backend3"
+done
+# A boolean option takes no value, so it must never be in argocd_value_options:
+# listed, it would take the subcommand after it as its value. argocd's global
+# boolean options (root.go) before each deleting subcommand pin that.
+for opt in --plaintext --insecure --grpc-web --port-forward --core --prompts-enabled; do
+  blocks "argocd app $opt delete backend3"
+  blocks "argocd app $opt delete-resource backend3 --kind Pod"
+  blocks "argocd appset $opt delete website"
+done
+allows 'argocd app list'
+allows 'argocd app get backend3'
+allows 'argocd app sync backend3'
+allows 'argocd app diff backend3'
+allows 'argocd app get delete'
+allows 'argocd app --some-new-option=v get delete'
+allows 'argocd app --server argocd.example.org get backend3 delete'
+allows 'argocd proj list'
+allows "git commit -m 'docs(docs): argocd app delete is blocked'"
+allows "gh pr comment 204 --body 'never run argocd app delete'"
+allows "grep -rn 'argocd app delete' docs"
+allows $'git commit -F - <<\'EOF\'\nfix(deploy): block argocd app delete\n\nargocd app delete backend3\nEOF'
+reason_mentions 'argocd app delete backend3' 'Argo CD Application'
+
+# ------------------------------------------------------------- check 1: argocd app delete-resource and appset delete (D69)
+
+# delete-resource deletes managed resources of any kind, a PVC included, and
+# appset delete deletes the ApplicationSet's Applications, so every kind,
+# option and position counts, as for app delete.
+blocks 'argocd app delete-resource backend3 --kind PersistentVolumeClaim --resource-name data'
+blocks 'argocd app delete-resource backend3 --kind Pod --resource-name web-0'
+blocks 'argocd app delete-resource backend3 --kind Deployment --all --orphan'
+blocks 'argocd app delete-resource openshift-gitops/backend3 --kind=ConfigMap --namespace=web'
+blocks 'argocd --grpc-web --server argocd.example.org app delete-resource backend3 --kind Pod'
+blocks 'argocd app --server argocd.example.org delete-resource backend3 --kind Pod'
+# delete-resource's own value options before it are skipped with their value:
+# cobra reads an option that `app` does not define as taking the next word, so
+# argocd runs these as delete-resource. Two of them before the subcommand, or
+# one next to an unknown option, leave two words that are not the subcommand
+# when the hook does not know the option.
+blocks 'argocd app --kind Pod delete-resource backend3'
+blocks 'argocd app --kind Pod --resource-name data delete-resource backend3'
+blocks 'argocd app --project default --namespace web delete-resource backend3 --kind Pod'
+blocks 'argocd app --group apps --kind Deployment delete-resource backend3'
+for opt in --resource-name --kind --group --namespace --project; do
+  blocks "argocd app --some-new-option v $opt x delete-resource backend3"
+done
+blocks 'argocd --some-new-option value app delete-resource backend3'
+blocks 'argocd app --some-new-option v delete-resource backend3 --kind Pod'
+blocks 'argocd app --some-new-option delete-resource backend3 --kind Pod'
+blocks 'argocd appset delete website'
+blocks 'argocd appset delete website website-staging -y'
+blocks 'argocd appset delete openshift-gitops/website --yes'
+blocks 'argocd --core appset delete website'
+blocks 'argocd --server argocd.example.org --grpc-web appset delete website'
+blocks 'argocd appset --server argocd.example.org delete website'
+blocks 'argocd --some-new-option value appset delete website'
+blocks 'argocd appset --some-new-option v delete website'
+blocks 'argocd appset --some-new-option delete website'
+blocks '/usr/local/bin/argocd appset delete website'
+blocks "sh -c 'argocd appset delete website'"
+blocks "bash -c 'argocd app delete-resource backend3 --kind PersistentVolumeClaim'"
+blocks 'echo website | xargs argocd appset delete'
+blocks 'echo backend3 | xargs -I{} argocd app delete-resource {} --kind Pod'
+blocks 'oc exec toolbox -- argocd appset delete website'
+blocks $'bash <<\'EOF\'\nargocd appset delete website\nEOF'
+blocks 'argocd appset delete $(argocd appset list -o name)'
+allows 'argocd app get-resource backend3 --kind Pod --resource-name web-0'
+allows 'argocd app patch-resource backend3 --kind Deployment --resource-name web --patch "{}"'
+allows 'argocd app resources backend3'
+allows 'argocd app get delete-resource'
+allows 'argocd app --some-new-option=v get delete-resource'
+allows 'argocd appset list'
+allows 'argocd appset get website'
+allows 'argocd appset get delete'
+allows 'argocd appset --some-new-option=v get delete'
+allows 'argocd appset generate appset.yaml'
+allows 'argocd proj delete-resource'
+allows "git commit -m 'fix(deploy): block argocd app delete-resource and argocd appset delete'"
+allows "gh pr create --title 'fix(deploy): widen the guardrails' --body 'argocd appset delete website is blocked'"
+allows "grep -rn 'argocd appset delete' docs"
+allows $'git commit -F - <<\'EOF\'\nfix(deploy): block argocd appset delete\n\nargocd appset delete website\nargocd app delete-resource backend3 --kind Pod\nEOF'
+reason_mentions 'argocd app delete-resource backend3 --kind PersistentVolumeClaim' '`argocd app delete-resource`'
+reason_mentions 'argocd app delete-resource backend3 --kind PersistentVolumeClaim' 'a PersistentVolumeClaim included'
+reason_mentions 'argocd appset delete website' '`argocd appset delete`'
+reason_mentions 'argocd appset delete website' 'all its Applications'
+reason_mentions 'argocd appset delete website' 'Stop and ask the maintainer'
+
+# ------------------------------------------------------------- check 1: oc patch of finalizers and reclaim policies (ADR 0028)
+
+# Any change to finalizers counts, in every patch type, because the hook
+# cannot tell a removal from an addition in all of them.
+blocks "oc patch pvc data -p '{\"metadata\":{\"finalizers\":null}}'"
+blocks "oc patch pv pv-1 --type=merge -p '{\"metadata\":{\"finalizers\":[]}}'"
+blocks "oc patch application backend3 -n openshift-gitops --type json -p '[{\"op\":\"remove\",\"path\":\"/metadata/finalizers\"}]'"
+blocks "oc patch ns web --patch='{\"metadata\":{\"finalizers\":null}}'"
+blocks "oc patch namespace web -p '{\"spec\":{\"finalizers\":[]}}'"
+blocks "oc patch pvc data -p '{\"metadata\":{\"\$deleteFromPrimitiveList/finalizers\":[\"kubernetes.io/pvc-protection\"]}}'"
+blocks "oc patch pvc/data --type json -p='[{\"op\":\"add\",\"path\":\"/metadata/finalizers/-\",\"value\":\"x\"}]'"
+blocks "oc patch pvc data -p '{\"metadata\":{\"Finalizers\":null}}'"
+blocks "oc -n web patch pvc data -p '{\"metadata\":{\"finalizers\":null}}'"
+blocks "oc exec toolbox -- oc patch pvc data -p '{\"metadata\":{\"finalizers\":null}}'"
+# A reclaim policy of Delete, or one only the shell knows.
+blocks "oc patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Delete\"}}'"
+blocks "oc patch pv/pv-1 --type json -p '[{\"op\":\"replace\",\"path\":\"/spec/persistentVolumeReclaimPolicy\",\"value\":\"Delete\"}]'"
+blocks "oc patch pv pv-1 -p '{\"spec\":{\"persistentvolumereclaimpolicy\":\"delete\"}}'"
+blocks "oc patch pv pv-1 -p 'spec: {persistentVolumeReclaimPolicy: Delete}'"
+blocks 'oc patch pv pv-1 -p "{\"spec\":{\"persistentVolumeReclaimPolicy\":\"$POLICY\"}}"'
+blocks "bash -c 'oc patch pv pv-1 -p \"{\\\"spec\\\":{\\\"persistentVolumeReclaimPolicy\\\":\\\"Delete\\\"}}\"'"
+blocks "oc get pv -o name | xargs -I{} oc patch {} -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Delete\"}}'"
+# The deprecated Recycle wipes the volume's data when its claim is released
+# (D69), in every patch type, case and wrapper, like Delete.
+blocks "oc patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'"
+blocks "oc patch pv pv-1 --type=merge -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'"
+blocks "oc patch pv/pv-1 --type json -p '[{\"op\":\"replace\",\"path\":\"/spec/persistentVolumeReclaimPolicy\",\"value\":\"Recycle\"}]'"
+blocks "oc patch pv pv-1 --patch='{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'"
+blocks "oc patch pv pv-1 -p '{\"spec\":{\"persistentvolumereclaimpolicy\":\"recycle\"}}'"
+blocks "oc patch pv pv-1 -p 'spec: {persistentVolumeReclaimPolicy: Recycle}'"
+blocks "oc -n web patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'"
+blocks "sh -c 'oc patch pv pv-1 -p \"{\\\"spec\\\":{\\\"persistentVolumeReclaimPolicy\\\":\\\"Recycle\\\"}}\"'"
+blocks "oc exec toolbox -- oc patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'"
+blocks "oc get pv -o name | xargs -I{} oc patch {} -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'"
+# Retain is what a human asks agents to set; a word elsewhere in the command,
+# such as a PV named pv-delete-01 or pv-recycle-01, does not count.
+allows "oc patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Retain\"}}'"
+allows "oc patch pv pv-delete-01 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Retain\"}}'"
+allows "oc patch pv pv-recycle-01 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Retain\"}}'"
+allows "oc patch deployment recycler -p '{\"spec\":{\"replicas\":0}}'"
+allows "for pv in pv-1 pv-2; do oc patch pv \"\$pv\" -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Retain\"}}'; done"
+allows "oc patch deployment web -p '{\"spec\":{\"replicas\":2}}'"
+allows "oc patch deployment web --type json -p '[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/env/1\"}]'"
+allows "oc get pvc data -o jsonpath='{.metadata.finalizers}'"
+allows "oc get pv -o custom-columns=NAME:.metadata.name,POLICY:.spec.persistentVolumeReclaimPolicy"
+allows "git commit -m 'fix(deploy): block an oc patch that removes finalizers'"
+allows "gh pr create --body 'oc patch pv -p persistentVolumeReclaimPolicy Delete is blocked'"
+allows 'grep -rn persistentVolumeReclaimPolicy docs'
+allows $'git commit -F - <<\'EOF\'\nfix(deploy): block finalizer patches\n\noc patch pvc data -p \'{"metadata":{"finalizers":null}}\'\nEOF'
+reason_mentions "oc patch pvc data -p '{\"metadata\":{\"finalizers\":null}}'" 'changes finalizers'
+reason_mentions "oc patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Delete\"}}'" 'Retain is allowed'
+reason_mentions "oc patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'" 'Delete or Recycle'
+reason_mentions "oc patch pv pv-1 -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Recycle\"}}'" 'data wiped'
+allows "git commit -m 'fix(deploy): block an oc patch to the Recycle reclaim policy'"
+allows "gh pr comment 216 --body 'oc patch pv -p persistentVolumeReclaimPolicy Recycle is blocked'"
 
 # ------------------------------------------------------------- check 1: data-wiping db subcommands
 
@@ -602,6 +879,30 @@ blocks "DATABASE_URL=$remote_pg cargo r -- db migrate"
 blocks 'cargo run -- start' "DATABASE_URL=$remote_pg"
 allows 'cargo run -- db migrate'
 allows 'cargo run --release -- start'
+# The cargo aliases that run the same programs (D69, ADR 0028 section 4):
+# loco-tool is the same alias as loco in .cargo/config.toml, and r and t are
+# cargo's built-in aliases of run and test.
+blocks "DATABASE_URL=$remote_pg cargo loco-tool db migrate"
+blocks 'cargo loco-tool start' "DATABASE_URL=$remote_pg"
+blocks "PGHOST=db.example.org cargo loco-tool db migrate"
+blocks 'cargo r -- start' "DATABASE_URL=$remote_pg"
+blocks "DATABASE_URL=$remote_pg cargo t"
+blocks "DATABASE_URL=$remote_pg cargo t --workspace"
+blocks 'cargo t' "DATABASE_URL=$remote_pg"
+blocks "DATABASE_URL=$remote_pg cargo +stable t"
+blocks "IMPORT_SOURCE_DATABASE_URL=$remote_mysql cargo loco-tool task import_mysql"
+blocks "IMPORT_SOURCE_DATABASE_URL=$remote_mysql cargo t"
+blocks "sh -c 'DATABASE_URL=$remote_pg cargo t'"
+blocks 'oc exec deploy/backend3 -- cargo loco-tool db migrate'
+blocks 'oc exec deploy/backend3 -- cargo t'
+blocks 'cargo loco-tool db reset'
+allows "DATABASE_URL=$local_pg cargo loco-tool db migrate"
+allows 'cargo loco-tool start'
+allows 'cargo r -- start'
+allows "DATABASE_URL=$local_pg cargo t"
+allows 'cargo t --workspace'
+reason_mentions "DATABASE_URL=$remote_pg cargo t" "\`cargo t\` would use the database target"
+reason_mentions "DATABASE_URL=$remote_pg cargo loco-tool db migrate" "\`cargo loco-tool\` would use the database target"
 # Assignments apply where the shell applies them: later segments and nested
 # command strings see them, earlier segments do not, and the latest wins.
 blocks "DATABASE_URL=$remote_pg bash -c 'cargo test'"
@@ -764,6 +1065,149 @@ allows "git commit -m 'block oc exec|rsh|debug with psql|mysql in the command pa
 allows "gh pr comment 200 --body 'oc rsh <pod> (with psql) is blocked'"
 reason_mentions 'oc rsh postgres-0 psql' 'git commit -F <file>'
 
+# A pod looked up with an unquoted $(...) or `...` does not end the command:
+# the words after it are still the command part of the oc exec or oc rsh.
+blocks 'oc exec $(oc get pod -l app=postgres -o name) -- psql'
+blocks 'oc exec `oc get pod -l app=postgres -o name` -- psql'
+blocks 'oc exec -n verseghy $(oc get pod -o name | head -1) -- sh -c "psql -c \"select 1\""'
+blocks 'oc rsh $(oc get pod -o name) psql'
+blocks 'oc debug $(oc get pod -o name) -- mariadb'
+blocks 'echo psql | oc exec -i $(oc get pod -o name) -- sh'
+blocks 'oc exec $(oc get pod -o name) -- cargo loco db reset'
+allows 'oc exec $(oc get pod -l app=web -o name) -- ls /tmp'
+allows 'oc exec web-0 -- ls $(echo /tmp) /var'
+allows 'oc rsh `oc get pod -l app=web -o name` df -h'
+
+# ------------------------------------------------------------- check 2: oc port-forward to a database (ADR 0028)
+
+# A port-forward makes the cluster database answer on localhost, which check 2
+# would count as local. The remote part of a port spec decides: 5432, 3306 or
+# 33060, a named port that names a database, or a value that cannot be checked.
+blocks 'oc port-forward svc/postgres 5432'
+blocks 'oc port-forward svc/postgres 15432:5432'
+blocks 'oc port-forward -n verseghy pod/postgres-0 :5432'
+blocks 'oc port-forward deploy/mysql 3306:3306'
+blocks 'oc port-forward svc/mysql 33060'
+blocks 'oc port-forward svc/postgres 05432'
+# Each part of the named-port rule: `postgres`, `mariadb` and `sql` anywhere
+# in the name (`mysql` contains `sql`), and the whole name `db`.
+blocks 'oc port-forward svc/legacy 13306:mysql'
+blocks 'oc port-forward svc/backend3-db 15432:postgresql'
+blocks 'oc port-forward svc/backend3-db 15432:postgres'
+blocks 'oc port-forward svc/backend3-db 15432:tcp-postgres'
+blocks 'oc port-forward svc/legacy 13306:mariadb'
+blocks 'oc port-forward svc/backend3-db 15432:pgsql'
+blocks 'oc port-forward svc/backend3-db 15432:db'
+allows 'oc port-forward svc/backend3 8080:http'
+allows 'oc port-forward svc/backend3-db 9187:dbmetrics'
+# Redis (D69): its port 6379 and Sentinel's 26379, and named ports that
+# contain redis or sentinel, in every form the PostgreSQL and MySQL ports take.
+blocks 'oc port-forward svc/redis-backend2 6379'
+blocks 'oc port-forward svc/redis-backend2 16379:6379'
+blocks 'oc port-forward -n verseghy-website deploy/redis-backend2 :6379'
+blocks 'oc port-forward pod/cache-0 6379:6379'
+blocks 'oc port-forward svc/redis-sentinel 26379'
+blocks 'oc port-forward svc/cache 36379:26379'
+blocks 'oc port-forward svc/cache 16379:redis'
+blocks 'oc port-forward svc/cache 16379:tcp-redis'
+blocks 'oc port-forward svc/cache 16379:Redis'
+blocks 'oc port-forward svc/cache 36379:tcp-sentinel'
+blocks 'oc port-forward svc/web 8080:80 16379:6379'
+blocks 'oc --namespace verseghy-website port-forward svc/redis-backend2 6379'
+blocks 'oc port-forward --address 0.0.0.0 svc/redis-backend2 6379'
+blocks 'oc port-forward svc/redis-backend2 16379:6379 & redis-cli -p 16379'
+blocks "sh -c 'oc port-forward svc/redis-backend2 6379'"
+blocks 'oc exec toolbox -- oc port-forward svc/redis-backend2 6379'
+blocks 'echo 6379 | xargs oc port-forward svc/redis-backend2'
+blocks 'oc port-forward $(oc get pod -l app=redis-backend2 -o name) 6379'
+blocks $'bash <<\'EOF\'\noc port-forward svc/redis-backend2 16379:6379\nEOF'
+# The name of the pod or service does not count, only the port: a Redis
+# exporter's metrics port, or a web port, on a service named redis stays
+# allowed, and so do ports that only contain 6379 among other digits.
+allows 'oc port-forward svc/redis-backend2 9121'
+allows 'oc port-forward svc/redis-exporter 9121:9121'
+allows 'oc port-forward svc/redis-commander 8081:http'
+allows 'oc port-forward svc/web 63790'
+allows 'oc port-forward svc/web 8080:16379'
+allows "git commit -m 'fix(deploy): block oc port-forward svc/redis-backend2 6379'"
+allows "gh pr comment 216 --body 'oc port-forward to 6379 is blocked'"
+allows $'git commit -F - <<\'EOF\'\nfix(deploy): block port-forwards to Redis\n\noc port-forward svc/redis-backend2 16379:6379\nEOF'
+reason_mentions 'oc port-forward svc/redis-backend2 16379:6379' "'16379:6379'"
+reason_mentions 'oc port-forward svc/redis-backend2 16379:6379' 'MariaDB or Redis port'
+# check 2 has no Redis client, so the reason does not claim it would take a
+# forwarded Redis for a local database.
+reason_mentions 'oc port-forward svc/redis-backend2 16379:6379' 'does not check Redis clients at all'
+blocks 'oc port-forward svc/web 8080:80 15432:5432'
+blocks 'oc port-forward --address 0.0.0.0 svc/postgres 5432'
+blocks 'oc --namespace verseghy port-forward svc/mysql 3306'
+blocks 'oc port-forward svc/postgres "$PORT"'
+blocks 'oc port-forward svc/postgres 15432:$REMOTE_PORT'
+blocks 'oc port-forward svc/postgres 15432:5432 & psql -h localhost -p 15432'
+blocks 'nohup oc port-forward svc/postgres 15432:5432 >/dev/null 2>&1 &'
+blocks "sh -c 'oc port-forward svc/postgres 5432'"
+blocks 'oc exec toolbox -- oc port-forward svc/postgres 5432'
+# Under xargs or parallel, appended ports cannot be seen, and a replace string
+# in a port spec cannot be checked.
+blocks 'echo 5432 | xargs oc port-forward svc/postgres'
+blocks "printf '%s\n' 5432 | xargs -I P oc port-forward svc/postgres P"
+blocks 'echo svc/postgres | xargs -I{} oc port-forward {} 5432'
+# A target looked up with an unquoted $(...) or `...` keeps the ports after it
+# in the same command.
+blocks 'oc port-forward $(oc get pod -l app=postgres -o name) 5432'
+blocks 'oc port-forward `oc get pod -l app=postgres -o name` 5432'
+blocks "oc port-forward pod/\$(oc get pod -l app=postgres -o jsonpath='{.items[0].metadata.name}') 5432"
+blocks 'oc port-forward -n web $(oc get pod -l app=postgres -o name) 15432:5432 &'
+blocks 'oc port-forward $(oc get svc -o name | grep mysql) 3306 >/dev/null 2>&1 &'
+allows 'oc port-forward $(oc get pod -l app=web -o name) 8080:5150'
+allows 'oc port-forward `oc get pod -l app=web -o name` 8080'
+# An empty port spec is no database port, and it does not crash the check.
+allows "oc port-forward svc/backend3 ''"
+allows 'oc port-forward svc/backend3 ""'
+allows 'oc port-forward svc/backend3 8080:5150'
+allows 'oc port-forward -n openshift-gitops svc/openshift-gitops-server 8443:443'
+allows 'oc port-forward pod/web-0 5432:8080'
+allows 'oc port-forward svc/prometheus 9090'
+allows 'oc port-forward svc/postgres-exporter 9187'
+# --address takes a value, so the target after it is not read as a port spec.
+allows 'oc port-forward --address 0.0.0.0 svc/postgres-exporter 9187'
+allows 'echo svc/backend3 | xargs -I{} oc port-forward {} 8080:5150'
+allows 'oc port-forward --help'
+allows "git commit -m 'fix(deploy): block oc port-forward svc/postgres 5432'"
+allows "gh pr comment 204 --body 'oc port-forward to 5432 is blocked'"
+allows $'git commit -F - <<\'EOF\'\nfix(deploy): block port-forwards to databases\n\noc port-forward svc/postgres 15432:5432\nEOF'
+allows "grep -rn 'port-forward' docs"
+reason_mentions 'oc port-forward svc/postgres 15432:5432' 'answer on localhost'
+
+# ------------------------------------------------------------- check 2: the mariadb client (ADR 0028)
+
+# mariadb is read like mysql: -h, --host, MYSQL_HOST, and always in the cluster.
+blocks 'mariadb -h db.example.org -u root legacy'
+blocks 'mariadb --host=legacy.example.org legacy'
+blocks 'mariadb -hlegacy.example.org legacy'
+blocks 'mariadb -h "$DB_HOST"'
+blocks '/usr/bin/mariadb -h legacy.example.org'
+blocks "MYSQL_HOST=legacy.example.org mariadb -e 'select 1'"
+blocks "mariadb -e 'select 1'" 'MYSQL_HOST=legacy.example.org'
+blocks "mariadb $remote_mysql"
+blocks "oc exec mariadb-0 -- mariadb -e 'select 1'"
+blocks 'oc rsh mariadb-0 mariadb'
+blocks 'oc exec mariadb-0 -- /usr/bin/mariadb'
+blocks "oc exec deploy/legacy -- sh -c 'mariadb -h 127.0.0.1'"
+blocks "echo 'mariadb -e \"select 1\"' | oc exec -i mariadb-0 -- sh"
+blocks $'oc rsh mariadb-0 <<\'EOF\'\nmariadb -e "select 1"\nEOF'
+allows 'mariadb -h 127.0.0.1 -u root legacy'
+allows 'mariadb --host=localhost legacy'
+allows "mariadb -e 'select 1'"
+allows "MYSQL_HOST=127.0.0.1 mariadb -e 'select 1'"
+allows "mariadb -h 127.0.0.1 -e 'select 1'" 'MYSQL_HOST=legacy.example.org'
+allows 'oc exec -n verseghy deploy/mariadb -- df -h'
+allows 'oc exec mariadb-0 -c mariadb -- ls /var/lib/mysql'
+allows "git commit -m 'fix(deploy): check mariadb -h like mysql -h'"
+allows "gh pr comment 204 --body 'mariadb -h db.example.org is blocked now'"
+allows "gh pr create --title 'fix(deploy): check mariadb' --body 'mariadb --host=legacy.example.org is blocked'"
+allows 'grep -rn mariadb docs'
+reason_mentions 'mariadb -h db.example.org' 'from the -h option'
+
 # ------------------------------------------------------------- check 2: wrapped forms
 
 blocks 'bash -c "psql -h db.example.org"'
@@ -774,6 +1218,30 @@ blocks "ssh bastion 'psql -h db.example.org'"
 blocks "watch 'psql -h db.example.org -c \"select 1\"'"
 blocks $'bash <<\'EOF\'\npsql -h db.example.org\nEOF'
 allows "bash -c 'psql -h localhost'"
+# The words after an unquoted $(...), `...` or process substitution still
+# belong to the command around it.
+blocks 'psql -f <(cat q.sql) -h db.example.org'
+blocks 'psql $(echo -X) -h db.example.org'
+blocks 'psql `echo -X` -h db.example.org'
+blocks 'psql -h `cat db-host`'
+blocks 'mysql -e "$(cat q.sql)" -h legacy.example.org'
+allows 'psql -f <(cat q.sql) -h localhost'
+allows 'psql -h localhost -c "$(cat q.sql)" $(echo -X)'
+allows 'echo $((1 + 2)) && psql -h localhost'
+allows '(cd /tmp && psql -h localhost)'
+allows 'diff <(oc get pods) <(oc get pods -n web)'
+# A subshell group inside a substitution does not close it early.
+blocks 'oc port-forward $( (oc get pod -l app=postgres -o name) | head -1) 5432'
+blocks 'psql $( (echo -X) ) -h db.example.org'
+# A substitution longer than the 16 KiB chunks a long text is cut into: the
+# command around it is still checked when its chunk ends.
+long_sub="$(for i in $(seq 1 1200); do printf '  echo line %d of the list\n' "$i"; done)"
+blocks "psql -h db.example.org \$(
+$long_sub
+)"
+allows "psql -h localhost \$(
+$long_sub
+)"
 
 # ------------------------------------------------------------- a long command stays cheap
 
