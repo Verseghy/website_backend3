@@ -82,9 +82,9 @@
 #   scripts/sync-parity-issues.sh --repo Verseghy/website_backend3 --project "$N"
 #
 # NOTES
-#   - The first run creates 183 issues and makes about 900 write calls. If
-#     GitHub's secondary rate limit stops it, wait and run the same command
-#     again; it continues where it stopped.
+#   - The first run creates one issue per ID of parity.md and makes about five
+#     write calls per ID. If GitHub's secondary rate limit stops it, wait and
+#     run the same command again; it continues where it stopped.
 #   - If a run stops between creating a --closed issue and closing it, the next
 #     run warns that the issue is open and leaves it alone. The warning prints
 #     the command that finishes the job by hand.
