@@ -68,16 +68,18 @@ This applies to every website build. The frontend already runs at these values t
 
 | Layer (innermost first) | Setting | Value |
 |---|---|---|
-| Shipwright BuildRun | `spec.timeout` | `1h30m0s` |
+| Shipwright BuildRun | `spec.build.spec.timeout` | `1h30m0s` |
 | `oc wait` in the task script | `--timeout` | `100m` |
 | Tekton task | `timeout` | `1h45m0s` |
 | PipelineRun | `timeouts.pipeline` | `2h0m0s` |
+
+The Shipwright setting is the inline build spec's `spec.build.spec.timeout`, because on 2026-10-24 the Builds for Red Hat OpenShift 1.8.2 controller failed the first backend3 BuildRun, which set `spec.timeout` beside `spec.build.spec`, with reason `BuildRunBuildFieldOverrideForbidden` and the message "cannot use 'timeout' override and 'buildSpec' simultaneously" (redhat-openshift-builds/shipwright-io-build@99ba109:pkg/validate/validate.go).
 
 After three successful PAC builds, a `deploy`-scoped PR to `.tekton/push.yaml` ([ADR 0012](0012-delivery-review-commits-and-licensing.md)) shrinks all four, keeping the order (research: gap-14 §9). The offsets are the same as in the starting values above:
 
 | Layer | New value |
 |---|---|
-| Shipwright BuildRun `spec.timeout` | 2 × the median BuildRun duration, rounded up to the next 5 minutes |
+| Shipwright BuildRun `spec.build.spec.timeout` | 2 × the median BuildRun duration, rounded up to the next 5 minutes |
 | `oc wait --timeout` | the BuildRun timeout + 10 min |
 | Tekton task `timeout` | the `oc wait` timeout + 5 min |
 | PipelineRun `timeouts.pipeline` | the task timeout + 15 min |
