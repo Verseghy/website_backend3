@@ -57,3 +57,7 @@ settings:
     # The admin build of the same CI run, relative to the repository root
     # where the job starts the server.
     dist_dir: admin/dist
+  # /metrics on a port of its own, as in production (ADR 0023 §9).
+  metrics:
+    binding: 127.0.0.1
+    port: 9464

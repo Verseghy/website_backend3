@@ -77,8 +77,8 @@ updates:
   # in a form the workspace updater does not find (a dotted or quoted key).
   #
   # Not listed, so all their updates flow: thiserror, serde_path_to_error,
-  # proptest, futures-util and insta. None of their types cross Loco's API,
-  # and no ADR pins them.
+  # prometheus-client, proptest, futures-util and insta. None of their types
+  # cross Loco's API, and no ADR pins them.
   - package-ecosystem: cargo
     directory: /
     schedule:

@@ -79,8 +79,9 @@ loco-rs = { version = "=1.2.0", default-features = false, features = [
 migration = { path = "migration" }
 
 # Async runtime for the CLI entry point (`#[tokio::main]`), and `net` for the
-# listener of `App::serve`. backend3 adds `net` in its own dependency table,
-# and its test dependencies add `sync` and `time`.
+# listeners of `App::serve`. backend3 adds `net` and `sync` in its own
+# dependency table, and its test dependencies add `net`, `sync`, `io-util`
+# and `time`.
 tokio = { version = "1.45", default-features = false, features = [
   "rt-multi-thread",
   "macros",
@@ -166,12 +167,14 @@ chrono-tz = "=0.10.4"
 # releases on 2026-10-24: `prometheus-client` (0.25.1 of 2026-09-01), the
 # Prometheus project's own client. Its `Registry` is an explicit value that
 # is handed down like any other handle (ADR 0008), it writes the OpenMetrics
-# text format that Prometheus scrapes, and it brings 3 crates that are not yet
-# in this graph. `metrics` 0.24 with `metrics-exporter-prometheus` 0.18 and
-# `metrics-process` 2.4 would bring 14 and a process-global recorder. Process
-# CPU and memory come from a small `/proc/self` reader, with its parser in
-# `src/domain/`. PLT-24 adds the dependency together with the `/metrics`
-# listener of `App::serve`.
+# text format that Prometheus scrapes, and it brought 2 crates that were not
+# yet in this graph (itself and its derive macros). `metrics` 0.24 with
+# `metrics-exporter-prometheus` 0.18 and `metrics-process` 2.4 would bring 14
+# and a process-global recorder. Process CPU and memory come from a small
+# `/proc/self` reader, with its parser in `src/domain/`. The crate's default
+# features are empty in 0.25.1; `default-features = false` keeps them off
+# should a release turn on the protobuf encoders, which would add prost.
+prometheus-client = { version = "0.25.1", default-features = false }
 
 # Test-only crates (backend3's [dev-dependencies]).
 proptest = "1"
@@ -216,8 +219,9 @@ pedantic = { level = "warn", priority = -1 }
 [dependencies]
 loco-rs = { workspace = true }
 migration = { workspace = true }
-# `net` for the listener of `App::serve`.
-tokio = { workspace = true, features = ["net"] }
+# `net` for the two listeners of `App::serve`, `sync` for the watch channel
+# that stops the /metrics listener together with the HTTP server.
+tokio = { workspace = true, features = ["net", "sync"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -237,6 +241,7 @@ ts-rs = { workspace = true }
 utoipa = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+prometheus-client = { workspace = true }
 
 [[bin]]
 name = "backend3-cli"
@@ -246,7 +251,10 @@ path = "src/bin/main.rs"
 # Loco's test harness: request helpers and per-test databases.
 loco-rs = { workspace = true, features = ["testing"] }
 # `sync` and `time` for tests/models/task_lock.rs: a `Notify` and a time limit.
-tokio = { workspace = true, features = ["sync", "time"] }
+# `net`, `sync`, `io-util` and `time` for the test that drives both
+# listeners of `serve_until` over real TCP connections, with a time limit
+# (tests/requests/metrics.rs).
+tokio = { workspace = true, features = ["net", "sync", "io-util", "time"] }
 proptest = { workspace = true }
 axum-test = { workspace = true }
 futures-util = { workspace = true }

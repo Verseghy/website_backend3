@@ -6,6 +6,8 @@
 //! them. `config/production.yaml` needs variables without defaults; the CLI
 //! tests in `tests/cli/` load it in a child process.
 
+use std::net::Ipv4Addr;
+
 use backend3::{app::enforce_database_guard, settings::Settings};
 use loco_rs::{
     config::{CacheConfig, Config, QueueConfig, WorkerMode},
@@ -32,8 +34,18 @@ fn local_configs_pass_the_guard_and_have_typed_settings() {
         let config = load(&environment);
         enforce_database_guard(&environment, &config)
             .unwrap_or_else(|error| panic!("{environment}: {error}"));
-        Settings::from_section(config.settings.as_ref())
+        let settings = Settings::from_section(config.settings.as_ref())
             .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        // ADR 0023 §9: a port of its own, reachable off the host in
+        // production only.
+        settings
+            .check_server_port(config.server.port)
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        assert_eq!(
+            settings.metrics.binding,
+            Ipv4Addr::LOCALHOST,
+            "{environment}"
+        );
         assert!(!config.database.dangerously_truncate, "{environment}");
         assert!(!config.database.dangerously_recreate, "{environment}");
     }
