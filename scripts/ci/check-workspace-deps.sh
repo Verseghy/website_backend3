@@ -63,9 +63,9 @@
 # The root Cargo.toml is always checked.
 #
 # The "Toolchain" CI job (a required context, ADR 0022 section 3) runs this
-# script. Like rule 4 of check-toolchain.sh, it goes beyond the items in ADR
-# 0022's table for that job; it is a static check of the manifests and needs
-# no Rust toolchain.
+# script; ADR 0029 section 3 lists it in that job's row of ADR 0022 section
+# 3's table, beside rule 4 of check-toolchain.sh. It is a static check of the
+# manifests and needs no Rust toolchain.
 #
 # Usage: check-workspace-deps.sh [--root DIR]   (default: the current directory)
 #

@@ -6,17 +6,31 @@
 # scripts/tests/test-check-workflow-policy.sh fails if the job names across
 # .github/workflows/ stop matching ADR 0022's table.
 #
-# Ground rules (ADR 0022 section 1; checked by the "Workflow policy" job with
-# scripts/ci/check-workflow-policy.sh):
+# Ground rules (ADR 0022 sections 1 and 3, ADR 0029; checked by the "Workflow
+# policy" job with scripts/ci/check-workflow-policy.sh):
 #   - GitHub Actions never builds or pushes an image; Pipelines-as-Code does,
 #     from master only (.tekton/push.yaml).
 #   - `permissions: contents: read`, no secrets, no registry login, no
 #     `pull_request_target`, no `packages: write`, no `id-token: write`.
 #   - Every action is pinned to a full commit SHA with a version comment;
 #     Dependabot (ci(deploy) prefix) bumps both.
-#
-# There are no path filters on purpose: a required context whose workflow is
-# skipped never reports, and the PR could not merge.
+#   - No `paths` or `paths-ignore` filter on any trigger, and no `branches` or
+#     `branches-ignore` filter except on `push` (ADR 0029): a required context
+#     whose workflow a filter skipped never reports, and the PR could not
+#     merge.
+#   - No job-level `if:` on a required job except exactly
+#     `github.event_name != 'schedule'` (ADR 0029): GitHub reports a job that
+#     its condition skipped as successful, and Tide would merge on it. The
+#     schedule guard is true on every pull_request and push event, so it
+#     skips no PR check. Step-level conditions are not checked (ADR 0029).
+#   - A required job `needs:` only required jobs with no job-level `if:` and
+#     no `continue-on-error` (ADR 0029 section 4): GitHub skips a job whose
+#     `needs:` failed or was skipped, and the skip would pass. A new job
+#     goes into an existing required job's `needs:` only once website_k8s's
+#     Prow configuration lists the new job's context.
+#   - No `continue-on-error` other than `false` on a required job or any of
+#     its steps (ADR 0029 section 4): it lets a failure pass. A log step with
+#     `if: failure()` needs none, because the job has already failed.
 #
 # The Rust toolchain comes from rust-toolchain.toml: `rustup toolchain install`
 # with no argument installs exactly the pinned release with its components
@@ -426,5 +440,5 @@ jobs:
           persist-credentials: false
       - name: yq version
         run: yq --version
-      - name: Workflows follow ADR 0022
+      - name: Workflows follow ADR 0022 and ADR 0029
         run: bash scripts/ci/check-workflow-policy.sh .github/workflows
