@@ -6,6 +6,7 @@ use std::{
     panic::AssertUnwindSafe,
     path::PathBuf,
     process::{Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     thread,
     time::{Duration, Instant},
 };
@@ -13,9 +14,10 @@ use std::{
 use axum::{ServiceExt, extract::Request};
 use axum_test::TestServer;
 use backend3::{
-    app::{App, trim_trailing_slash},
-    domain::task_lock_key::task_lock_key,
+    app::{App, set_clock, trim_trailing_slash},
+    domain::{clock::Clock, task_lock_key::task_lock_key},
 };
+use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::FutureExt;
 use loco_rs::{app::AppContext, testing::prelude::*};
 use sea_orm::{
@@ -199,4 +201,105 @@ pub async fn hold_task_lock(db: &DatabaseConnection, task_name: &str) -> Databas
         .expect(sql);
     assert!(taken, "the lock of task {task_name} is already held");
     holder
+}
+
+/// The app clock of a time-dependent test (public-api.md §16.2): it stands
+/// still at the instant the test chose and moves only when the test moves
+/// it. [`with_app_at`] and [`with_server_at`] install one and hand it over.
+#[derive(Debug)]
+pub struct TestClock {
+    now: Mutex<DateTime<Utc>>,
+}
+
+impl TestClock {
+    /// A clock that stands at `start`.
+    pub fn new(start: DateTime<Utc>) -> Self {
+        Self {
+            now: Mutex::new(start),
+        }
+    }
+
+    /// Moves the clock to `instant`, forwards or backwards.
+    pub fn set(&self, instant: DateTime<Utc>) {
+        *self.lock() = instant;
+    }
+
+    /// Moves the clock forward by `step` (zero keeps it) and returns the new
+    /// instant.
+    ///
+    /// # Panics
+    ///
+    /// On a negative `step` (a test that goes back says so with
+    /// [`TestClock::set`]), and past the end of chrono's range.
+    pub fn advance(&self, step: TimeDelta) -> DateTime<Utc> {
+        assert!(
+            step >= TimeDelta::zero(),
+            "TestClock::advance moves forward only, and got {step}; use TestClock::set to move \
+             the clock back"
+        );
+        let mut now = self.lock();
+        *now = now.checked_add_signed(step).unwrap_or_else(|| {
+            panic!(
+                "TestClock::advance: {} plus {step} is outside chrono's range",
+                *now
+            )
+        });
+        *now
+    }
+
+    /// The guarded instant. Every write is one assignment, so a lock poisoned
+    /// by a panicking test still holds a whole `DateTime` and is taken over.
+    fn lock(&self) -> MutexGuard<'_, DateTime<Utc>> {
+        self.now.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.lock()
+    }
+}
+
+/// Replaces the app clock of `ctx` with a [`TestClock`] at `start`.
+fn install_test_clock(ctx: &AppContext, start: DateTime<Utc>) -> Arc<TestClock> {
+    let clock = Arc::new(TestClock::new(start));
+    set_clock(ctx, clock.clone());
+    clock
+}
+
+/// Like [`with_app`], with the app clock at `start` until the test moves the
+/// [`TestClock`] it receives with the router and the context.
+///
+/// - `start`: what `backend3::app::clock(&ctx)` answers when the test begins.
+/// - `test`: the test body.
+///
+/// The clock replaces the system clock after boot, in the store that every
+/// copy of the context shares, so routes, workers and tasks read it; code
+/// that runs during boot (hooks, initializers) still sees the system clock.
+pub async fn with_app_at<F, Fut, T>(start: DateTime<Utc>, test: F) -> T
+where
+    F: FnOnce(axum::Router, AppContext, Arc<TestClock>) -> Fut,
+    Fut: Future<Output = T>,
+{
+    with_app(|router, ctx| async move {
+        let clock = install_test_clock(&ctx, start);
+        test(router, ctx, clock).await
+    })
+    .await
+}
+
+/// Like [`with_server`], with the test clock of [`with_app_at`].
+///
+/// - `start`: what `backend3::app::clock(&ctx)` answers when the test begins.
+/// - `test`: the test body; it gets the server, the context and the clock.
+pub async fn with_server_at<F, Fut, T>(start: DateTime<Utc>, test: F) -> T
+where
+    F: FnOnce(TestServer, AppContext, Arc<TestClock>) -> Fut,
+    Fut: Future<Output = T>,
+{
+    with_server(|server, ctx| async move {
+        let clock = install_test_clock(&ctx, start);
+        test(server, ctx, clock).await
+    })
+    .await
 }

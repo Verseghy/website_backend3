@@ -23,6 +23,11 @@ The test for where logic goes: if it needs the database or another external syst
 - Code that talks to an external system takes its connection or handle and the typed settings sub-struct it needs as function arguments. It never reads `std::env`, never takes `&AppContext` and never uses a global registry (rules 2 and 3 above). `clippy.toml` bans the `std::env` readers and `tokio::spawn`.
 - Only controllers, workers, tasks, initializers and `src/app.rs` read `ctx`, and they pass the pieces down.
 
+## "Now" comes from the app clock
+
+- Controllers, workers and tasks read the instant with `crate::app::clock(&ctx)?.now()` and pass it down; `src/domain/` takes it as an argument (rule 1 above, [ADR 0010](docs/design/adr/0010-all-instants-stored-as-timestamptz.md) point 7). Nothing else in `src/` reads the system time or uses chrono's `Local`, and only `src/app.rs` calls `set_clock`; `tests/architecture.rs` enforces it.
+- Time-dependent tests start at a chosen instant with `tests/support::with_app_at` or `with_server_at`. They read the wall clock only where recipe 7 of the project skill says so, because Loco's JWT reads the system time; the recipe also says how to change the `before_save` that `cargo loco db entities` generates.
+
 ## Commits and pull requests
 
 [ADR 0012](docs/design/adr/0012-delivery-review-commits-and-licensing.md) sections 1-3 decide these.

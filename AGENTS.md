@@ -57,7 +57,7 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 
 | Path | What lives there |
 |---|---|
-| `src/app.rs` | `Hooks`: routes, workers, tasks, initializers, the `load_config` database guard, and `serve`, which trims trailing slashes before routing |
+| `src/app.rs` | `Hooks`: routes, workers, tasks, initializers, the `load_config` database guard, `serve`, which trims trailing slashes before routing, and the app clock, the one source of "now" (`clock(&ctx)`, recipe 7 of `.claude/skills/backend3/SKILL.md`) |
 | `src/bin/main.rs` | the `backend3-cli` binary (`cargo loco` runs it), with the CLI pre-check |
 | `src/controllers/` | thin HTTP handlers: `admin_ui.rs` (`/admin`); `v1/` (`/api/v1`), so far `v1/openapi.rs`, the OpenAPI document that every public endpoint joins; and `admin/` (`/api/admin`) and the public endpoints as the slices add them |
 | `src/dtos/` | wire types (serde, ts-rs, utoipa); the API contract (ADR 0005) |

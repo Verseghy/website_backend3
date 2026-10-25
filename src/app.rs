@@ -1,8 +1,11 @@
 //! The Loco hooks of backend3: how the application loads its configuration,
 //! builds its router and registers workers and tasks.
 //!
-//! Three hooks carry project decisions:
+//! Four hooks carry project decisions:
 //!
+//! - `after_context` registers the app clock, the one source of "now"
+//!   (ADR 0010 point 7). Handlers, workers and tasks read it with [`clock`]
+//!   and pass the instant down; tests replace it with [`set_clock`].
 //! - `load_config` runs the database-target guard of ADR 0024 §4 (layer 3)
 //!   and validates the typed settings. Every Loco entry point calls it before
 //!   it connects anywhere: the test boot helpers, `cargo loco` and the
@@ -32,10 +35,11 @@
 //! the names the injected lines use are imported below even before anything
 //! uses them.
 
-use std::{net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{Router as AxumRouter, ServiceExt, extract::Request};
+use chrono::{DateTime, Utc};
 // `cargo loco generate worker` injects
 // `queue.register(crate::workers::<name>::Worker::build(ctx)).await?;` into
 // `connect_workers` (loco-gen 1.2.0, `templates/worker/worker.t`). `build` is
@@ -48,7 +52,7 @@ use axum::{Router as AxumRouter, ServiceExt, extract::Request};
 use loco_rs::bgworker::BackgroundWorker;
 use loco_rs::{
     Error, Result,
-    app::{AppContext, Hooks},
+    app::{AppContext, Hooks, SharedStore},
     bgworker::Queue,
     boot::{BootResult, ServeParams, StartMode, create_app, shutdown_signal},
     config::{Config, QueueConfig},
@@ -76,12 +80,85 @@ use crate::{
         admin_ui::{self, DistRequirement},
         not_found,
     },
-    domain::database_target::{self, Connection},
+    domain::{
+        clock::Clock,
+        database_target::{self, Connection},
+    },
     settings::Settings,
 };
 
 /// The Loco application.
 pub struct App;
+
+/// The clock of a running backend3: the operating system's. Its `now` is
+/// the only read of the system time in `src/`; `tests/architecture.rs` allows
+/// one nowhere else. The type is private, so nothing can bypass [`clock`] by
+/// naming it.
+#[derive(Debug, Clone, Copy)]
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+/// The shared-store entry of the app clock. `SharedStore` is keyed by type,
+/// and this one is private, so only [`clock`] and [`set_clock`] reach it. A
+/// read clones the `Arc` and releases the store's lock at once, so no guard
+/// is held across an `.await`.
+#[derive(Debug, Clone)]
+struct AppClock(Arc<dyn Clock>);
+
+/// Returns the clock of this app context, the one source of "now"
+/// (ADR 0010 point 7, public-api.md §16.2).
+///
+/// - `ctx`: the app context of the request, worker or task.
+///
+/// Controllers, workers and tasks call it once per request or job run and
+/// pass `.now()` down (ADR 0008 rules 1-3). In production it is the system
+/// clock; tests replace it with [`set_clock`] (`tests/support::with_app_at`).
+///
+/// # Errors
+///
+/// [`Error::Message`] when the context carries no clock: every context Loco
+/// builds has one (`App::after_context`), one built by hand does not.
+pub fn clock(ctx: &AppContext) -> Result<Arc<dyn Clock>> {
+    clock_in(&ctx.shared_store)
+}
+
+/// Replaces the clock of an app context.
+///
+/// - `ctx`: the context; every copy of it sees the new clock, including the
+///   copies the router, workers and tasks took at boot (they share one
+///   `SharedStore` through an `Arc`).
+/// - `clock`: the clock that [`clock`] returns from now on.
+///
+/// Only `App::after_context` and `tests/support` call it; it is public because
+/// the integration tests are a crate of their own, and `tests/architecture.rs`
+/// fails on a call anywhere else in `src/`.
+pub fn set_clock(ctx: &AppContext, clock: Arc<dyn Clock>) {
+    set_clock_in(&ctx.shared_store, clock);
+}
+
+/// The clock held in `store`, or the error that [`clock`] documents.
+fn clock_in(store: &SharedStore) -> Result<Arc<dyn Clock>> {
+    store
+        .get::<AppClock>()
+        .map(|AppClock(clock)| clock)
+        .ok_or_else(|| {
+            Error::string(
+                "this AppContext carries no app clock: App::after_context registers it in the \
+                 shared store, so build the context through Loco's boot (create_context) or call \
+                 backend3::app::set_clock on it first",
+            )
+        })
+}
+
+/// Stores `clock` in `store`, replacing any clock already there.
+fn set_clock_in(store: &SharedStore, clock: Arc<dyn Clock>) {
+    store.insert(AppClock(clock));
+}
 
 /// Wraps the finished application router so that trailing slashes are
 /// trimmed from the request path *before* routing (public-api.md DEC-10:
@@ -176,6 +253,16 @@ impl Hooks for App {
             env!("CARGO_PKG_VERSION"),
             commit.unwrap_or("dev")
         )
+    }
+
+    /// Registers the system clock as the app clock. Loco calls this hook at
+    /// the end of `create_context`, where every entry point builds its
+    /// context (server, workers, tasks, CLI and test harness; loco-rs 1.2.0
+    /// `src/boot.rs`, `src/cli.rs`), so the clock is there before any other
+    /// hook, initializer, route or worker runs.
+    async fn after_context(ctx: AppContext) -> Result<AppContext> {
+        set_clock(&ctx, Arc::new(SystemClock));
+        Ok(ctx)
     }
 
     async fn load_config(env: &Environment) -> Result<Config> {
@@ -276,6 +363,27 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::*;
+    use crate::domain::clock::FixedClock;
+
+    #[test]
+    fn a_store_without_a_clock_says_how_to_get_one() {
+        let error = clock_in(&SharedStore::default())
+            .expect_err("an empty store has no clock")
+            .to_string();
+        assert!(error.contains("App::after_context"), "{error}");
+        assert!(error.contains("backend3::app::set_clock"), "{error}");
+    }
+
+    #[test]
+    fn the_last_clock_stored_is_the_one_returned() {
+        let store = SharedStore::default();
+        let [first, second] = ["2026-03-29T00:59:59Z", "2026-03-29T01:00:00Z"]
+            .map(|rfc3339| rfc3339.parse::<DateTime<Utc>>().expect("RFC 3339"));
+        set_clock_in(&store, Arc::new(FixedClock(first)));
+        assert_eq!(clock_in(&store).expect("a clock").now(), first);
+        set_clock_in(&store, Arc::new(FixedClock(second)));
+        assert_eq!(clock_in(&store).expect("a clock").now(), second);
+    }
 
     /// A router that answers with the URI it was routed with, so a test sees
     /// what the routing layer saw.

@@ -24,6 +24,7 @@ pub mod admin_path;
 pub mod api_path;
 pub mod budapest;
 pub mod cli_guard;
+pub mod clock;
 pub mod database_target;
 pub mod route_coverage;
 pub mod task_lock_key;

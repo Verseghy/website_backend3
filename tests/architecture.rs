@@ -20,6 +20,14 @@
 //! It also fails if `src/` holds a directory that rule 5 bans (`services/`,
 //! `repositories/`, `utils/`, `helpers/`, `common/`, `shared/`, `lib/`).
 //!
+//! A third check covers all of `src/`, unit tests included: "now" comes from
+//! the app clock (ADR 0010 point 7, public-api.md §16.2). It fails on the
+//! reads of the system time and the spellings of chrono's `Local` (which
+//! reads the process `TZ`, ADR 0010 point 4) that the constants below list,
+//! except inside `impl Clock for SystemClock` in `src/app.rs`, and on
+//! `set_clock` outside that file. `Instant::now` stays allowed outside
+//! `src/domain/`: it measures a duration and never becomes an instant.
+//!
 //! The scan is a text check, so a determined bypass is possible (ADR 0008,
 //! Consequences); it exists to catch honest mistakes early.
 
@@ -36,6 +44,27 @@ const BANNED_STD_MODULES: &[&str] = &["fs", "net", "env", "process"];
 
 /// Types whose `::now` reads the clock.
 const CLOCK_TYPES: &[&str] = &["Utc", "Local", "SystemTime", "Instant"];
+
+/// Associated functions that read a clock when a type calls them without
+/// arguments. Matching any type name catches aliases such as Sea-ORM's
+/// `ChronoUtc` and `TimeDateTimeWithTimeZone`; requiring no arguments lets a
+/// pure function such as `Week::today(now)` pass.
+const CLOCK_FUNCTIONS: &[&str] = &["now", "today", "now_utc", "now_local"];
+
+/// Names that read the system time or stand for chrono's `Local` wherever
+/// they appear: jsonwebtoken's clock, `UNIX_EPOCH` (whose `elapsed` reads the
+/// clock), and Sea-ORM's two aliases of `DateTime<Local>`.
+const CLOCK_NAMES: &[&str] = &[
+    "get_current_timestamp",
+    "UNIX_EPOCH",
+    "DateTimeLocal",
+    "ChronoDateTimeLocal",
+];
+
+/// The file, relative to `src/`, that holds the system clock, and the impl
+/// block whose body is the one place allowed to read the system time.
+const SYSTEM_CLOCK_FILE: &str = "app.rs";
+const SYSTEM_CLOCK_IMPL: &[&str] = &["impl", "Clock", "for", "SystemClock"];
 
 /// Directory names rule 5 bans directly under `src/`.
 const BANNED_DIRECTORIES: &[&str] = &[
@@ -293,6 +322,132 @@ fn violations(relative: &Path, source: &str) -> Vec<String> {
     found
 }
 
+/// Marks the tokens of every `use` statement that names chrono, so that
+/// `Local` in `use chrono::{DateTime, offset::{Local}};` is seen as chrono's.
+fn chrono_uses(tokens: &[Token]) -> Vec<bool> {
+    let mut marked = vec![false; tokens.len()];
+    for (start, token) in tokens.iter().enumerate() {
+        if ident(Some(token)) != Some("use") {
+            continue;
+        }
+        let end = tokens[start..]
+            .iter()
+            .position(|token| token == &Token::Punct(';'))
+            .map_or(tokens.len(), |length| start + length);
+        if tokens[start..end].contains(&Token::Ident("chrono".to_owned())) {
+            marked[start..end].fill(true);
+        }
+    }
+    marked
+}
+
+/// Whether the path that ends at `tokens[index]` passes through `chrono`,
+/// as in `chrono::prelude::Local`.
+fn through_chrono(tokens: &[Token], mut index: usize) -> bool {
+    while index >= 2 && tokens[index - 1] == Token::PathSep {
+        index -= 2;
+        match ident(tokens.get(index)) {
+            Some("chrono") => return true,
+            Some(_) => {}
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Every read of the system time and every use of chrono's `Local` in
+/// `tokens`, as (token index, what) pairs.
+///
+/// A bare `Local` is chrono's only if a `use` of chrono brings it in, by name
+/// or by a glob, and both are reported. So other `Local`s, such as
+/// `Locality::Local` in `src/domain/database_target.rs`, pass.
+fn clock_reads(tokens: &[Token]) -> Vec<(usize, String)> {
+    let in_chrono_use = chrono_uses(tokens);
+    let mut found = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token == &Token::Punct('*') && in_chrono_use[index] {
+            found.push((
+                index,
+                "a glob import of chrono, which brings in `Local`".to_owned(),
+            ));
+        }
+        let Token::Ident(name) = token else { continue };
+        if name.starts_with(char::is_uppercase)
+            && name != "Instant"
+            && tokens.get(index + 1) == Some(&Token::PathSep)
+            && let Some(function) = ident(tokens.get(index + 2))
+            && CLOCK_FUNCTIONS.contains(&function)
+            // A call with arguments is not a clock read; `Utc::now` passed
+            // as a function, without the parentheses, is one.
+            && !(tokens.get(index + 3) == Some(&Token::Punct('('))
+                && tokens.get(index + 4) != Some(&Token::Punct(')')))
+        {
+            found.push((index, format!("`{name}::{function}`")));
+        }
+        if name == "Local" && (in_chrono_use[index] || through_chrono(tokens, index)) {
+            found.push((index, "chrono's `Local`".to_owned()));
+        }
+        if CLOCK_NAMES.contains(&name.as_str()) {
+            found.push((index, format!("`{name}`")));
+        }
+    }
+    found
+}
+
+/// The token range of `impl Clock for SystemClock { ... }` in `tokens`, if
+/// there is one, from `impl` to the closing brace.
+fn system_clock_impl(tokens: &[Token]) -> Option<std::ops::Range<usize>> {
+    let start = tokens.windows(SYSTEM_CLOCK_IMPL.len()).position(|window| {
+        window
+            .iter()
+            .zip(SYSTEM_CLOCK_IMPL)
+            .all(|(token, word)| ident(Some(token)) == Some(*word))
+    })?;
+    let mut level = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token {
+            Token::Punct('{') => level += 1,
+            Token::Punct('}') => {
+                level = level.saturating_sub(1);
+                if level == 0 {
+                    return Some(start..index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What one file of `src/` breaks of the rule that "now" comes from the app
+/// clock, one report line per finding. `relative` is the path below `src/`:
+/// only `app.rs` may read the system time, inside `impl Clock for
+/// SystemClock`, and only it may call `set_clock`.
+fn clock_report(relative: &Path, source: &str) -> Vec<String> {
+    let tokens = tokenize(&strip(source));
+    let is_system_clock_file = relative == Path::new(SYSTEM_CLOCK_FILE);
+    let allowed = is_system_clock_file
+        .then(|| system_clock_impl(&tokens))
+        .flatten()
+        .unwrap_or_default();
+    let mut found: Vec<String> = clock_reads(&tokens)
+        .into_iter()
+        .filter(|(index, _)| !allowed.contains(index))
+        .map(|(_, what)| format!("uses {what}"))
+        .collect();
+    if !is_system_clock_file && tokens.contains(&Token::Ident("set_clock".to_owned())) {
+        found.push(
+            "replaces the app clock with `set_clock`, which only `App::after_context` and \
+             tests/support call"
+                .to_owned(),
+        );
+    }
+    found
+        .into_iter()
+        .map(|finding| format!("src/{}: {finding}", relative.display()))
+        .collect()
+}
+
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display())) {
         let path = entry.expect("directory entry").path();
@@ -346,6 +501,131 @@ fn src_has_no_banned_directories() {
         banned.is_empty(),
         "src/ must not hold {banned:?} (ADR 0008, rule 5): logic goes on a model, in \
          src/domain/, or in the module of its only caller"
+    );
+}
+
+#[test]
+fn src_reads_the_time_only_through_the_app_clock() {
+    let src = src_dir();
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    assert!(!files.is_empty(), "src/ has no Rust files");
+
+    let report: Vec<String> = files
+        .iter()
+        .flat_map(|file| {
+            let relative = file.strip_prefix(&src).expect("below src/");
+            clock_report(relative, &fs::read_to_string(file).expect("read source"))
+        })
+        .collect();
+    assert!(
+        report.is_empty(),
+        "Take \"now\" from `backend3::app::clock(&ctx)?.now()` and pass it down; unit tests use \
+         `FixedClock` (ADR 0010 point 7, recipe 7 of .claude/skills/backend3/SKILL.md):\n{}",
+        report.join("\n")
+    );
+}
+
+// The scanners themselves are tested on small samples, so a bug in one cannot
+// make a real check pass silently.
+
+/// What [`clock_reads`] finds in `source`, without the token indexes.
+fn reads(source: &str) -> Vec<String> {
+    clock_reads(&tokenize(&strip(source)))
+        .into_iter()
+        .map(|(_, what)| what)
+        .collect()
+}
+
+#[test]
+fn clock_scanner_flags_each_read() {
+    let local = "chrono's `Local`";
+    for (source, expected) in [
+        ("chrono::Utc::now()", "`Utc::now`"),
+        ("Utc :: now ( ) . date_naive()", "`Utc::now`"),
+        ("iter::repeat_with(Utc::now)", "`Utc::now`"),
+        ("Utc::today()", "`Utc::today`"),
+        ("Local::now()", "`Local::now`"),
+        ("sea_orm::prelude::ChronoUtc::now()", "`ChronoUtc::now`"),
+        ("std::time::SystemTime::now()", "`SystemTime::now`"),
+        ("OffsetDateTime::now_local()", "`OffsetDateTime::now_local`"),
+        (
+            "TimeDateTimeWithTimeZone::now_utc()",
+            "`TimeDateTimeWithTimeZone::now_utc`",
+        ),
+        ("time::UtcDateTime::now()", "`UtcDateTime::now`"),
+        ("jiff::Zoned::now()", "`Zoned::now`"),
+        ("get_current_timestamp()", "`get_current_timestamp`"),
+        ("std::time::UNIX_EPOCH.elapsed()", "`UNIX_EPOCH`"),
+        ("fn f(_: prelude::DateTimeLocal) {}", "`DateTimeLocal`"),
+        ("type T = ChronoDateTimeLocal;", "`ChronoDateTimeLocal`"),
+        ("use chrono::Local;", local),
+        ("use chrono::{DateTime, Local, Utc};", local),
+        ("pub use chrono::{offset::{Local as Here}};", local),
+        ("use chrono::prelude::Local;", local),
+        ("fn f() -> DateTime<chrono::prelude::Local> {}", local),
+        ("let _: (u8, chrono::Local);", local),
+        (
+            "use chrono::prelude::*;",
+            "a glob import of chrono, which brings in `Local`",
+        ),
+    ] {
+        assert_eq!(reads(source), [expected], "{source}");
+    }
+    assert_eq!(
+        reads("chrono::offset::Local::now()"),
+        ["`Local::now`", local],
+        "both a read and chrono's zone"
+    );
+}
+
+#[test]
+fn clock_scanner_accepts_code_that_reads_no_clock() {
+    let source = r#"
+        //! Mentions Utc::now(), SystemTime::now() and chrono::Local in prose.
+        /* Local::now() in a block comment */
+        use chrono::{DateTime, TimeDelta, Utc};
+        use crate::domain::database_target::Locality::{self, Local};
+        enum Locality { Local, NonLocal { host: String } }
+        fn f(clock: &dyn Clock, at: DateTime<Utc>) -> DateTime<Utc> {
+            let _ = "Utc::now() and Local::now() in a string";
+            let _ = Utc.timestamp_opt(0, 0);
+            let _ = (std::time::Instant::now(), tokio::time::Instant::now());
+            let _ = (budapest::today(at), Week::today(at), HashMap::<u8, Local>::new());
+            match Locality::Local { Locality::Local => {}, Self::Local => {}, _ => {} }
+            clock.now() + TimeDelta::seconds(1)
+        }
+        fn now(&self) -> DateTime<Utc> { self.0 }
+    "#;
+    assert_eq!(reads(source), Vec::<String>::new());
+}
+
+#[test]
+fn only_the_system_clock_in_app_rs_reads_the_time_or_sets_the_clock() {
+    let system_clock = "impl Clock for SystemClock {\n    fn now(&self) -> DateTime<Utc> {\n        \
+                        Utc::now()\n    }\n}\n";
+    let set_clock = "fn after_context(ctx: AppContext) { set_clock(&ctx, clock) }\n";
+    let app = Path::new("app.rs");
+    assert_eq!(
+        clock_report(app, &format!("{system_clock}{set_clock}")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        clock_report(app, &format!("{system_clock}fn sneaky() {{ Utc::now(); }}")),
+        ["src/app.rs: uses `Utc::now`"],
+        "a read outside the impl, in the same file"
+    );
+    assert_eq!(
+        clock_report(Path::new("models/clock.rs"), system_clock),
+        ["src/models/clock.rs: uses `Utc::now`"],
+        "the impl is allowed in src/app.rs only"
+    );
+    assert_eq!(
+        clock_report(Path::new("controllers/debug.rs"), set_clock),
+        [
+            "src/controllers/debug.rs: replaces the app clock with `set_clock`, which only \
+             `App::after_context` and tests/support call"
+        ]
     );
 }
 

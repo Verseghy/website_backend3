@@ -188,8 +188,8 @@ updates:
       # Cargo.toml and src/prelude.rs). Each must stay on the line loco-rs
       # 1.2.0 requires; another major would be a second copy whose types do
       # not fit Loco's, and it comes with Loco. chrono is a dependency since
-      # src/domain/budapest.rs (ADR 0010); the others are not dependencies
-      # yet, and the slices that use them add them.
+      # src/domain/budapest.rs and the app clock (ADR 0010); the others are
+      # not dependencies yet, and the slices that use them add them.
       # - validator "0.20.0": `Validatable::validator` returns a
       #   Box<dyn validator::Validate>, and models declare their field rules
       #   through Validatable (CLAUDE.md rule 4).
