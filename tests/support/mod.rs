@@ -12,9 +12,16 @@ use std::{
 
 use axum::{ServiceExt, extract::Request};
 use axum_test::TestServer;
-use backend3::app::{App, trim_trailing_slash};
+use backend3::{
+    app::{App, trim_trailing_slash},
+    domain::task_lock_key::task_lock_key,
+};
 use futures_util::FutureExt;
 use loco_rs::{app::AppContext, testing::prelude::*};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
+    TransactionTrait,
+};
 
 /// The admin UI fixture of `config/test.yaml` (ADR 0004 §4).
 pub const FIXTURE_DIST: &str = "tests/fixtures/admin-dist";
@@ -166,4 +173,30 @@ where
         test(server, ctx).await
     })
     .await
+}
+
+/// Takes the advisory lock of the task `task_name` on a transaction of its
+/// own and returns it, playing another run of the task that is still going
+/// (ADR 0016 §4). The lock is held until the transaction ends or is dropped.
+///
+/// - `db`: the app's pool (`ctx.db`); the task under test runs on its other
+///   connection.
+/// - `task_name`: the name the task registers in its `TaskInfo`. Every
+///   task's lock-held test locks by that name, so a task that locked under
+///   any other name would run its work and fail the test.
+pub async fn hold_task_lock(db: &DatabaseConnection, task_name: &str) -> DatabaseTransaction {
+    let key = task_lock_key(task_name).unwrap_or_else(|error| panic!("{error}"));
+    let holder = db.begin().await.expect("open the holding transaction");
+    let sql = "SELECT pg_try_advisory_xact_lock($1)";
+    let statement = Statement::from_sql_and_values(DbBackend::Postgres, sql, [key.into()]);
+    let row = holder
+        .query_one_raw(statement)
+        .await
+        .expect("query the task lock");
+    let taken = row
+        .expect("one row")
+        .try_get_by_index::<bool>(0)
+        .expect(sql);
+    assert!(taken, "the lock of task {task_name} is already held");
+    holder
 }

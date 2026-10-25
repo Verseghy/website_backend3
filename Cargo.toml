@@ -79,8 +79,8 @@ loco-rs = { version = "=1.2.0", default-features = false, features = [
 migration = { path = "migration" }
 
 # Async runtime for the CLI entry point (`#[tokio::main]`), and `net` for the
-# listener of `App::serve`. backend3 adds `net` in its own dependency table;
-# its test dependencies inherit the two features below as they are.
+# listener of `App::serve`. backend3 adds `net` in its own dependency table,
+# and its test dependencies add `sync` and `time`.
 tokio = { version = "1.45", default-features = false, features = [
   "rt-multi-thread",
   "macros",
@@ -217,7 +217,8 @@ path = "src/bin/main.rs"
 [dev-dependencies]
 # Loco's test harness: request helpers and per-test databases.
 loco-rs = { workspace = true, features = ["testing"] }
-tokio = { workspace = true }
+# `sync` and `time` for tests/models/task_lock.rs: a `Notify` and a time limit.
+tokio = { workspace = true, features = ["sync", "time"] }
 proptest = { workspace = true }
 axum-test = { workspace = true }
 futures-util = { workspace = true }
