@@ -66,7 +66,9 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 | `src/workers/`, `src/tasks/` | background workers and tasks (ADR 0016) |
 | `migration/` | Sea-ORM migrations (ADR 0009) |
 | `config/` | `development`, `test`, `e2e` and `production` configuration; typed settings under `settings:` |
-| `tests/` | integration, request and architecture tests |
+| `tests/` | integration, request and architecture tests, and the `/storage` media contract suite (`tests/media_contract/`) |
+| `examples/media_contract.rs` | runs that suite from the command line against a running server (ADR 0015 §3, the co-mount test) |
+| `deploy/media/` | the media server: its nginx configuration, which website_k8s copies byte for byte, and its pinned image (`deploy/media/README.md`, ADR 0015 §1) |
 | `admin/` | the admin UI: an npm project (ADR 0004, ADR 0021) |
 | `docs/design/` | the design: overview, ADRs, specs |
 | `scripts/` | repository scripts; their tests are `scripts/tests/test-*.sh` |
@@ -186,6 +188,8 @@ podman-compose up -d postgres
 TZ=UTC cargo nextest run --locked --workspace --all-targets
 TZ=Pacific/Chatham cargo nextest run --locked --workspace --all-targets  # a second process TZ (ADR 0010)
 cargo test --locked --workspace --doc     # nextest does not run doctests
+# the media contract against deploy/media/nginx.conf in its pinned image (docker or podman):
+cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'test(/^media_contract::nginx::/)'
 bash scripts/tests/run-all.sh             # the shell-script tests
 bash scripts/sync-loco-skill.sh --check   # the vendored Loco skill is unchanged
 (cd admin && npm run lint && npm run typecheck && npm test && npm run licenses)

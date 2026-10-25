@@ -108,7 +108,7 @@ flowchart TB
     frontend["website_frontend: Angular SSR"]
     backend3["backend3: Loco 1.2.0, one image<br/>/admin: admin SPA via ServeDir<br/>/api/admin: admin API<br/>/api/v1: public read API<br/>/metrics, /_ping, /_readiness"]
     cronjobs["CronJobs: backend3 tasks, same image"]
-    media["Media server: unprivileged ubi9/nginx-124<br/>(if the co-mount test passes)"]
+    media["Media server: unprivileged ubi9/nginx-126<br/>(if the co-mount test passes)"]
     postgres[("PostgreSQL Deployment and PVC")]
     uploads[("Uploads PVC: the /storage files")]
     secret["Secret backend-secrets, from the External Secrets Operator"]
@@ -145,7 +145,7 @@ flowchart TB
 | backend3 | One Loco 1.2.0 binary (`loco-rs = "=1.2.0"`, committed `Cargo.lock`). It serves the admin API, the public API and the admin SPA. Health routes are Loco's `/_ping` (static) and `/_readiness` (checks the database, queue and cache). | [ADR 0004](adr/0004-admin-ui-lives-in-admin-and-ships-in-the-backend3-image.md), [ADR 0014](adr/0014-one-host-backend3-microshift-verseghy-gimnazium-net.md), [ADR 0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) |
 | Admin SPA | React with ra-core and shadcn-admin-kit, built by a Node stage of the Containerfile, served same-origin at `/admin` by a tower-http `ServeDir` (`index.html` not cached, hashed assets immutable). A custom data provider talks to `/api/admin`. | [ADR 0004](adr/0004-admin-ui-lives-in-admin-and-ships-in-the-backend3-image.md), [ADR 0021](adr/0021-hungarian-only-admin-ui.md) |
 | PostgreSQL | A new Deployment with its own PVC on the edge node. It holds the clean domain schema, Loco's job queue table and the safety-net tables. | [ADR 0002](adr/0002-postgresql-as-the-database.md), [ADR 0009](adr/0009-clean-domain-schema-with-preserved-integer-ids.md) |
-| Media server | An unprivileged `ubi9/nginx-124` that serves `/storage/**` on both public hosts, and on the backend3 host for the admin's media previews: `Access-Control-Allow-Origin: *`, real 404s, no directory listing, range requests. backend3 co-mounts the same uploads volume to write uploads. This layout holds only if a co-mount test on a throwaway PVC passes; otherwise backend3 serves `/storage` itself through a dedicated `ServeDir` router at 1 replica with the `Recreate` strategy. | [ADR 0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md) |
+| Media server | An unprivileged `ubi9/nginx-126` that serves `/storage/**` on both public hosts, and on the backend3 host for the admin's media previews: `Access-Control-Allow-Origin: *`, real 404s, no directory listing, range requests. Its configuration is [`deploy/media/nginx.conf`](../../deploy/media/README.md) in this repository, which website_k8s copies byte for byte, and the media contract suite tests it in CI (research: DECISIONS R9, D15). backend3 co-mounts the same uploads volume to write uploads. This layout holds only if a co-mount test on a throwaway PVC passes; otherwise backend3 serves `/storage` itself through a dedicated `ServeDir` router at 1 replica with the `Recreate` strategy. | [ADR 0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md) |
 | Uploads PVC | The existing uploads volume. Paths do not change, so every `/storage` URL in stored content, the Angular build and external caches keeps working. | [ADR 0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md) |
 | CronJobs | Kubernetes CronJobs that run backend3 tasks from the same image, for example queue housekeeping and the daily sitemap backstop, which only enqueues the sitemap job. Running scheduled work outside the Deployment means extra replicas never run it twice. | [ADR 0016](adr/0016-no-redis-in-memory-cache-postgres-queue-cronjob-tasks.md) |
 | Cache and queue | Loco's in-memory cache and Loco's Postgres queue. No Redis. | [ADR 0016](adr/0016-no-redis-in-memory-cache-postgres-queue-cronjob-tasks.md) |
@@ -456,8 +456,11 @@ website_backend3/
 │       ├── bindings/        ts-rs output, generated and committed
 │       └── components/      shadcn-admin-kit and shadcn/ui code, with its MIT licence
 ├── config/                  development.yaml, test.yaml, production.yaml
+├── deploy/
+│   └── media/               the media server: nginx.conf, which website_k8s copies byte for byte, and the pinned image
 ├── docs/
 │   └── design/              this documentation
+├── examples/                media_contract.rs: the /storage contract suite against a running server
 ├── migration/               Sea-ORM migrations
 ├── scripts/
 │   ├── sync-loco-skill.sh   re-vendors the skill from the locked loco-rs crate
@@ -470,7 +473,7 @@ website_backend3/
 │   ├── models/              Sea-ORM entities and Active Record model logic
 │   ├── tasks/               import, normalisation, sitemap and other tasks
 │   └── workers/             Postgres-queue jobs
-└── tests/                   integration tests against a local PostgreSQL
+└── tests/                   integration tests against a local PostgreSQL; media_contract/, the /storage contract suite
 ```
 
 | Path | Decided in |
