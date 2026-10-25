@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, or a Rust dependency. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, or a Loco task. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its five repeated tasks. They sit on
+These recipes are backend3's way of doing its six repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -285,3 +285,30 @@ requirement to a member table, move it as in steps 2 and 3:
 `check-workspace-deps.sh` names the entry and the fix. Bumps of `loco-rs` and
 the Sea-ORM crates stay dedicated PRs (ADR 0024 section 3); they change the
 same `[workspace.dependencies]` entries.
+
+---
+
+## 6. Add a task
+
+A `CronJob` in website_k8s runs a recurring task as `backend3-cli task <name>`,
+and an operator may run it by hand; the shared advisory lock keeps the two
+apart (ADR 0016 §4).
+
+1. **Generate** it with `cargo loco generate task <name>` and a snake_case
+   name; rewrite the generated test on `tests/support::with_app` (recipe 1
+   step 11).
+2. **Lock**: after checking its arguments, `run` does all of its database
+   work inside `with_task_lock(&ctx.db, &self.task().name, || async { ... })`
+   (`src/models/task_lock.rs`) and returns `Ok(())` for both outcomes, so a
+   run that finds the lock held exits 0. Lock under the registered name, and
+   never take an advisory lock by hand.
+3. **Idempotent**: two runs give the same result as one, because the
+   `CronJob` retries a failed run. A task that needs the uploads volume only
+   enqueues a job for the worker (ADR 0015 §3).
+4. **Tests** in `tests/tasks/<name>.rs`, including the lock-held test that
+   ADR 0016 (Consequences) requires of every task: take the lock with
+   `support::hold_task_lock(&ctx.db, "<name>")`, run the task with
+   `loco_rs::boot::run_task::<App>`, and assert `Ok` and that none of the
+   work happened, as `tests/models/task_lock.rs` does for its probe task.
+5. **CronJob**: a recurring task needs its `CronJob` in website_k8s, with the
+   settings of the ADR 0016 §4 table; that PR is left for human review.
