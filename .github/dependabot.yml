@@ -8,9 +8,11 @@
 #
 # Ignore rules. backend3 follows version decisions that Dependabot cannot see:
 # Loco 1.2.0 fixes the versions of the crates whose types cross its API
-# (ADR 0024 section 3; loco-rs@1.2.0:Cargo.toml), and the ADRs pin the majors
-# of the admin stack and the editor (ADR 0004, ADR 0005, ADR 0013). How the
-# rules are written:
+# (ADR 0024 section 3; loco-rs@1.2.0:Cargo.toml), the ADRs pin the majors of
+# the admin stack and the editor (ADR 0004, ADR 0005, ADR 0013), and one
+# upstream incompatibility keeps the admin on TypeScript 6: typescript-eslint
+# does not run on TypeScript 7 (its rule in the npm section). How the rules
+# are written:
 # - Every rule carries its reason and the ADR or upstream fact behind it.
 # - A rule ignores update types, not the dependency, so patch releases (and
 #   minor releases of packages at 1.0 or later) keep flowing. `update-types`
@@ -34,7 +36,7 @@
 #   `calculate_update_config` in
 #   dependabot-core@77f70df:updater/lib/dependabot/job.rb turns that range
 #   into the rule's versions), so they hold back security PRs as well. Close
-#   a security PR that leaves Loco's versions or an ADR pin, and fix the
+#   a security PR that leaves Loco's versions or a pinned major, and fix the
 #   advisory with a deliberate bump (for a crate that Loco fixes, the Loco
 #   bump). Dependabot alerts, and for crates the weekly
 #   `cargo-deny check advisories` job (ADR 0022), report the advisory either
@@ -44,11 +46,12 @@
 #   It is listed now so that the first run after that slice already follows
 #   the ADR; that slice checks that the rule's reason still holds.
 # - A rule is lifted or changed by the PR that moves the coupled stack on
-#   purpose (a Loco bump, a Node.js LTS move, a kit re-sync); that PR bumps the
-#   dependency itself and edits the rule. Dependabot's ignore comment commands
-#   are not used: GitHub stores them centrally, outside the repository (GitHub
-#   docs, "Managing pull requests for dependency updates"), so no review sees
-#   them and removing a rule here does not clear them.
+#   purpose (a Loco bump, a Node.js LTS move, a kit re-sync, the TypeScript 7
+#   move); that PR bumps the dependency itself and edits the rule.
+#   Dependabot's ignore comment commands are not used: GitHub stores them
+#   centrally, outside the repository (GitHub docs, "Managing pull requests
+#   for dependency updates"), so no review sees them and removing a rule here
+#   does not clear them.
 version: 2
 updates:
   # The Rust workspace: Cargo.toml (backend3) and migration/Cargo.toml.
@@ -224,11 +227,12 @@ updates:
   # The admin UI's npm project (admin/, ADR 0004).
   #
   # Not listed, so all their updates flow: the build and test tools without an
-  # ADR pin (eslint, typescript, typescript-eslint, vitest,
-  # @vitejs/plugin-react, prettier, Playwright and the rest) and the kit's
-  # other runtime libraries (lucide-react, cmdk, sonner and the rest). A
-  # breaking major of one of them fails lint, typecheck, the unit tests or
-  # E2E, and npm refuses an install outside a declared peer range.
+  # ADR pin (eslint, typescript-eslint, vitest, @vitejs/plugin-react,
+  # prettier, Playwright and the rest) and the kit's other runtime libraries
+  # (lucide-react, cmdk, sonner and the rest). A breaking major of one of them
+  # fails lint, typecheck, the unit tests or E2E, and npm refuses an install
+  # outside a declared peer range. typescript is the exception: no ADR pins
+  # it, but typescript-eslint does not run on its next major (its rule below).
   - package-ecosystem: npm
     directory: /admin
     schedule:
@@ -279,6 +283,20 @@ updates:
       # Vite 8 (ADR 0004 section 1; section 2 derives the Node.js floor from
       # Vite 8's requirement).
       - dependency-name: vite
+        update-types: ["version-update:semver-major"]
+      # TypeScript 6. `npm run lint` parses every .ts and .tsx file with
+      # typescript-eslint (eslint.config.js), which works through the compiler
+      # API of the `typescript` package. TypeScript 7.0, the native compiler,
+      # ships no such API; a new one is planned for 7.1 (TypeScript 7.0 release
+      # announcement, "Running Side-by-Side with TypeScript 6.0").
+      # typescript-eslint 8.72.0 requires typescript ">=4.8.4 <6.1.0"
+      # (admin/package-lock.json), so `npm ci` refuses 7.0.2, and once that is
+      # forced, its entry point throws "typescript-eslint does not support TS
+      # 7.0" (#199). TypeScript 7 comes in its own PR once a typescript-eslint
+      # release supports it and accepts it in its peer range (tracked in
+      # typescript-eslint/typescript-eslint#10940). That PR bumps typescript
+      # and typescript-eslint together and lifts this rule.
+      - dependency-name: typescript
         update-types: ["version-update:semver-major"]
       # Tailwind 4 (ADR 0004 section 1). @tailwindcss/vite requires the exact
       # tailwindcss version it ships with.

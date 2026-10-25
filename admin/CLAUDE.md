@@ -69,8 +69,10 @@ ADR 0005 (bindings) before changing anything here.
   updates off the majors the ADRs pin: `@types/node` on the `.node-version`
   major, react-router 7, ra-core 5 and its peers, React 19, Vite 8,
   Tailwind 4 and tailwind-merge 3, the kit's `shadcn` and `@base-ui/react`,
-  and TipTap 3 with its ProseMirror pins. A PR that moves one of them on
-  purpose (a Node.js LTS move, a kit re-sync) bumps the package itself and
+  and TipTap 3 with its ProseMirror pins. It also keeps TypeScript on 6,
+  because typescript-eslint does not support TypeScript 7 yet. A PR that moves
+  one of them on purpose (a Node.js LTS move, a kit re-sync, the TypeScript 7
+  move once typescript-eslint supports it) bumps the package itself and
   adjusts its rule there. Security updates are not filtered by these rules;
   close a security PR that leaves a pinned major and fix the advisory with a
   deliberate bump.
