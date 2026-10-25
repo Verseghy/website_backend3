@@ -24,3 +24,4 @@ pub mod admin_path;
 pub mod api_path;
 pub mod cli_guard;
 pub mod database_target;
+pub mod route_coverage;

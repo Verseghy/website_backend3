@@ -77,8 +77,8 @@ updates:
   # in a form the workspace updater does not find (a dotted or quoted key).
   #
   # Not listed, so all their updates flow: thiserror, serde_path_to_error,
-  # proptest and futures-util. None of their types cross Loco's API, and no
-  # ADR pins them.
+  # proptest, futures-util and insta. None of their types cross Loco's API,
+  # and no ADR pins them.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -164,8 +164,10 @@ updates:
       - dependency-name: ts-rs
         update-types: ["version-update:semver-major"]
       # utoipa is pinned at major 6 for the /api/v1 OpenAPI document
-      # (ADR 0005 section 2). Not a dependency yet: the ADR 0005 section 5
-      # spike adds it.
+      # (ADR 0005 section 2), the major that the ADR 0005 section 5 spike tried
+      # with loco-rs 1.2.0 (docs/design/openapi-spike.md). A new major can
+      # change the committed OpenAPI snapshot (the `Contract` job), so it is a
+      # contract decision, not a routine bump.
       - dependency-name: utoipa
         update-types: ["version-update:semver-major"]
       # The importer's MySQL driver is sqlx with its `mysql` feature, behind

@@ -3,6 +3,7 @@
 
 mod admin_ui;
 mod not_found;
+mod openapi;
 mod security_headers;
 mod site;
 mod trailing_slash;

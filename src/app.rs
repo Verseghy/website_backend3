@@ -237,6 +237,7 @@ impl Hooks for App {
         // after the next line; keep the route chain in this shape.
         AppRoutes::with_default_routes() // controller routes below
             .add_route(controllers::site::routes())
+            .add_route(controllers::v1::openapi::routes())
     }
 
     // `cargo loco generate worker` injects `queue.register(...)` right after

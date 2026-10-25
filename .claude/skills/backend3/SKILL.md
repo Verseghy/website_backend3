@@ -134,8 +134,9 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
 ## 3. Add a public endpoint with its fixtures
 
 The public API at `/api/v1` replaces backend2's GraphQL API. Its contract is
-`docs/design/public-api.md`; the one-day utoipa spike (ADR 0005 section 5)
-must have passed before the first `/api/v1` slice.
+`docs/design/public-api.md`. The one-day utoipa spike (ADR 0005 section 5)
+has passed; `docs/design/openapi-spike.md` records it and the rules for
+public DTOs and operations that steps 2 and 5 follow.
 
 1. **Find the endpoint** in `public-api.md` section 7: path, parameters,
    schema (section 6), visibility rules (section 3), paging (section 5),
@@ -144,16 +145,24 @@ must have passed before the first `/api/v1` slice.
 2. **DTOs** in `src/dtos/v1/`: responses with `utoipa::ToSchema`, query and
    path parameters with `utoipa::IntoParams`, camelCase through serde (ADR
    0005 sections 2-3). Instants, dates and event wall times use the forms of
-   ADR 0010 and the shared newtypes.
+   ADR 0010 and the shared newtypes. Every `Option` field carries
+   `#[schema(required = true)]`, documented ranges are stated with `minimum`
+   and `maximum`, and a newtype states its pattern on the derive with
+   `#[schema(value_type = String, pattern = ...)]` (openapi-spike.md section
+   3, rules 1, 3 and 4).
 3. **Pure parts first** in `src/domain/` (parameter parsing per section 2.5,
    the keyset cursor `src/domain/cursor.rs`, date ranges), with unit tests for
    every documented row and the proptest properties of `public-api.md`
    section 16.1.
 4. **Query on the model** (`posts::Model::list_published(db, filter, cursor, limit)`
    style) using the live-row helper of recipe 2.
-5. **Handler** in `src/controllers/v1/<name>.rs` with `#[utoipa::path(...)]`,
-   registered through Loco `Routes`, and added to the OpenAPI derive. Set
-   `Cache-Control` and the weak `ETag` as section 9 says.
+5. **Handler** in `src/controllers/v1/<name>.rs` with `#[utoipa::path(...)]`
+   that gives the full `/api/v1/...` path, a `tag` and a unique
+   `operation_id` (openapi-spike.md section 3, rules 2 and 6), registered
+   through Loco `Routes` (`Routes::get` records the method directly; the
+   route-coverage test fails for a route whose method Loco cannot read) and
+   listed in `paths(...)` of `PublicApi` in `src/controllers/v1/openapi.rs`.
+   Set `Cache-Control` and the weak `ETag` as section 9 says.
 6. **Fixtures**: add every fixture that `public-api.md` section 17.1 lists for
    this endpoint, under the name used there, as invented data (never copied
    from production) loaded by the request tests. Check that each shape of the
@@ -165,9 +174,11 @@ must have passed before the first `/api/v1` slice.
    `home_paging_visits_every_published_post_once`), asserting full order,
    parsed JSON field by field, the response against its schema, and the
    headers of section 16.2. Time-dependent tests inject "now".
-8. **Contract**: update the OpenAPI insta snapshot, bump `info.version`'s
-   minor by hand for an addition, and keep the route-coverage test green
-   (ADR 0005 section 4). A snapshot change is an API change: say so in the PR.
+8. **Contract**: review the `.snap.new` the tests write beside
+   `tests/requests/snapshots/openapi_document.snap` and accept it (`cargo
+   insta review`), bump `info.version`'s minor by hand for an addition, and
+   keep the route-coverage test of `tests/requests/openapi.rs` green (ADR
+   0005 section 4). A snapshot change is an API change: say so in the PR.
 9. **PR**: `feat(api): ...` (or with `db`/`admin` scopes if the slice adds
    them), `Closes #N` for the PUB or NEW parity IDs it finishes.
 

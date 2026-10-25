@@ -1,0 +1,18 @@
+---
+source: tests/requests/openapi.rs
+expression: document
+---
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "backend3 public read API",
+    "description": "The public, read-only JSON API of the Verseghy Ferenc Gimnázium website.\n\nbackend3 is free software under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). Its source code is published at <https://github.com/Verseghy/website_backend3>.",
+    "license": {
+      "name": "AGPL-3.0-only",
+      "identifier": "AGPL-3.0-only"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {},
+  "components": {}
+}
