@@ -71,9 +71,12 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    ADR 0021 section 6 terms, and the trash and history patterns of ADR 0011
    section 8.
 10. **Importer step** for the feature's legacy tables: recipe 4.
-11. **Tests at every layer**: domain unit tests and proptests; model tests in
-    `tests/models/`; request tests in `tests/requests/`; admin unit tests next
-    to the components (`npm test`); one Playwright test of the main flow
+11. **Tests at every layer**: domain unit tests and proptests, in-module;
+    domain tests that need fixture files (such as the image corpus in
+    `tests/fixtures/images/`) in `tests/domain/`, because `src/domain/` may
+    not read files; model tests in `tests/models/`; request tests in
+    `tests/requests/`; admin unit tests next to the components (`npm test`);
+    one Playwright test of the main flow
     (`npm run e2e`). Tests that a generator writes use `boot_test` and
     `serial_test`, which backend3 does not depend on: rewrite them to
     `tests/support::with_app` or `with_server`, which give each test its own
