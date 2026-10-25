@@ -87,7 +87,7 @@ use crate::{
     controllers::{
         self,
         admin_ui::{self, DistRequirement},
-        metrics::{self, HttpMetrics, Metrics},
+        metrics::{self, HttpMetrics, Metrics, runtime::RuntimeMetrics},
         not_found,
     },
     domain::{
@@ -380,9 +380,13 @@ impl Hooks for App {
         set_clock(&ctx, Arc::new(SystemClock));
         let mut registry = Registry::default();
         let http = HttpMetrics::register(&mut registry);
-        // Later families (pool, queue, logins, uploads) register here, on
-        // the same registry, before it is frozen.
-        ctx.shared_store.insert(Metrics::new(registry, http));
+        // The pool, queue and process families: read at scrape time, from
+        // the application's pool and its database (ADR 0016 §3).
+        let runtime = RuntimeMetrics::register(&mut registry, ctx.db.clone());
+        // Later families (logins, uploads) register here, on the same
+        // registry, before it is frozen.
+        ctx.shared_store
+            .insert(Metrics::new(registry, http, runtime));
         Ok(ctx)
     }
 
