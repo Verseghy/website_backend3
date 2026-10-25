@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # guard-bash.sh: the PreToolUse hook that screens every Bash command an agent
-# runs in this repository (layer 2 of the guardrails, ADR 0024 section 4).
+# runs in this repository (layer 2 of the guardrails, ADR 0024 section 4 as
+# amended by ADR 0028).
 #
 # Why it exists
 #   Layer 1, the deny rules in .claude/settings.json, matches command text as
@@ -12,20 +13,27 @@
 #     - kubectl (Verseghy uses oc, never kubectl);
 #     - force deletion: a true --force on oc delete or oc replace, whatever
 #       the grace period, and a true --force with --grace-period=0 anywhere;
-#     - oc delete naming a PVC, PV or Argo CD Application in any spelling
-#       (ApplicationSets too, because deleting one deletes its Applications),
+#     - oc delete naming a PVC, PV, Argo CD Application, namespace or project
+#       in any spelling (ApplicationSets too, because deleting one deletes its
+#       Applications; a namespace or project takes everything in it along),
 #       also when the command line runs an `oc get` of one of them and the
 #       oc delete takes its resources from another command's output:
 #       `oc delete $(oc get pvc -o name)`, `oc get pvc -o name | xargs oc
 #       delete`, `oc get pvc -o yaml | oc delete -f -`;
+#     - `argocd app delete`, `argocd app delete-resource` and `argocd appset
+#       delete`, with any options (ADR 0028; the last two since D69);
+#     - an `oc patch` whose patch names finalizers, or names a PV's
+#       persistentVolumeReclaimPolicy with Delete, Recycle (since D69) or a
+#       value only the shell knows (ADR 0028);
 #     - Loco's data-wiping subcommands `db reset`, `db down`, `db truncate`
 #       and `db seed --reset` / `-r` of any binary: cargo loco, the app binary
 #       backend3-cli, or inside oc exec / oc rsh / oc debug;
 #     - sea-orm-cli `migrate fresh|refresh|reset|down`.
 #   check 2, the database target of database-touching commands (cargo loco,
-#     cargo run, cargo test, cargo nextest, psql, pg_restore, mysql,
-#     sea-orm-cli): it blocks when the target host is not local (localhost,
-#     127.0.0.1, ::1 or a Unix socket) or cannot be checked, and for cargo
+#     cargo run, cargo test, cargo nextest and the aliases cargo r, cargo
+#     loco-tool and cargo t, psql, pg_restore, mysql, mariadb, sea-orm-cli):
+#     it blocks when the target host is not local (localhost, 127.0.0.1,
+#     ::1 or a Unix socket) or cannot be checked, and for cargo
 #     commands it checks the importer source IMPORT_SOURCE_DATABASE_URL the
 #     same way. Any listed command run through oc exec, oc rsh or oc debug
 #     (also as a heredoc, a here-string or an echo or printf script piped into
@@ -34,29 +42,45 @@
 #     for exec and debug; for rsh the words after the pod, the program its
 #     --shell names, and with -f every word. So a pod, container or namespace
 #     named like a client (`oc exec deploy/mysql -- df -h`) is not blocked by
-#     its name, nor is a data path such as /var/lib/mysql.
+#     its name, nor is a data path such as /var/lib/mysql. A pod looked up
+#     with an unquoted $(...) or `...` does not end the command part
+#     (`oc exec $(oc get pod -o name) -- psql` is blocked). It also blocks an
+#     `oc port-forward` to a PostgreSQL, MySQL, MariaDB or (since D69) Redis
+#     port (ADR 0028), because the forwarded database then answers on
+#     localhost, which this check would otherwise take for a local one. No
+#     Redis client is a listed command, so a forwarded Redis would answer on
+#     localhost with no check at all.
 #
 #   Layer 3, the load_config guard and the CLI pre-check in the Rust code, is
 #   the one that cannot be bypassed from a shell. This hook is a second line of
 #   defence against agent mistakes, not a security boundary: commands that come
 #   from files or scripts are not visible to it (`oc exec -i pod -- sh <
-#   script.sh`, `oc delete -f list.txt`), and neither is text that only a
-#   shell run computes, because the hook reads the command and does not run
-#   it: a variable's value (`P=psql; oc exec pod -- $P`), printf formats and
-#   echo -e escapes, or decoded output (`base64 -d`).
+#   script.sh`, `oc delete -f list.txt`, `oc patch --patch-file p.json`), and
+#   neither is text that only a shell run computes, because the hook reads the
+#   command and does not run it: a variable's value (`P=psql; oc exec pod --
+#   $P`), printf formats and echo -e escapes, or decoded output (`base64 -d`).
+#   Nor does it block what no answer has put in its scope yet (ADR 0028,
+#   "Negative and risks"): a Redis client run in the cluster, `argocd app
+#   patch-resource` and `argocd app confirm-deletion`.
 #
 # Contract with Claude Code (verified against the "Hooks reference" of the
-# Claude Code docs, 2026-10-24)
+# Claude Code docs, 2026-10-25)
 #   - stdin is one JSON object; the Bash command is at .tool_input.command and
 #     the tool name at .tool_name;
 #   - exit 0 lets the command run;
 #   - exit 2 blocks it, and stderr is shown to the agent as the reason, so every
 #     message says what was refused and what to do instead;
-#   - any other exit code is a NON-blocking error and the command would still
-#     run. That is why every failure path below exits 2 (fail closed): a
-#     missing jq, unreadable input, or an unexpected error in this script.
-#   .claude/settings.json runs it as "$CLAUDE_PROJECT_DIR"/.claude/hooks/guard-bash.sh
-#   (shell form; Claude Code exports CLAUDE_PROJECT_DIR to the hook process).
+#   - any other exit code is a failure. .claude/settings.json sets
+#     "onFailure": "block" on this hook (Claude Code v2.1.295 or later), so a
+#     failure, a hook that cannot start or one that reaches its timeout blocks
+#     the command too. Without it a failure would be NON-blocking, and an older
+#     client ignores the field, so every failure path below still exits 2
+#     itself (fail closed): a missing jq, unreadable input, or an unexpected
+#     error in this script.
+#   .claude/settings.json runs it in exec form: "command" is
+#   "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-bash.sh" with "args": [], so no
+#   shell is involved and Claude Code substitutes the placeholder as a plain
+#   string. It still exports CLAUDE_PROJECT_DIR to the hook process.
 #
 # Design notes
 #   - It runs before every Bash call, so it must be fast: it starts one jq
@@ -82,8 +106,10 @@
 #     merely mention a command are not blocked. The cases it handles are
 #     pinned by scripts/tests/test-guard-bash.sh, which must pass before this
 #     file changes (it runs in the CI "Test" job).
-#   - Where ADR 0024 leaves room, it is stricter, and each point needs the
-#     maintainer's acceptance or an amending ADR (ADR 0001 section 6):
+#   - Where ADR 0024 leaves room, it is stricter. The maintainer accepted
+#     these points as built, and ADR 0028 section 4 records them; a new point
+#     like them needs the maintainer's acceptance or an amending ADR first
+#     (ADR 0001 section 6):
 #       - check 2 checks every explicit target source that is present (inline
 #         variables, options and connection strings), not only the first,
 #         because psql prefers -h over PGHOST; an environment variable is
@@ -95,6 +121,11 @@
 #         --grace-period=0, because kubectl then sets the grace period to 0;
 #       - an ApplicationSet counts like an Application, because deleting one
 #         deletes its Applications;
+#       - heredocs read by a shell, here-strings, and echo or printf output
+#         piped into a shell (also through further pipeline stages and across
+#         a line break after |) are checked like `sh -c`, because they run
+#         the same commands; a heredoc that only data reads, such as a commit
+#         message, is skipped;
 #       - an oc delete whose resources come from another command's output
 #         ($(...), a variable, xargs, `-f -` or a process substitution) counts
 #         as naming a protected kind when the same command line runs an
@@ -103,7 +134,12 @@
 #         here-string or piped echo or printf output) counts as a script that
 #         runs in the cluster, even when the command in the pod is not a
 #         shell. Under xargs the text becomes the oc command's arguments
-#         instead, as xargs passes it.
+#         instead, as xargs passes it;
+#       - check 2 counts cargo run, cargo r, cargo loco-tool and cargo t like
+#         the listed cargo loco and cargo test, because they start the same
+#         programs (see db_commands).
+#     The last three points are the maintainer's answer to D69 of
+#     2026-10-25, which ADR 0028 section 4 records too.
 #   - It reads DATABASE_URL, PGHOST, PGHOSTADDR, PGSERVICE, MYSQL_HOST and
 #     IMPORT_SOURCE_DATABASE_URL from its own environment (the one Claude Code
 #     passes to hooks) for the "environment" target source of check 2. That is
@@ -140,8 +176,9 @@ IFS= read -r -d '' GUARD_JQ <<'JQ' || true
 #   $check - the check number of ADR 0024 section 4 (1 or 2);
 #   $text  - what was refused and what to do instead.
 def msg($check; $text):
-  "Blocked by .claude/hooks/guard-bash.sh (ADR 0024 section 4, check \($check)): \($text)\n"
-  + "The guardrails are described in docs/design/adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md, section 4.";
+  "Blocked by .claude/hooks/guard-bash.sh (ADR 0024 section 4 as amended by ADR 0028, check \($check)): \($text)\n"
+  + "The guardrails are described in docs/design/adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md, section 4, "
+  + "and docs/design/adr/0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md.";
 
 # Advice for a block that may be a false positive caused by text that only
 # mentions a command, for example in a commit message.
@@ -193,9 +230,11 @@ def first_positional($valopts):
 # oc options that take a separate value, so their value is not read as a
 # resource, a verb or a pod (for example the namespace in `-n apps`): the
 # global options of `oc options` (oc 4.22) and the value options of delete,
-# replace, exec, rsh and debug. A boolean option must never be listed: the
-# word after it would be skipped, and a pod taken for its value would let the
-# next word, the command, pass for the pod in check_in_cluster.
+# replace, exec, rsh, debug and port-forward. A boolean option must never be
+# listed: the word after it would be skipped, and a pod taken for its value
+# would let the next word, the command, pass for the pod in check_in_cluster.
+# That is why patch's -p is not listed: it is the boolean --previous of
+# `oc logs -p`. check_oc_patch reads every word of an oc patch instead.
 def oc_value_options:
   ["-n", "--namespace", "-l", "--selector", "-f", "--filename", "-o", "--output",
    "--field-selector", "--context", "--cluster", "--kubeconfig", "--kuberc", "--server", "-s",
@@ -205,7 +244,7 @@ def oc_value_options:
    "--tls-server-name", "--loglevel", "-v", "--v", "--log-flush-frequency",
    "--profile", "--profile-output", "-c", "--container", "--shell",
    "--pod-running-timeout", "--image", "--image-stream", "--node-name", "--to-namespace",
-   "--as-user"];
+   "--as-user", "--address"];
 
 # The first `oc exec`, `oc rsh` or `oc debug` in a list of words, as
 # {verb, i} with the index i of its `oc`, or null. Global options may stand
@@ -328,7 +367,11 @@ def cargo_subcommand:
 # ------------------------------------------------------------------ lexing
 #
 # The command is split into segments (simple commands) of words. Separators
-# (; & && || | |& ( ) ` and newlines) end a segment. Redirections are dropped.
+# (; & && || | |& and newlines) end a segment, and so do the parentheses of a
+# subshell group. Redirections are dropped. An unquoted $(...), `...` or
+# process substitution <(...) is lexed as segments of its own, and the
+# segment around it goes on after it with a placeholder word in its place
+# (see lex_chunk).
 # Quotes and backslashes are removed from each word the way the shell joins
 # them. A quoted string that the shell would run as a command (after `-c`,
 # `--command`, `eval`, `ssh` or `watch`, and every $(...) or `...` inside
@@ -453,7 +496,7 @@ def shell_value_options: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"];
 
 # A command can only be blocked if it contains one of these words, so every
 # other command is allowed without being parsed.
-def trigger_re: "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|sea-orm-cli|cargo";
+def trigger_re: "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|mariadb|sea-orm-cli|cargo|argocd";
 
 # The variables check 2 reads.
 def watched_var_re: "DATABASE_URL|PGHOST|PGSERVICE|MYSQL_HOST";
@@ -528,6 +571,28 @@ def lex($depth):
       # `echo psql |` and `oc exec -i pod -- sh` on the next line are one.
       else (if $piped or $sep == "\n" then . else .pipe = null end) end
     | .copt = false | .cskip = false | .hs = false | .hstr = [] | .sh = false | .rw = false;
+  # Opens an unquoted substitution: $(...), `...` or a process substitution
+  # <(...) or >(...). The current segment and its state are kept aside on
+  # .stack, and the text inside starts segments of its own, as a shell runs
+  # it as a command of its own.
+  #   $kind - "sub" for $(...) and <(...), "tick" for `...`.
+  def open_sub($kind):
+    .stack += [{kind: $kind, cur, copt, cskip, hs, hstr, sh, rw, pipe}]
+    | .cur = [] | .copt = false | .cskip = false | .hs = false | .hstr = [] | .sh = false | .rw = false
+    | .pipe = null;
+  # Closes the innermost substitution: its last segment ends, and the segment
+  # around it goes on with the words after it. So in
+  # `oc port-forward $(oc get pod -o name) 5432` the port is still a word of
+  # the oc port-forward segment, and in `oc exec $(...) -- psql` psql is
+  # still in the command part of the oc exec.
+  def close_sub:
+    finish_segment(")") | .stack[-1] as $o | .stack |= .[:-1] | . + ($o | del(.kind));
+  # Closes what is still open at the end of a chunk, so that no segment kept
+  # aside is lost: an unbalanced text is checked, not dropped.
+  def close_all:
+    if (.stack | length) == 0 then .
+    elif .stack[-1].kind == "group" then .stack |= .[:-1] | close_all
+    else close_sub | close_all end;
   # Lexes one chunk. $pipe is the piped echo or printf text that the chunk
   # before passes on, when the two were cut apart inside one pipeline; the
   # result carries the same for the next chunk.
@@ -535,14 +600,35 @@ def lex($depth):
   #   .sh, .rw: whether an earlier word of the current segment is a shell, or
   #   one of reparse_words. They are flags, set as each word is read, so that
   #   a word costs the same however long its segment is (looking back over
-  #   the segment for every word made a long segment cost quadratic time).
+  #   the segment for every word made a long segment cost quadratic time);
+  #   .dl, .ps: whether the token just read is a word that ends in `$`, or a
+  #   bare < or > redirection, so that a `(` right after it opens a $(...) or
+  #   a process substitution rather than a subshell;
+  #   .stack: the open substitutions and subshell groups, innermost last
+  #   (see open_sub). An unquoted $(...) leaves its `$` in the word before
+  #   it, a `...` leaves the word "`" and a process substitution the path
+  #   /dev/fd/63 that bash passes, so the checks see that a shell fills in
+  #   text there (see holds_expansion). A subshell group `( ... )` only ends
+  #   segments, as before.
   def lex_chunk($pipe):
     reduce scan(token_re) as $t
       ({segs: [], cur: [], nested: [], pipe: $pipe, copt: false, cskip: false, hs: false, hstr: [],
-        sh: false, rw: false};
-       if $t[2] != null then finish_segment($t[2])
-       elif $t[1] != null then .hs = ($t[1] | test("<<<$"))
-       elif $t[3] != null then
+        sh: false, rw: false, dl: false, ps: false, stack: []};
+       .dl as $dl | .ps as $ps | .dl = false | .ps = false
+       | ((.stack | last // {}) | .kind) as $open
+       | if $t[2] == "(" then
+           if $dl then open_sub("sub")
+           elif $ps then .cur += ["/dev/fd/63"] | open_sub("sub")
+           else finish_segment("(") | .stack += [{kind: "group"}] end
+         elif $t[2] == ")" then
+           if $open == "sub" then close_sub
+           elif $open == "group" then finish_segment(")") | .stack |= .[:-1]
+           else finish_segment(")") end
+         elif $t[2] == "`" then
+           if $open == "tick" then close_sub else .cur += ["`"] | open_sub("tick") end
+         elif $t[2] != null then finish_segment($t[2])
+         elif $t[1] != null then .hs = ($t[1] | test("<<<$")) | .ps = ($t[1] | test("^[<>]$"))
+         elif $t[3] != null then (
          [$t[3] | scan(part_re)] as $parts
          | ($parts | map(.[0] // (.[1] | values | dq_unescape) // .[2] // .[3]) | join("")) as $text
          | .sh as $in_shell
@@ -570,8 +656,10 @@ def lex($depth):
              | select(test("\\S"))
              | lex($depth + 1)[]
            ]
-           end
-       else . end)
+           end)
+           | .dl = ($t[3] | endswith("$"))
+         else . end)
+    | close_all
     | (if (.cur | length) == 0 then .pipe else null end) as $carry
     | finish_segment("")
     | {segs: (.segs + .nested), pipe: $carry};
@@ -639,8 +727,18 @@ def check_force_delete:
            + "Force-deleting pods is never allowed. Delete the pod normally (`oc delete pod <name>`) and let it terminate; "
            + "if it does not, stop and ask the maintainer.");
 
+# The resource types an agent never deletes: PersistentVolumeClaims,
+# PersistentVolumes, Argo CD Applications and ApplicationSets (ADR 0024
+# section 4), and namespaces and OpenShift projects (ADR 0028), whose deletion
+# deletes every object in them, their claims included. The input is a type
+# without its group (`projects` of `projects.project.openshift.io`), in lower
+# case.
 def protected_kind:
-  test("^(pvcs?|persistentvolumeclaims?|pvs?|persistentvolumes?|apps?|applications?|appsets?|applicationsets?)$");
+  test("^(pvcs?|persistentvolumeclaims?|pvs?|persistentvolumes?|apps?|applications?|appsets?|applicationsets?|ns|namespaces?|projects?)$");
+
+# The protected kinds, for the block reasons.
+def protected_kinds_text:
+  "a PersistentVolumeClaim, PersistentVolume, Argo CD Application or ApplicationSet, namespace or project";
 
 # Whether a resource argument (`pvc`, `pods,pvc`, `persistentvolumeclaim.v1`,
 # `pvc/data`) names a protected kind in its type part.
@@ -671,19 +769,19 @@ def protected_resource_args:
   | .value;
 
 def protected_delete_advice:
-  "Deleting one can destroy data, and deleting an Application deletes every resource it manages, so agents never do it. "
+  "Deleting one can destroy data: deleting an Application deletes every resource it manages, "
+  + "and deleting a namespace or project deletes everything in it, its PersistentVolumeClaims included, so agents never do it. "
   + "A human does it after checking that the volume's reclaim policy is Retain and that a verified backup exists. Stop and ask the maintainer.";
 
 # oc delete of a protected kind.
 def check_oc_delete:
   first(oc_verb_args("delete") | .args | protected_resource_args) as $arg
-  | msg(1; "`oc delete` names '\($arg)', a PersistentVolumeClaim, PersistentVolume or Argo CD Application (or ApplicationSet). "
-           + protected_delete_advice);
+  | msg(1; "`oc delete` names '\($arg)', \(protected_kinds_text). " + protected_delete_advice);
 
 # Whether a word holds text that the shell or a runner fills in when it
-# runs: a variable, a $(...) (unquoted, it leaves a lone `$` word, because
-# the lexer splits at the parenthesis), the `{}` of xargs -I{}, parallel and
-# find -exec, or the replace string of the runner (see runner_feed).
+# runs: a variable, a $(...) or `...` (unquoted, the lexer leaves a `$` or a
+# "`" word in its place), the `{}` of xargs -I{}, parallel and find -exec, or
+# the replace string of the runner (see runner_feed).
 #   $replace - the runner's replace string, or null.
 def holds_expansion($replace): test("[$`]|\\{\\}") or ($replace != null and contains($replace));
 
@@ -695,15 +793,15 @@ def holds_expansion($replace): test("[$`]|\\{\\}") or ($replace != null and cont
 #     type written out on its own (`xargs oc delete pod`), kubectl refuses
 #     appended TYPE/NAME words, as it does for $(...) below;
 #   - it has no resource argument and no -f or -k, so they came from a
-#     backtick substitution, which the lexer splits off
-#     (oc delete `oc get pvc -o name`), or from a runner such as xargs;
+#     runner such as xargs (`oc get pvc -o name | xargs oc delete`);
 #   - the type part of a word that kubectl reads a type from (the first
 #     resource argument and, after a TYPE/NAME one, every other) holds an
-#     expansion: `oc delete $(oc get pvc -o name)`, `oc delete "$r"` in a
-#     loop over such output, `xargs -I X oc delete X`;
+#     expansion: `oc delete $(oc get pvc -o name)`, oc delete `oc get pvc
+#     -o name`, `oc delete "$r"` in a loop over such output,
+#     `xargs -I X oc delete X`;
 #   - its -f or --filename reads the output: `-f -` or /dev/stdin from a
-#     pipe, a value that holds an expansion, or no value, where a process
-#     substitution `<(...)` was split off.
+#     pipe, the /dev/fd/63 a process substitution `<(...)` leaves, a value
+#     that holds an expansion, or no value.
 # `oc delete pod "$name"` fixes the type in the text, so it is not generated.
 # A file named in the text (`-f pvcs.yaml`) is not visible to the hook.
 def generated_delete:
@@ -733,10 +831,109 @@ def check_generated_delete:
   | first($segs[] | oc_verb_args("get") | .args | protected_resource_args) as $kind
   | first($segs[] | select(generated_delete))
   | msg(1; "`oc delete` here gets the resources it deletes from the output of another command ($(...), a variable, xargs or -f -), "
-           + "and this command runs `oc get \($kind)`, a PersistentVolumeClaim, PersistentVolume or Argo CD Application (or ApplicationSet), "
+           + "and this command runs `oc get \($kind)`, \(protected_kinds_text), "
            + "so it may delete one. " + protected_delete_advice
            + " If the delete is meant for other resources, run the oc get on its own first, "
            + "then delete those resources with their type written out (`oc delete pod <name>`).");
+
+# argocd's options that take a separate value, so their value is not read as
+# a subcommand: the global options of argocd
+# (argoproj/argo-cd@17b98d9b6:cmd/argocd/commands/root.go) and the value
+# options of `argocd app delete` (cmd/argocd/commands/app.go) and of `argocd
+# app delete-resource` (cmd/argocd/commands/app_resources.go); `argocd appset
+# delete` has only the boolean -y (cmd/argocd/commands/applicationset.go). A
+# boolean option must never be listed.
+def argocd_value_options:
+  ["--config", "--server", "--server-crt", "--client-crt", "--client-crt-key", "--auth-token",
+   "--grpc-web-root-path", "--logformat", "--loglevel", "--header", "-H", "--port-forward-namespace",
+   "--http-retry-max", "--argocd-context", "--server-name", "--controller-name",
+   "--redis-haproxy-name", "--redis-name", "--repo-server-name", "--redis-compress", "--kube-context",
+   "--propagation-policy", "-p", "--selector", "-l", "--app-namespace", "-N",
+   "--resource-name", "--kind", "--group", "--namespace", "--project"];
+
+# The argocd subcommands that delete, as {parent: [subcommands]}, with what
+# each one deletes, for the block reason (argoproj/argo-cd@17b98d9b6):
+#   - `app delete` (ADR 0028) deletes an Application, and with its default
+#     --cascade every resource the Application manages;
+#   - `app delete-resource` (D69) deletes resources an Application manages,
+#     of any kind its --kind names, a PersistentVolumeClaim included;
+#   - `appset delete` (D69) deletes ApplicationSets, and with them all their
+#     Applications ("Are you sure you want to delete ... and all its
+#     Applications?").
+# argocd defines no alias for any of these words, and cobra matches command
+# names exactly (no prefix matching unless a program turns it on).
+def argocd_deleting_subcommands: {app: ["delete", "delete-resource"], appset: ["delete"]};
+
+# The block reason for one deleting argocd subcommand.
+#   $command - "app delete", "app delete-resource" or "appset delete".
+def argocd_delete_what($command):
+  if $command == "app delete" then
+    "deletes an Argo CD Application through the Argo CD API, as `oc delete application` does"
+  elif $command == "app delete-resource" then
+    "deletes resources that an Argo CD Application manages through the Argo CD API, of any kind, "
+    + "a PersistentVolumeClaim included, as `oc delete` does, and the hook does not tell one kind from another"
+  else
+    "deletes an Argo CD ApplicationSet through the Argo CD API, and with it all its Applications, "
+    + "as `oc delete applicationset` does"
+  end;
+
+# A deleting argocd subcommand with any options (ADR 0028, D69): `argocd app
+# delete`, `argocd app delete-resource` or `argocd appset delete` (see
+# argocd_deleting_subcommands). The subcommands are positional words, so
+# options before the parent (`app`, `appset`) and after the subcommand cannot
+# hide them: an option missing from argocd_value_options there only adds one
+# more positional word. Between them, such an option may take the word after
+# it as its value (`argocd app --new-option v delete x`; cobra's stripFlags
+# reads an unknown `--option` without `=value` that way), so when the first
+# positional word after the parent directly follows an option without
+# `=value`, the next positional word counts as the subcommand too. A boolean
+# option looks the same, so this errs towards blocking.
+def check_argocd_delete:
+  . as $s
+  | argocd_deleting_subcommands as $subs
+  | first(range(0; $s | length) as $i
+      | select(($s[$i] | basename) == "argocd")
+      | $s[$i + 1:] as $w
+      | [$w | positional_indices(argocd_value_options)] as $p
+      | range(0; ($p | length) - 1) as $j
+      | $w[$p[$j]] as $parent
+      | ($subs[$parent] // empty) as $deleting
+      | $p[$j + 1] as $k
+      | $p[$j + 2] as $m
+      | if ($w[$k] | IN($deleting[])) then "\($parent) \($w[$k])"
+        elif ($w[$k - 1] | startswith("-") and (contains("=") | not))
+             and $m != null and ($w[$m] | IN($deleting[])) then "\($parent) \($w[$m])"
+        else empty end) as $command
+  | msg(1; "`argocd \($command)` \(argocd_delete_what($command)). " + protected_delete_advice);
+
+# An `oc patch` that can destroy data (ADR 0028):
+#   - one that removes finalizers. Without them a resource goes without the
+#     protection they hold (kubernetes.io/pvc-protection, Argo CD's resources
+#     finalizer). A merge patch that sets the list, a JSON patch `remove` and
+#     a strategic merge $deleteFromPrimitiveList each remove some, and the
+#     hook cannot tell all of them from an addition, so it matches every
+#     patch that names finalizers, additions included;
+#   - one that sets a PV's reclaim policy to Delete, which deletes the volume
+#     with its claim, or (D69) to the deprecated Recycle, which wipes the
+#     volume's data (`rm -rf /thevolume/*`) when its claim is released: its
+#     patch names persistentVolumeReclaimPolicy and, in the same word, Delete,
+#     Recycle or a shell expansion, whose value cannot be checked. Setting
+#     Retain stays allowed. Other values are not matched.
+# Every word after `oc` is read, in lower case, because kubectl takes the
+# patch from -p, --patch, -p=... or a joined -p..., and a resource name
+# rarely holds these words. A patch from --patch-file, or from another
+# command's output, is not visible to the hook.
+def check_oc_patch:
+  first(oc_verb_args("patch") | .words[] | ascii_downcase
+    | if contains("finalizers") then "changes finalizers"
+      elif contains("persistentvolumereclaimpolicy") and test("delete|recycle|[$`]") then
+        "sets a PersistentVolume's reclaim policy to Delete or Recycle (or to a value only the shell knows)"
+      else empty end) as $what
+  | msg(1; "this `oc patch` \($what). Without its finalizers a resource is deleted without the protection they hold, "
+           + "a PersistentVolume whose reclaim policy is Delete is deleted with its claim, "
+           + "and one whose policy is Recycle has its data wiped when its claim is released, so agents never do any of these. "
+           + "Setting the reclaim policy to Retain is allowed (`oc patch pv <name> -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Retain\"}}'`). "
+           + "For anything else, stop and ask the maintainer." + text_only_hint);
 
 def check_db_wipe:
   . as $s
@@ -874,13 +1071,19 @@ def connection_string_targets:
      | {from: "a service= connection key", host: "service \(.)", local: false});
 
 # Every database-touching command in a segment, as {kind, name, args}.
-# `cargo run` and `cargo r` count, because `cargo loco` is an alias of
-# `cargo run --` (.cargo/config.toml) and runs the same backend3-cli.
+# `cargo run`, `cargo r` and `cargo loco-tool` count, because `cargo loco` is
+# an alias of `cargo run --` (.cargo/config.toml), `loco-tool` is the same
+# alias there and `r` is cargo's built-in alias of `run`, so all of them run
+# the same backend3-cli; `cargo t` is cargo's built-in alias of `cargo test`.
+# The maintainer accepted this reading (D69, ADR 0028 section 4).
+# MariaDB's client `mariadb` (ADR 0028) takes the same host options and
+# reads the same MYSQL_HOST as mysql, so it is checked as kind "mysql".
 def db_commands:
   . as $s
   | range(0; $s | length) as $i
   | ($s[$i] | basename) as $b
   | if ($b | IN("psql", "pg_restore", "mysql", "sea-orm-cli")) then {kind: $b, name: $b, args: $s[$i + 1:]}
+    elif $b == "mariadb" then {kind: "mysql", name: $b, args: $s[$i + 1:]}
     elif $b == "cargo" then
       (($s[$i + 1:] | cargo_subcommand) // "") as $sub
       | if ($sub | IN("loco", "loco-tool", "test", "t", "nextest", "run", "r"))
@@ -982,6 +1185,45 @@ def check_in_cluster:
            + "Agents never run database commands in the cluster; stop and ask the maintainer."
            + text_only_hint);
 
+# Whether the remote part of an `oc port-forward` port spec
+# ([LOCAL_PORT:]REMOTE_PORT) reaches a database: PostgreSQL's 5432, MySQL's
+# and MariaDB's 3306, MySQL's X protocol port 33060, Redis's 6379 and Redis
+# Sentinel's 26379 (D69), or a named port that contains postgres, mariadb,
+# sql, redis or sentinel (so `postgres`, `postgresql`, `pgsql`, `mysql`,
+# `mysqlx`, `redis`, `tcp-redis` and `tcp-sentinel` count) or is db.
+# Sentinel counts because its SENTINEL SET, REMOVE and FAILOVER commands
+# reconfigure the Redis servers it monitors (Redis docs, "High availability
+# with Redis Sentinel").
+def database_port:
+  if test("^[0-9]+$") then tonumber | IN(5432, 3306, 33060, 6379, 26379)
+  else ascii_downcase | test("postgres|mariadb|sql|redis|sentinel|^db$") end;
+
+# An `oc port-forward` to a database port (ADR 0028; Redis since D69). oc
+# listens on localhost by default (--address), so the database in the cluster
+# then answers on localhost, and every client this check counts as local would
+# reach it. No Redis client is among the listed commands (see db_commands), so
+# a forwarded Redis would be reached with no check at all; the port-forward is
+# the one point where the hook sees it. A port spec counts when its remote
+# part is a database port (see database_port), or holds a shell expansion or
+# the replace string of xargs or parallel, which cannot be checked (see
+# holds_expansion); and when xargs or parallel append their input words, the
+# ports cannot be seen at all.
+# The first positional word after the verb is the target (TYPE/NAME or a
+# pod); the rest are port specs. An empty port spec has an empty remote
+# part, which is no database port. A database served on another port is not
+# recognised.
+def check_port_forward:
+  first(oc_verb_args("port-forward")
+    | runner_feed(.before; ["oc"] + .words) as $feed
+    | if $feed != null and $feed.replace == null then "the ports that xargs or parallel append"
+      else first(.args[1:][] | select(split(":") | last // "" | holds_expansion($feed.replace) or database_port)) | "'\(.)'"
+      end) as $port
+  | msg(2; "`oc port-forward` forwards \($port), "
+           + "which is a PostgreSQL, MySQL, MariaDB or Redis port or cannot be checked. A port-forward makes the database or Redis in the cluster answer on localhost, "
+           + "where this check would take a database for a local one and does not check Redis clients at all. "
+           + "Agents never connect to a database or Redis in the cluster; stop and ask the maintainer."
+           + text_only_hint);
+
 #   $vars - the inline values of the watched variables, by name.
 def check_db_target($vars):
   first(db_commands as $c
@@ -1022,8 +1264,9 @@ def verdict:
       # matter, which keeps long commands cheap.
       [$cmd | gsub("\\\\\\n"; "") | (if test("<<") then strip_heredocs else . end) | lex(0)[]] as $segs
       | (first(($segs | scoped_segments[] | .vars as $vars | .seg
-                | (check_kubectl, check_force_delete, check_oc_delete, check_db_wipe, check_sea_orm_wipe,
-                   check_in_cluster, check_db_target($vars), check_import_source($vars))),
+                | (check_kubectl, check_force_delete, check_oc_delete, check_argocd_delete, check_oc_patch,
+                   check_db_wipe, check_sea_orm_wipe,
+                   check_in_cluster, check_port_forward, check_db_target($vars), check_import_source($vars))),
                ($segs | check_generated_delete)) // null) as $why
       | if $why == null then "allow" else "block\n\($why)" end
     end;
