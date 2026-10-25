@@ -2,7 +2,7 @@
 
 This page outlines how backend3 takes over from backend1 (the Laravel/Backpack admin) and backend2 (the GraphQL public API). It covers what happens, in which order, what is checked, and how each step is undone.
 
-The decision is recorded in [ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md). The detailed operator runbook lives in the private `Verseghy/runbooks` repository: exact commands, credential handling, and backup and restore steps. This page is public, so it describes the target procedure only.
+The decision is recorded in [ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md), as amended by [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md). The detailed operator runbook lives in the private `Verseghy/runbooks` repository: exact commands, credential handling, and backup and restore steps. This page is public, so it describes the target procedure only.
 
 ## 1. Summary
 
@@ -11,9 +11,8 @@ backend3 goes live in one evening:
 - Editors stop saving in the old admin.
 - The data is copied once into backend3's PostgreSQL database.
 - The public site switches to backend3's REST API, and the new admin opens.
-- backend2 is scaled down.
 
-backend1 and its MySQL database stay up, read-only, as a reference view until the maintainer decides to retire them. Nothing is retired automatically.
+backend1 and its MySQL database stay up, read-only, as a reference view until the maintainer decides to retire them. backend2 and its Redis keep running, unchanged, on the frozen data, and retire together with them ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)). Nothing is retired automatically.
 
 The public site stays up the whole time. During the freeze it shows the frozen MySQL content through backend2. After the promotion it reads backend3.
 
@@ -42,12 +41,12 @@ Throughout the plan, **at most one admin accepts writes at any moment**.
 |---|---|---|---|
 | MySQL `verseghy` | read/write | `super_read_only = ON` | stays up, still read-only |
 | backend1, old admin at `https://backend.microshift.verseghy-gimnazium.net/admin` | the admin | logins work, saves fail | reference view: read-only database, no write access to uploads |
-| backend2 and its Redis | public API | serves the frozen data | 0 replicas, manifests kept |
+| backend2 and its Redis | public API | serves the frozen data | running, unchanged: serves the frozen data to the website_frontend2 hub beta, old Angular bundles and the rollback path until decommissioning ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)) |
 | PostgreSQL ([ADR 0002](adr/0002-postgresql-as-the-database.md)) | deployed, empty schema | import target | source of truth |
 | backend3 at `https://backend3.microshift.verseghy-gimnazium.net` ([ADR 0014](adr/0014-one-host-backend3-microshift-verseghy-gimnazium-net.md)) | deployed, empty database, no accounts | import, then API and admin | `/admin`, `/api/admin`, `/api/v1` |
 | `/storage/**` on `verseghy-gimnazium.net` and `backend.microshift.verseghy-gimnazium.net` ([ADR 0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md)) | separate media server, if the co-mount test passed; otherwise backend1 | fallback only: backend3 takes the volume after the freeze | separate media server, or backend3 in the fallback |
 | website_frontend (Angular) | GraphQL build calling backend2 | REST build promoted | REST build calling `https://backend3.microshift.verseghy-gimnazium.net/api/v1` |
-| website_frontend2 beta on the hub | calls backend2 | — | scaled down (Q31) |
+| website_frontend2 beta on the hub | calls backend2 | calls backend2, which serves the frozen data | unchanged, calling backend2; scaled down when backend2 retires (Q31) |
 
 **Media variants.** ADR 0015 chooses a separate unprivileged nginx for `/storage/**`, with backend3 co-mounting the uploads volume. That holds only if a co-mount test on a throwaway PVC passes. Otherwise backend3 serves `/storage/**` itself, at 1 replica with the `Recreate` strategy.
 
@@ -60,7 +59,7 @@ Either way, the old admin's pages still show images during the parallel run. Its
 
 | Role | Who | Responsibilities |
 |---|---|---|
-| Window lead | the maintainer | runs the runbook, merges every `website_k8s`, `website_frontend` and `website_backend2` PR (decision R2), runs every database step by hand, decides go/no-go, rollback, reverse move and decommissioning |
+| Window lead | the maintainer | runs the runbook, merges every `website_k8s` and `website_frontend` PR (decision R2; this project has no `website_backend2` PR, [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)), runs every database step by hand, decides go/no-go, rollback, reverse move and decommissioning |
 | On-call editor | one editor | checks content in the new admin, makes the first content change, tells the other editors |
 | Agents | Claude Code sessions | build the importer and the smoke suite, open and hold PRs, report results. They run rehearsals only by triggering and reading the staging CronJob and its report. The dress rehearsal's database steps (the import run, the freeze and unfreeze, the reset, PostgreSQL read-only) are run by the maintainer by hand, because the committed guardrails (decision 37, [ADR 0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md)) keep agents' database commands to local databases. Agents never merge outside `website_backend3` and `Verseghy/runbooks`, and never decommission. |
 
@@ -68,15 +67,14 @@ Either way, the old admin's pages still show images during the parallel run. Its
 
 **Step zero: Retain first.** Before any `website_k8s` change that touches the `mysql` or `backend` Applications or the uploads PVC, the MySQL and uploads PVs are set to `reclaimPolicy: Retain`. This includes the media-server handover and backend3's co-mount. The PostgreSQL PV is set to `Retain` as soon as it is bound, before backend3's first production deploy (P9). Deleting an Argo CD Application deletes its PVC through the finalizer, and only `Retain` keeps the volume (research: SYNTHESIS §8 O25; decision 41). Check: `oc get pv -o custom-columns=NAME:.metadata.name,RECLAIM:.spec.persistentVolumeReclaimPolicy`.
 
-The window is scheduled only when every row holds. Rows P1-P15 are checked again in the pre-flight on the day.
+The window is scheduled only when every row holds. Rows P1-P15 are checked again in the pre-flight on the day. There is no P5: [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md) removed it, and the other rows keep their numbers so that references to them stay valid.
 
 | # | Prerequisite | Why | How it is checked |
 |---|---|---|---|
-| P1 | Parity: every parity issue is closed by a merged PR that references it, or closed as a documented parity exception (Logs, Backups, newsletter; [ADR 0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md)) | the flip replaces backend1 completely; an ID is done when its closing PR is merged (decision 25a) | the GitHub Project board shows no open parity issue, and every closed parity issue links a merged closing PR or the exception record |
+| P1 | Parity: every parity issue is closed by a merged PR that references it, or closed as a documented parity exception (Logs, Backups, newsletter; [ADR 0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md)) | the flip replaces backend1 completely; an ID is done when its closing PR is merged (decision 25a) | the GitHub Project board shows no open parity issue except PLT-31, PLT-32 and PLT-33, which happen in or after the window (ADR 0019 §2; PLT-33 stays open until decommissioning, [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)), and every closed parity issue links a merged closing PR or the exception record |
 | P2 | The import task is complete, and editors have signed the defect resolution list ([ADR 0017](adr/0017-legacy-data-import-normalisation-and-defect-resolution.md)) | the window runs the import once and must not need hand fixes | the maintainer records the editors' sign-off in the private runbooks repository, with who signed and the date (ADR 0017); the public resolution-list PR carries only the date, no names; the list is merged after that record exists; the import's tests pass |
 | P3 | Rehearsal exit criteria met (section 5.4) | proves the window on real data | rehearsal records |
 | P4 | The Angular REST change is merged in `website_frontend` and built by PAC. Its Image Updater PR is open and held with `/hold`. | promotion becomes one merge | the PR points at the image built from the rehearsed `website_frontend` commit; no later frontend commit, or the newer image passed the same staging check. If staging uses a separate build configuration (open item 3), the production image is verified by G8-G11 before go. |
-| P5 | website_backend2#251 and #258 are deployed | merged now per decision 2; re-checked because backend2 is the rollback target | backend2's image tag in `website_k8s` contains both fixes |
 | P6 | The PVs of MySQL, the uploads volume and PostgreSQL still have `reclaimPolicy: Retain` (step zero) | re-check of step zero before anything is frozen | `oc get pv -o custom-columns=NAME:.metadata.name,RECLAIM:.spec.persistentVolumeReclaimPolicy` |
 | P7 | Every dump for a rehearsal, and the final reference dump, uses `mysqldump --lock-all-tables` | the legacy tables are not transactional, so only a global read lock gives a consistent dump | the rehearsal and backup runbook commands |
 | P8 | The backup runbook covers the PostgreSQL database and the new PVCs, and a PostgreSQL restore has been rehearsed on staging ([ADR 0023](adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md)) | after the first content change PostgreSQL is the only current copy | runbook PR merged; restore drill recorded |
@@ -84,10 +82,10 @@ The window is scheduled only when every row holds. Rows P1-P15 are checked again
 | P10 | The frontend pod can reach backend3's public host | the Angular site renders on the server and calls the API through the public router | an HTTP request from the frontend pod to `https://backend3.microshift.verseghy-gimnazium.net/_ping` returns 200 |
 | P11 | The media variant is settled, and with the separate media server, `/storage/**` already runs on it | media must not depend on the window | on both hosts: images load, a missing file returns 404, a directory URL returns no listing, `Access-Control-Allow-Origin: *` is present, range requests work |
 | P12 | The production hardening from ADR 0023 is live on backend3 | the admin is internet-reachable from day one (decision 35) | per-IP and per-account login throttling with lockout and backoff; `remote_ip` trusting only the router hop; capped public list sizes; `secure_headers` and the admin CSP present; the router annotations present on the three backend3 Routes |
-| P13 | Every manifest change of the window and of its rollback is a pre-opened, held `website_k8s` PR | Argo CD syncs from Git and does not self-heal, so live edits would drift or be reverted | PR list in the runbook. The website_frontend2 hub beta is not in GitOps; its scale-down is a runbook step (phase 8). |
+| P13 | Every manifest change of the window and of its rollback is a pre-opened, held `website_k8s` PR | Argo CD syncs from Git and does not self-heal, so live edits would drift or be reverted | PR list in the runbook. The website_frontend2 hub beta is not in GitOps; its scale-down is a hand step of the decommissioning (section 10), not of the window. |
 | P14 | The release-1 seed of ADR 0019 is ready: the three partner banners (images copied to the uploads volume), the site settings and one Diáktoll issue, from what the current Angular build hard-codes. No notice is seeded. | the promoted build reads them from backend3 (Q29), and the site should look the same after the flip | the seed runs in the nightly rehearsal (open item 6); smoke suite and page checks on staging |
 | P15 | Credential rotation is prepared and rehearsed on staging (section 11) | rotation is the first phase of the window | runbook inventory complete |
-| P16 | The node's spare capacity covers the parallel run (backend1, MySQL, PostgreSQL, backend3, media server, frontend). backend2 and its Redis at 0 replicas are already counted. | the old stack keeps running beside the new one | node capacity read before scheduling (research: SYNTHESIS §8 O13). If it fails, the window is not scheduled and the maintainer decides how to add capacity. Scaling down or removing backend1 or MySQL is never proposed as the remedy (decision 41). |
+| P16 | The node's spare capacity covers the parallel run (backend1, MySQL, backend2 and its Redis, PostgreSQL, backend3, media server, frontend). backend2 and its Redis are counted as running, because they keep running until decommissioning ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)); their memory limits are 512 MiB of the 2 GiB already committed on the node ([ADR 0016](adr/0016-no-redis-in-memory-cache-postgres-queue-cronjob-tasks.md); research: SYNTHESIS §1.5.1). | the old stack keeps running beside the new one | node capacity read before scheduling (research: SYNTHESIS §8 O13). If it fails, the window is not scheduled and the maintainer decides how to add capacity. Scaling down or removing backend1, MySQL, backend2 or its Redis is never proposed as the remedy (decision 41, ADR 0026). |
 | P17 | Editors know the date one week ahead (section 12) | they must not plan saves for that evening | message sent |
 
 ## 5. Rehearsals
@@ -150,7 +148,7 @@ ADR 0003 section 2 decides the dress rehearsal and the same-day rehearsal. Only 
 
 ## 6. The window
 
-T0 is the moment of the freeze. The times follow research gap-02 §4.5. The freeze budget is 1 to 3 hours, and everything after T+30 is reserve for checks.
+T0 is the moment of the freeze. The times follow research gap-02 §4.5, without its backend2 step at T+30, which [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md) removed. The freeze budget is 1 to 3 hours, and everything after T+20 is reserve for checks.
 
 ```mermaid
 flowchart TD
@@ -166,13 +164,13 @@ flowchart TD
     U --> G{"Phase 6 - go or no-go"}
     G -->|no-go| RB["Free rollback, section 9.1"]
     G -->|go| A["Phase 7 - open the new admin"]
-    A --> B["Phase 8 - backend2 and Redis to 0"]
-    B --> PR["Read-only parallel run"]
+    A --> CL["Phase 8 - close the window"]
+    CL --> PR["Read-only parallel run"]
 ```
 
 | Phase | T | Step | Check | If the check fails |
 |---|---|---|---|---|
-| 0. Pre-flight | T-60 min | Read the same-day rehearsal result. Re-check P1-P15. Confirm that Tide merges and Argo CD syncs today. Record the rollback references: the current frontend image tag and backend2's replica count. | all green | do not start; nothing has changed |
+| 0. Pre-flight | T-60 min | Read the same-day rehearsal result. Re-check P1-P15. Confirm that Tide merges and Argo CD syncs today. Record the rollback reference: the current frontend image tag. | all green | do not start; nothing has changed |
 | 1. Rotation | T-30 min | Rotate the credentials (section 11) and restart their consumers. | old admin login works; public site serves; backend3 `/_readiness` returns 200 | restore the previous values and stop; no freeze is set yet |
 | 2. Freeze | T0 | On MySQL: `SET PERSIST super_read_only = ON;`. Merge the held PR that mounts the uploads volume read-only in backend1 (or removes it in the fallback) and moves its sessions, cache, compiled views and logs to an `emptyDir`. In the fallback media variant, that PR also gives the volume and the two `/storage` Routes to backend3. Tell the editors. | `SELECT @@GLOBAL.super_read_only;` returns 1; old admin login still works; a test save in the old admin fails; the public site serves; `/storage` works on both hosts | revert the PR; unfreeze with `SET PERSIST super_read_only = OFF; SET PERSIST read_only = OFF;` and check that `SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;` returns `0 0`; stop |
 | 3. Final dump | T+1 min | `mysqldump --lock-all-tables` | gzip test passes; the dump ends with the `-- Dump completed` trailer | retry once, otherwise roll back |
@@ -180,15 +178,14 @@ flowchart TD
 | 5. Public flip | T+10 min | Release the hold, approve and merge the frontend Image Updater PR; Argo CD syncs. | G8-G11 | revert the tag; roll back |
 | 6. Gate | T+20 min | The maintainer decides go or no-go. | all of section 7 | free rollback, section 9.1 |
 | 7. Admin opens | T+20 min | Editors are told the new admin is open. The on-call editor logs in at `https://backend3.microshift.verseghy-gimnazium.net/admin` and makes a small test content change, which marks the point of no return (section 8). | the change shows on the public site; the activity log records it | before that change: free rollback; after it: section 9.2 |
-| 8. Retire the GraphQL path | T+30 min | Merge the held PR that sets backend2 and its Redis to 0 replicas. The maintainer scales the website_frontend2 hub beta Deployment to 0 by hand on the hub (Q31). Argo CD does not manage it, and its CD workflow only restarts the Deployment, which keeps it at 0 replicas. | the public site still serves; the old admin's reference view loads | scale backend2 back up |
-| 9. Close | T+30 min to the end | Watch backend3's logs and the public site. Write the window report: timings, check results, aggregate counts. Announce the end of the window. | no HTTP 5xx responses and no ERROR lines in backend3's logs (`oc logs`) for 30 minutes (proposed threshold, open item 7) | fix forward |
+| 8. Close | T+20 min to the end | Watch backend3's logs and the public site. Write the window report: timings, check results, aggregate counts. Announce the end of the window. | no HTTP 5xx responses and no ERROR lines in backend3's logs (`oc logs`) for 30 minutes (proposed threshold, open item 7) | fix forward |
 
 The import runs inside the backend3 pod because that pod mounts the uploads volume in both media variants, and the import writes the extracted inline images there.
 
 Notes:
 
 - **Every manifest change goes through Git.** Argo CD runs with prune and self-heal off. A live `oc scale` or `oc edit` of a GitOps-managed object would be undone by the next sync, or would silently drift. The window lead may trigger an Argo CD sync instead of waiting for its poll.
-- **Live actions that change no manifest.** These are the only steps outside Git: the MySQL `SET PERSIST` statements; the rollout restarts after rotation; the forced ExternalSecret refresh; the import run and the release-1 seed; the PostgreSQL backup; in a rollback, the backend3 database reset; in a reverse move, the PostgreSQL read-only setting and the backend3 restart; on the hub, the scale-down of the hand-applied website_frontend2 beta.
+- **Live actions that change no manifest.** These are the only steps outside Git: the MySQL `SET PERSIST` statements; the rollout restarts after rotation; the forced ExternalSecret refresh; the import run and the release-1 seed; the PostgreSQL backup; in a rollback, the backend3 database reset; in a reverse move, the PostgreSQL read-only setting and the backend3 restart.
 - **The import reads the frozen production MySQL directly.** It never writes to MySQL. The final dump is the reference copy of the same frozen state.
 - **The import's only files** are the inline images it extracts to `/storage/uploads/posts/<id>/` (ADR 0017). They are new files and never overwrite existing ones. After a rollback they are unused and harmless.
 - **No hand edits to imported data.** A data problem is a no-go. It gets fixed in the importer or the resolution list and rehearsed again.
@@ -243,12 +240,11 @@ The order keeps one writable admin at a time. backend3 closes before the old adm
 
 | Step | Action | Result |
 |---|---|---|
-| 1 | If backend2 was already scaled down, merge the PR that scales it and its Redis back up. | the GraphQL API is available again |
-| 2 | Merge the PR that restores the recorded frontend tag; Argo CD syncs. | the public site reads backend2 |
-| 3 | Reset backend3's database to the empty, migrated schema. This is done by hand by the maintainer, because the agent guardrails refuse database-destroying commands outside localhost. | the new admin has no accounts and cannot be used |
-| 4 | Revert the freeze PR: backend1 gets its write access to the uploads volume back, and in the fallback the volume and the `/storage` Routes return to it. | uploads work in the old admin |
-| 5 | `SET PERSIST super_read_only = OFF; SET PERSIST read_only = OFF;` Setting only `super_read_only` to OFF would leave `read_only` ON. | `SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;` returns `0 0`; the old admin saves again |
-| 6 | Tell the editors. Write the report. Fix the cause in the importer, backend3 or the frontend, rehearse it and reschedule. | — |
+| 1 | Merge the PR that restores the recorded frontend tag; Argo CD syncs. backend2 and its Redis kept running, so nothing has to be scaled up ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)). | the public site reads backend2 |
+| 2 | Reset backend3's database to the empty, migrated schema. This is done by hand by the maintainer, because the agent guardrails refuse database-destroying commands outside localhost. | the new admin has no accounts and cannot be used |
+| 3 | Revert the freeze PR: backend1 gets its write access to the uploads volume back, and in the fallback the volume and the `/storage` Routes return to it. | uploads work in the old admin |
+| 4 | `SET PERSIST super_read_only = OFF; SET PERSIST read_only = OFF;` Setting only `super_read_only` to OFF would leave `read_only` ON. | `SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;` returns `0 0`; the old admin saves again |
+| 5 | Tell the editors. Write the report. Fix the cause in the importer, backend3 or the frontend, rehearse it and reschedule. | — |
 
 This takes minutes and loses no content. Rotated credentials stay rotated.
 
@@ -259,12 +255,12 @@ PostgreSQL now holds changes that MySQL does not. The default is to **fix forwar
 The maintainer alone may order a **reverse move**. It is manual by design. No reverse-sync code exists.
 
 1. Make backend3's database read-only with `ALTER DATABASE <db> SET default_transaction_read_only = on`, then restart backend3 so every connection picks up the setting. backend3 boots and stays ready against a read-only database (ADR 0003). The mechanism is rehearsed in the dress rehearsal.
-2. Scale backend2 and its Redis up, then restore the recorded frontend tag.
+2. Check that backend2 still answers on `/graphql`. G13 checked it only in the window, and backend2 may have run unattended for months since. Until it answers, the tag is not restored. Then restore the recorded frontend tag. backend2 and its Redis kept running, so the public site reads backend2 again ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)).
 3. List the content changes made since go-live from the activity log ([ADR 0011](adr/0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md)). Also list the media operations (`media_upload`, `media_rename`, `media_move`, `media_delete`). Undo renames and moves on the volume, and restore deleted files from the media trash, before re-entering content.
 4. Restore backend1's write access to the uploads volume, then unfreeze MySQL with `SET PERSIST super_read_only = OFF; SET PERSIST read_only = OFF;` and check that `SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;` returns `0 0`.
 5. Re-enter the listed changes by hand in the old admin. Files uploaded through the new media library stay on the same volume under the same paths, so re-entered content can link to them.
 
-This path exists because the read-only parallel run keeps backend1 and MySQL alive.
+This path exists because the read-only parallel run keeps backend1, MySQL and backend2 alive.
 
 ## 10. Read-only parallel run
 
@@ -272,22 +268,23 @@ This path exists because the read-only parallel run keeps backend1 and MySQL ali
 |---|---|
 | MySQL | running; `super_read_only = ON`, persisted with `SET PERSIST`, so a restart (including one caused by an image update) keeps it read-only |
 | backend1 | running at its old URL; database read-only; no write access to the uploads volume; its sessions, cache, compiled views and logs on an `emptyDir` |
-| backend2 and its Redis | 0 replicas; manifests kept in `website_k8s` |
-| website_frontend2 hub beta | 0 replicas (Q31) |
+| backend2 and its Redis | running, unchanged, reading the frozen MySQL; they serve the frozen data to the website_frontend2 hub beta, to browsers still on the old Angular bundle and to the rollback path, until they retire with backend1 and MySQL at decommissioning ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)) |
+| website_frontend2 hub beta | running, calling backend2; scaled down when backend2 retires (Q31) |
 | Backups | the backup runbook covers PostgreSQL, the uploads volume and MySQL (ADR 0023) |
 | backend3 | the only writable admin and the public API |
 
 **What editors can do in the old admin:** log in without "remember me", browse and open every record, and compare it with the new admin. Saves and uploads fail.
 
-**What never happens automatically:** no timer, CronJob, TTL, scheduled PR or agent scales down or deletes backend1, MySQL, their PVCs or their Argo CD Applications. The committed guardrails deny `oc delete pvc`, `oc delete pv` and `oc delete application` ([ADR 0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md)). Agents do not propose decommissioning on their own initiative.
+**What never happens automatically:** no timer, CronJob, TTL, scheduled PR or agent scales down or deletes backend1, MySQL, backend2, its Redis, their PVCs or their Argo CD Applications. The committed guardrails deny `oc delete pvc`, `oc delete pv` and `oc delete application` ([ADR 0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md)). Agents do not propose decommissioning on their own initiative.
 
-**When the maintainer decides to decommission.** This outline is for reference and is not part of the window. The private runbook has the steps.
+**When the maintainer decides to decommission.** backend1, MySQL, backend2 and backend2's Redis retire together, in one decommissioning ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)). This outline is for reference and is not part of the window. The private runbook has the steps.
 
 1. Confirm that every PV involved has `reclaimPolicy: Retain`.
 2. Take and verify a final MySQL dump and an uploads snapshot.
 3. Move `backend-pv-claim` (used by backend3 and the media server, ADR 0015) and the ServiceAccount and RoleBinding that the `static` Deployment also uses out of the backend Application, without a cascading delete.
-4. Remove each retiring Application's manifest (backend1, MySQL, backend2, Redis) through a `website_k8s` PR, one at a time. The app-of-apps Application does not prune, so the maintainer then deletes the Application object by hand; agents are denied this (ADR 0024). The finalizer deletes the resources the Application still owns, PVCs included. With `Retain`, the PVs survive. Deleting a PV is a separate, explicit decision.
-5. Remove the retired apps' ExternalSecret keys, Image Updater entries, PAC repositories, branch-protection entries and catalog entries.
+4. Scale the website_frontend2 hub beta Deployment to 0 by hand on the hub, because it calls backend2 (Q31). Argo CD does not manage it, and its CD workflow only restarts the Deployment, which keeps it at 0 replicas.
+5. Remove each retiring Application's manifest through a `website_k8s` PR, one at a time, consumers first: backend2 and its Redis, then backend1, and MySQL last. backend2 serves until its own removal, and both backends read MySQL, so MySQL goes only after they are gone. The app-of-apps Application does not prune, so the maintainer then deletes the Application object by hand; agents are denied this (ADR 0024). The finalizer deletes the resources the Application still owns, PVCs included. With `Retain`, the PVs survive. Deleting a PV is a separate, explicit decision. The PR that removes backend2's and its Redis's manifests closes PLT-33 ([parity.md](parity.md)).
+6. Remove the retired apps' ExternalSecret keys, Image Updater entries, PAC repositories, branch-protection entries and catalog entries.
 
 ## 11. Credential rotation
 
@@ -321,23 +318,22 @@ Messages to editors are in Hungarian, like the admin UI ([ADR 0021](adr/0021-hun
 | 2 | Spare capacity on the production node for the parallel run (research: SYNTHESIS §8 O13) | read the node's capacity before scheduling (P16) |
 | 3 | How the Angular REST build reaches staging's API, since the API base URL is compiled into the bundle | settled in the website_frontend REST PR: a staging build configuration or a runtime setting. The production image is verified in production during the window (G8-G11) before the go decision. |
 | 4 | Whether backend1 can run on staging, to rehearse the reference view and its read-only media mount | settled when staging is built; otherwise the backend1 manifest change is reviewed and verified in the window (phase 2 checks) |
-| 5 | Browsers with the old Angular service worker keep the old bundle until they reload, and that bundle calls backend2 | measured in the dress rehearsal. If visitors would see errors, phase 8 moves to the end of the window or the next day. Until then, backend2 serves the frozen data. |
+| 5 | Browsers with the old Angular service worker keep the old bundle until they reload, and that bundle calls backend2 | backend2 keeps running until decommissioning ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)), so such a visitor sees the frozen data, not errors. Staging has no visitors, so the dress rehearsal cannot measure this. During the parallel run, backend2's `query_req_count` counter on its in-cluster `/metrics` ([ADR 0023](adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) §7) shows how long old bundles and the hub beta keep calling it, as an input to the maintainer's decision to decommission. |
 | 6 | How the release-1 seed of ADR 0019 runs (P14; [data-migration.md](data-migration.md) §13 item 7). `import_mysql` does not write those tables. Entering the content in the new admin before promotion is not an option: it would cross the point of no return (section 8) and break the no-hand-edits rule. | Proposed: a separate idempotent task that reads reviewed, versioned seed files from this repository, holding the public content the current Angular build hard-codes. It runs right after the import in phase 4 and nightly with the rehearsal. Who prepares and reviews the seed files is settled with ADR 0017 and ADR 0019 before the first dress rehearsal. |
-| 7 | The proposed numbers: 7 passing nights (section 5.4) and the 30-minute error-free watch in phase 9 | the maintainer confirms or changes them |
+| 7 | The proposed numbers: 7 passing nights (section 5.4) and the 30-minute error-free watch in phase 8 | the maintainer confirms or changes them |
 | 8 | Whether `SET PERSIST super_read_only` survives a restart of the MySQL image in use, whether `--lock-all-tables` dumps run cleanly under it, and whether the unfreeze (`super_read_only` and `read_only` both OFF) persists across a restart | the dress rehearsal (section 5.3) |
 | 9 | The rotation inventory | the maintainer confirms it in the private runbook |
 | 10 | The date of the window and the on-call editor | the maintainer, after the exit criteria are met |
 
 ## 14. References
 
-- [ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md), and ADRs 0002, 0006, 0011, 0014, 0015, 0016, 0017, 0019, 0021, 0023, 0024
+- [ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) as amended by [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md), and ADRs 0002, 0006, 0011, 0014, 0015, 0016, 0017, 0019, 0021, 0023, 0024
 - [data-migration.md](data-migration.md) §3.3, §4.1, §6.11, §13; checks V3 and V10
-- research: SYNTHESIS §1.1, §1.4, §1.8.4, §1.8.5, §1.10, §1.11, §1.16.7
+- research: SYNTHESIS §1.1, §1.4, §1.5.1, §1.8.4, §1.8.5, §1.10, §1.11, §1.16.7
 - research: SYNTHESIS §4.11.1, §4.11.3, §4.12.3, §4.12.7, §4.12.8
 - research: SYNTHESIS §5.5.3, §5.13, §5.17.1, §5.17.3, §5.17.5; §8 (O13, O15, O16, O18, O25)
 - research: gap-01 §3.2; gap-02 §1.3, §4.2, §4.5; gap-07 §4; frontend-contract §3, §7; side-projects-iam §1.6
-- research: QUESTIONS Q2, Q17, Q25, Q29, Q31, Q32, Q33, Q41, Q42; decisions of 2026-10-24 (2, 17, 20, 25a, 31, 35, 37, 41, R2)
-- website_backend2#251, website_backend2#258
+- research: QUESTIONS Q2, Q17, Q25, Q29, Q31, Q32, Q33, Q41, Q42; decisions of 2026-10-24 (2, 17, 20, 25a, 31, 35, 37, 41, R2) and of 2026-10-25 (R6, R7)
 - website_frontend@f74c765:apps/frontend/src/environments/environment.prod.ts, apps/frontend/ngsw-config.json
 - website_k8s@34b8b55:verseghy-website/frontend/kustomization.yaml, verseghy-website/backend/serviceaccount.yaml, verseghy-website/image-updater/imageupdater.yaml
 - MySQL 8.4 Reference Manual: [`read_only`](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_read_only), [`super_read_only`](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_super_read_only), [persisted system variables](https://dev.mysql.com/doc/refman/8.4/en/persisted-system-variables.html), [mysqldump `--lock-all-tables`](https://dev.mysql.com/doc/refman/8.4/en/mysqldump.html#option_mysqldump_lock-all-tables)

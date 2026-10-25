@@ -10,7 +10,7 @@ The design was written on 2026-10-24, before any code. Every decision in it come
 |---|---|
 | `README.md` (this file) | Architecture overview, diagrams, index |
 | [adr/README.md](adr/README.md) | ADR index, ADR template, how to add or change a decision |
-| [adr/](adr/) | The 25 architecture decision records |
+| [adr/](adr/) | The architecture decision records, one file per decision |
 | [public-api.md](public-api.md) | The public read REST API (`/api/v1`) that replaces backend2's GraphQL API |
 | [parity.md](parity.md) | The backend1 feature inventory as parity IDs, and which features are retired |
 | [data-migration.md](data-migration.md) | How the MySQL data and the stored HTML are imported into PostgreSQL |
@@ -34,13 +34,13 @@ The scope rule: **every backend1 admin feature is ported unless an ADR retires i
 | Today | Role today | After the cut-over |
 |---|---|---|
 | **backend1**: `website_backend`, Laravel 7 + Backpack 4.1 | The only admin UI (`backend.microshift.verseghy-gimnazium.net/admin`); serves uploaded files under `/storage` on two hosts; an old JSON API with no consumer since 2022 | Admin UI and admin API move to backend3. `/storage` moves to the separate media server. backend1 stays up **read-only** as a reference view until the maintainer decides to decommission it ([ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md)). The old JSON API is not ported. |
-| **backend2**: `website_backend2`, Rust axum + async-graphql | The public read API (`POST /graphql` with persisted queries, 13 operations used by the Angular site), plus a Redis that holds only persisted query documents | Replaced by backend3's `/api/v1`, which keeps backend2's field names and its fixed semantics. backend2 and its Redis are scaled down after the flip. No GraphQL compatibility layer is built. |
+| **backend2**: `website_backend2`, Rust axum + async-graphql | The public read API (`POST /graphql` with persisted queries, 13 operations used by the Angular site), plus a Redis that holds only persisted query documents | Replaced by backend3's `/api/v1`, which keeps backend2's field names and its fixed semantics. The rewrite makes no change in website_backend2. backend2 and its Redis keep running, unchanged, after the flip: they serve the frozen MySQL data to the website_frontend2 hub beta, to browsers still on the old Angular bundle and to the rollback path, and retire together with backend1 and MySQL when the maintainer decides to decommission them ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)). No GraphQL compatibility layer is built. |
 | **MySQL 8.4**, database `verseghy` | Shared by backend1 (writes) and backend2 (reads); about 6 MiB in 6,677 rows | Imported into PostgreSQL. Not altered before the cut-over: no engine conversion, no charset change and no data fixes; every data fix lives in the importer. Every dump, for backup or rehearsal, is taken with `mysqldump --lock-all-tables`. Kept read-only during the parallel run ([ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md)). |
 
 Not touched by this project:
 
 - **website_frontend** (the Angular 14 SSR site at `verseghy-gimnazium.net`). Only its read API calls change: GraphQL to `/api/v1`, plus the new endpoints for notices, partner banners, site settings and Diáktoll issues ([ADR 0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md)). Its pages, routes and templates stay as they are. Those changes land as PRs in that repository, reviewed by a human.
-- **website_frontend2** (the SolidStart beta) is out of scope. Its hub beta is scaled down when backend2 retires. The REST shape stays backend2-compatible, so a later port is mostly a transport change.
+- **website_frontend2** (the SolidStart beta) is out of scope. Its hub beta keeps working against backend2 until backend2 retires at decommissioning, and is scaled down then ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)). The REST shape stays backend2-compatible, so a later port is mostly a transport change.
 - The legacy `static` Deployment that serves `/docs` and `/images`, cert-manager, the External Secrets Operator and the other platform pieces stay as they are. Changes to `website_k8s` are separate PRs, left for human review.
 
 ## Goals and non-goals
@@ -163,7 +163,7 @@ flowchart TB
 | `backend3.microshift.verseghy-gimnazium.net/api/admin/**` | backend3 | Admin API: session cookie, or a Bearer token for scripts. |
 | `backend3.microshift.verseghy-gimnazium.net/api/v1/**` | backend3 | Public read API. OpenAPI 3.1 at `/api/v1/openapi.json`. |
 | `backend.microshift.verseghy-gimnazium.net/**` (other paths) | backend1, read-only | Reference view during the parallel run. |
-| `backend2.microshift.verseghy-gimnazium.net/graphql` | backend2 until the flip | Scaled down after the flip. |
+| `backend2.microshift.verseghy-gimnazium.net/graphql` | backend2, unchanged, until decommissioning | The Angular site stops calling it at the flip. It keeps serving the frozen data to the website_frontend2 hub beta, to browsers still on the old Angular bundle and to the rollback path ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)). |
 
 ## Request flows
 
@@ -417,12 +417,12 @@ Not carried over: the Laravel bookkeeping table, password reset rows, remember-m
 ## How the cut-over works
 
 1. **Rehearse.** Every night the importer loads the newest `--lock-all-tables` dump into PostgreSQL on the hub's LAN-only staging, normalises it, writes a machine-readable import report, and runs the read-only smoke suite against staging's `/api/v1` ([cutover.md](cutover.md) §5.2).
-2. **Stage.** The Angular build that calls `/api/v1` is built ahead of time and its image bump PR waits. backend2's fixes `Verseghy/website_backend2#251` (posts paging cursor) and `#258` (invalid ISO week) are merged by a human reviewer ahead of the flip, so those two defects do not wait for backend3.
+2. **Stage.** The Angular build that calls `/api/v1` is built ahead of time and its image bump PR waits. The rewrite makes no change in backend2 ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)): the fixed posts paging and ISO-week handling reach visitors with backend3's `/api/v1` at the flip.
 3. **Flip.** In one evening window, every credential is rotated first. Then, with an admin write freeze of about 1-3 h, MySQL goes read-only, the final dump is imported and verified, the Angular REST build is promoted, and after the maintainer's go/no-go the new admin opens.
-4. **Point of no return.** The first content change (create, update or delete) in the new admin; logins and rehashes do not count. Before it, rollback is free: if backend2 is already scaled down, scale it and its Redis up; revert the Angular tag; close the new admin and reset its database; undo any media change made in the window; then lift read-only on MySQL. After it, PostgreSQL is the source of truth and backend3 is fixed forward ([ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) §8).
-5. **Parallel run.** backend1 and MySQL stay up read-only as a reference view until the maintainer decides to decommission them. backend2 is scaled down.
+4. **Point of no return.** The first content change (create, update or delete) in the new admin; logins and rehashes do not count. Before it, rollback is free: revert the Angular tag, so the site reads backend2 again, which never stopped; close the new admin and reset its database; undo any media change made in the window; then lift read-only on MySQL. After it, PostgreSQL is the source of truth and backend3 is fixed forward ([ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) §8).
+5. **Parallel run.** backend1 and MySQL stay up read-only as a reference view, and backend2 and its Redis keep running, unchanged, on the frozen data. All four retire together when the maintainer decides to decommission them ([ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)).
 
-[ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) records the decision. [cutover.md](cutover.md) is the step-by-step plan.
+[ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) records the decision, and [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md) amends its backend2 parts. [cutover.md](cutover.md) is the step-by-step plan.
 
 ## Repository layout
 
@@ -487,13 +487,13 @@ The Containerfile stays on UBI 9 because the hub's build nodes cannot run UBI 10
 
 ## Architecture decision records
 
-ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). ADR 0025 was accepted on 2026-10-25; it amends ADR 0012 §1 and one sentence of ADR 0005 §5. The [ADR index](adr/README.md) has longer summaries and the template.
+ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). ADR 0025 was accepted on 2026-10-25; it amends ADR 0012 §1 and one sentence of ADR 0005 §5. ADR 0026 was accepted on 2026-10-25; it amends ADR 0003, two consequences of ADR 0012, and ADR 0019. The [ADR index](adr/README.md) has longer summaries and the template.
 
 | ADR | Decision | Status | Summary |
 |---|---|---|---|
 | [0001](adr/0001-record-architecture-decisions.md) | Record architecture decisions | Accepted | Decisions are numbered ADRs; the 2026-10-24 answers are the source; only a new, maintainer-accepted ADR changes an Accepted one. |
 | [0002](adr/0002-postgresql-as-the-database.md) | PostgreSQL as the database | Accepted | A new PostgreSQL Deployment and PVC with a clean schema, filled by an import task. |
-| [0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) | Cut-over: one rehearsed flip, then a read-only parallel run | Accepted | Nightly rehearsals, production MySQL left unaltered and dumped with `--lock-all-tables`, every credential rotated once at the start of the window, one evening write freeze, no GraphQL shim, backend1 and MySQL kept read-only until the maintainer decommissions them. |
+| [0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) | Cut-over: one rehearsed flip, then a read-only parallel run | Amended | Nightly rehearsals, production MySQL left unaltered and dumped with `--lock-all-tables`, every credential rotated once at the start of the window, one evening write freeze, no GraphQL shim, backend1 and MySQL kept read-only until the maintainer decommissions them. |
 | [0004](adr/0004-admin-ui-lives-in-admin-and-ships-in-the-backend3-image.md) | Admin UI lives in admin/ and ships in the backend3 image | Accepted | `admin/` in this repository, one image, served same-origin at `/admin` by `ServeDir`. |
 | [0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) | Rust DTOs are the API contract (ts-rs + utoipa OpenAPI) | Amended | Rust DTOs generate the admin's TypeScript types and an OpenAPI 3.1 document at `/api/v1/openapi.json`. |
 | [0006](adr/0006-admin-authentication-and-account-lifecycle.md) | Admin authentication and account lifecycle | Accepted | Cookie JWT with `token_version`, bcrypt-to-Argon2id rehash, admin-issued resets, 12 characters, optional TOTP, active flag. |
@@ -509,13 +509,14 @@ ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the ma
 | [0016](adr/0016-no-redis-in-memory-cache-postgres-queue-cronjob-tasks.md) | No Redis: in-memory cache, Postgres queue, CronJob tasks | Accepted | No Redis: PostgreSQL backs data, jobs and shared state; scheduled work runs as CronJobs. |
 | [0017](adr/0017-legacy-data-import-normalisation-and-defect-resolution.md) | Legacy data import: normalisation and defect resolution | Accepted | Idempotent HTML normalisation and an editor-signed list of data fixes, then constraints. |
 | [0018](adr/0018-content-model-publishing-pages-menu-tree-canteen-week-editor.md) | Content model: publishing, pages, menu tree, canteen week editor | Accepted | Publishing fixes, one page type, a clean-room menu tree, a canteen week editor. |
-| [0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md) | Scope: parity tracking, retired features, release-1 additions | Accepted | Parity issues per ID, three retired features, four additions, frontend2 out of scope; the dashboard shows usage statistics and self-hosted API read counts. |
+| [0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md) | Scope: parity tracking, retired features, release-1 additions | Amended | Parity issues per ID, three retired features, four additions, frontend2 out of scope; the dashboard shows usage statistics and self-hosted API read counts. |
 | [0020](adr/0020-search-and-hungarian-ordering.md) | Search and Hungarian ordering | Accepted | Derived plain-text column with `unaccent`, ICU `hu` ordering. |
 | [0021](adr/0021-hungarian-only-admin-ui.md) | Hungarian-only admin UI | Accepted | One complete Hungarian message file; English only as a fallback. |
 | [0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md) | Builds and CI: PAC for production images, GitHub Actions for PR checks | Accepted | Hub builds the images; GitHub Actions checks the PRs. |
 | [0023](adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) | Operations: hardening, rate limits, monitoring, backups, secrets | Accepted | Hardened internet-facing admin, router limits from day one, hub-only monitoring, backups extended to the new parts, backend3's keys in the shared `backend-secrets`. |
 | [0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) | AI maintainability: instruction files, the Loco skill, guardrails | Accepted | Tracked instruction files, exact-pinned vendored skill with a CI check, committed guardrails. |
 | [0025](adr/0025-delivery-exceptions-for-the-backend3-slice-plan.md) | Delivery exceptions for the backend3 slice plan | Accepted | Amends ADR 0012 §1 and ADR 0005 §5: six named slice classes of about 500 lines each, the users screens after labels, the spike endpoints re-added by the two posts slices. |
+| [0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md) | backend2 unchanged and running until decommissioning | Accepted | Amends ADR 0003, ADR 0012 and ADR 0019: no change in website_backend2 (PLT-29 retired); backend2 and its Redis keep running on the frozen data through the parallel run and retire with backend1 and MySQL at decommissioning. |
 
 ## Specs
 
@@ -553,6 +554,6 @@ These facts were not known when the design was written (research: SYNTHESIS §8,
 | Edge node | The single-node MicroShift cluster that runs production. |
 | Hub | The LAN-only cluster that builds, promotes, monitors and hosts staging. |
 | The flip | The one evening window in which data, public API and admin move to backend3. |
-| Parallel run | The period after the flip in which backend1 and MySQL stay up read-only as a reference view. |
+| Parallel run | The period after the flip in which backend1 and MySQL stay up read-only as a reference view, and backend2 and its Redis keep running on the frozen data, until the maintainer decommissions all four. |
 | Parity ID | A stable identifier for one backend1 feature, tracked as one GitHub issue. |
 | Slice | One PR that delivers one entity or feature end to end: migration, model, API, admin screen, tests. [ADR 0025](adr/0025-delivery-exceptions-for-the-backend3-slice-plan.md) names the slice classes that carry part of a feature, within one entity, about 500 lines each. |
