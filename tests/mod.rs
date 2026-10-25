@@ -10,10 +10,15 @@
 //! must observe the process environment run the built `backend3-cli` binary
 //! as a child process with an explicit environment instead of changing their
 //! own.
+//!
+//! `media_contract` boots no app: it checks a `/storage` server over HTTP
+//! (ADR 0015 §1). Its nginx test starts a container, so it is ignored here and
+//! run by its own step of the Test job.
 
 mod boot;
 mod cli;
 mod domain;
+mod media_contract;
 mod migration;
 mod models;
 mod requests;

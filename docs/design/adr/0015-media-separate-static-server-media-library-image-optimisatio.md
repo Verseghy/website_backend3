@@ -86,7 +86,7 @@ The RHEL 9 nginx 1.24 Application Stream was released in May 2024 and retires in
 | Item | Value |
 |---|---|
 | Workload | Deployment `media` in namespace `verseghy`, in its own Argo CD Application (`verseghy.net/component: media`). |
-| Image | `registry.access.redhat.com/ubi9/nginx-124`, pinned by digest. The image is public, so no pull secret is needed. |
+| Image | `registry.access.redhat.com/ubi9/nginx-126` (the maintainer's answer of 2026-10-25, research: DECISIONS R9), pinned by digest in `deploy/media/image.txt`. The image is public, so no pull secret is needed. |
 | Identity | Default ServiceAccount under `restricted-v2`: no `anyuid`, no `runAsUser`, `allowPrivilegeEscalation: false`, all capabilities dropped, `automountServiceAccountToken: false`. |
 | Port | 8080. Service `media`, port name `http`. |
 | Volume | `backend-pv-claim`, `subPath: app/public`, mounted **read-only** at `/srv/media/storage`. The media server reads only the public media. It never sees `app/backups/`, `framework/` or `logs/`. |
@@ -156,7 +156,7 @@ flowchart LR
   V["Visitors, pdf.js,<br/>service worker"]
   ED["Editors (admin UI)"]
   RT["HAProxy router"]
-  MED["media: ubi9/nginx-124<br/>read-only mount, app/public"]
+  MED["media: ubi9/nginx-126<br/>read-only mount, app/public"]
   BE3["backend3<br/>read-write mount"]
   BE1["backend1 reference view<br/>(read-only after the freeze)"]
   PVC[("backend-pv-claim<br/>30Gi RWO")]
@@ -193,7 +193,7 @@ CronJob pods never mount it. A CronJob that needs file work only enqueues a job,
 | Step | Pass criterion |
 |---|---|
 | 1. Create a small throwaway PVC on the default storage class. Seed it from the backup with a few real media folders, including names with accents and upper-case extensions. | The PVC is bound. |
-| 2. Start the media server under `restricted-v2`: nginx-124, the real ConfigMap, a read-only mount. | It is admitted with no SCC change and serves the seeded files under the contract. |
+| 2. Start the media server under `restricted-v2`: nginx-126, the real ConfigMap, a read-only mount. | It is admitted with no SCC change and serves the seeded files under the contract. |
 | 3. On the same claim, start a backend3 stand-in with backend3's pod security settings and a read-write mount. Also start a pod with the backend1 reference view's security settings. | All pods are `Running` at the same time. No `Multi-Attach` or mount errors. |
 | 4. The writer creates, renames and deletes files. | nginx serves each new file on the next request and answers 404 for removed ones. Neither side sees a permission error. |
 | 5. Restart each pod in turn while the others hold the mount. Do a rolling update of the backend3 stand-in and of the media server. | Every pod comes back within its normal start time, and the others keep serving. |

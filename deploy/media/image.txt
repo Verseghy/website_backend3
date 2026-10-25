@@ -1,0 +1,1 @@
+registry.access.redhat.com/ubi9/nginx-126:1-1792771263@sha256:c49b0d5562bbefd9dddda53e332c8eb74e82c43b8ef76901147e020296701a4e

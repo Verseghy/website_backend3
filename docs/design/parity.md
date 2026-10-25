@@ -256,7 +256,7 @@ Source: research: SYNTHESIS §3.7, §3.8.
 | EDIT-01 | CKEditor 4 on post and page content, with alt text required | replaced | [0013] | Extended TipTap. Paste from Word and Excel as POS-C09 defines. The editor surface matches website_frontend2's PageRenderer styling (decision 15a), and content is stored in the content-v1 HTML shape. Alt text required. The ammonia allow-list runs on every write. No raw HTML view. |
 | EDIT-02 | Media embed button through a third-party oEmbed service | replaced | [0013], [0017] | A YouTube node (which also parses bare iframes) and a padlet node. Legacy embed wrappers are converted at import. |
 | MEDIA-01 | Upload fields per entity: generated file names; replace, clear, delete with the row | port-with-fix | [0015], [0011] | Same directories, same stored-value shape and same URLs. Files are removed only on permanent delete, and only when nothing refers to them. Images are optimised on upload. |
-| MEDIA-02 | Public `/storage/**` on both hosts, with `Access-Control-Allow-Origin: *` | port-with-fix | [0015] | A separate unprivileged `ubi9/nginx-124` serves `/storage` on both hosts with `Access-Control-Allow-Origin: *`, real 404s, no directory listing and range requests. backend3 co-mounts the volume for uploads. If the co-mount test fails, backend3 serves `/storage` itself with a dedicated ServeDir router, at 1 replica with `Recreate`. |
+| MEDIA-02 | Public `/storage/**` on both hosts, with `Access-Control-Allow-Origin: *` | port-with-fix | [0015] | A separate unprivileged `ubi9/nginx-126` serves `/storage` on both hosts with `Access-Control-Allow-Origin: *`, real 404s, no directory listing and range requests. backend3 co-mounts the volume for uploads. If the co-mount test fails, backend3 serves `/storage` itself with a dedicated ServeDir router, at 1 replica with `Recreate`. |
 | MEDIA-03 | Draft preview link with a token on the post form | port-with-fix | [0018] | See POS-H06 and POS-H07 |
 
 ## 16. Operations screens and commands (LOG, BKP, SITE, CLI)
@@ -354,7 +354,7 @@ Repository, delivery, deployment and cut-over work. Items in website_k8s and web
 | PLT-18 | backend3 Deployment, Service, Route on `backend3.microshift.verseghy-gimnazium.net`, and an Application with the first image tag set by hand | new | [0014], [0022] | |
 | PLT-19 | Image Updater entry for backend3, and a check that an automatic bump actually happens | new | [0022] | |
 | PLT-20 | backend3's keys in the shared `backend-secrets` ExternalSecret | new | [0023] | |
-| PLT-21 | `/storage` media server (`ubi9/nginx-124`) and the co-mount test on a throwaway PVC | new | [0015] | |
+| PLT-21 | `/storage` media server (`ubi9/nginx-126`) and the co-mount test on a throwaway PVC | new | [0015] | |
 | PLT-22 | CronJobs for scheduled tasks | new | [0016] | |
 | PLT-23 | HAProxy router connection and request limits | new | [0023] | On every backend3 Route from its first deploy (day one); annotations checked against the MicroShift docs for the live version |
 | PLT-24 | `/metrics` exposed; monitoring planned on the hub only | new | [0023] | No scraping or monitoring stack on the edge node; monitoring planned on the hub with the OpenShift Monitoring stack |

@@ -188,6 +188,12 @@ futures-util = "0.3"
 # snapshot change is an API change". CI sets CI=true and INSTA_UPDATE=no, so
 # a mismatch fails and no .snap.new is written. No extra features.
 insta = "1"
+# The HTTP client of the media contract suite (tests/media_contract/, ADR 0015
+# §1): hyper's connection-pooling client over plain HTTP/1.1, which sends the
+# request target exactly as given, so the suite can probe dot-segments and
+# encoded names that a URL type would normalise first. axum-test already
+# builds these features, so the graph gains no crate.
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 
 [package]
 name = "backend3"
@@ -263,9 +269,11 @@ loco-rs = { workspace = true, features = ["testing"] }
 # `sync` and `time` for tests/models/task_lock.rs: a `Notify` and a time limit.
 # `net`, `sync`, `io-util` and `time` for the test that drives both
 # listeners of `serve_until` over real TCP connections, with a time limit
-# (tests/requests/metrics.rs).
+# (tests/requests/metrics.rs). `time` also for the media contract suite's
+# request timeouts and readiness polling (tests/media_contract/).
 tokio = { workspace = true, features = ["net", "sync", "io-util", "time"] }
 proptest = { workspace = true }
 axum-test = { workspace = true }
 futures-util = { workspace = true }
 insta = { workspace = true }
+hyper-util = { workspace = true }

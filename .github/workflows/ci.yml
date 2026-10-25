@@ -137,6 +137,15 @@ jobs:
             exit 1
           fi
           cargo nextest run --locked --workspace --all-targets
+      - name: Media contract (deploy/media/nginx.conf)
+        # ADR 0015 §1, "What must be true": the suite of tests/media_contract/
+        # against the real configuration in the image pinned by
+        # deploy/media/image.txt, started with docker as restricted-v2 runs
+        # it (any UID, read-only root filesystem). The two nextest steps above
+        # skip this test (#[ignore]) because it needs a container engine and
+        # pulls the image; a step of this job, not a job of its own, so no new
+        # required context.
+        run: cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'test(/^media_contract::nginx::/)'
       - name: Doc tests
         # nextest does not run doctests.
         run: cargo test --locked --workspace --doc

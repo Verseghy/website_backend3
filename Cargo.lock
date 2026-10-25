@@ -578,6 +578,7 @@ dependencies = [
  "chrono-tz 0.10.4",
  "futures-util",
  "html5ever 0.40.1",
+ "hyper-util",
  "insta",
  "loco-rs",
  "migration",
