@@ -160,9 +160,9 @@ impl Model {
     /// the unique index `users_lower_email_key`, so the lookup uses that
     /// index and always agrees with it on what counts as the same address.
     /// `lower()` follows the database's default collation: under the
-    /// `en_US.utf8` locale that the official PostgreSQL image initialises
-    /// (compose and CI run it) it folds accented letters too, under the C
-    /// locale only ASCII.
+    /// builtin `C.UTF-8` locale that production, compose and CI initialise
+    /// PostgreSQL with, it folds accented letters too (Unicode simple case
+    /// mapping), under the C locale only ASCII.
     ///
     /// # Errors
     ///

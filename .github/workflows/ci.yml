@@ -126,10 +126,32 @@ jobs:
           # fall back to another installer.
           fallback: none
       - name: Start PostgreSQL (compose.yaml)
-        # The throwaway database of compose.yaml: the same PostgreSQL major as
-        # production (ADR 0002), a superuser role that can create the
-        # per-test databases, published on localhost:5432.
+        # The throwaway database of compose.yaml: the same PostgreSQL major
+        # (ADR 0002) and locale as production, a superuser role that can
+        # create the per-test databases, published on localhost:5432.
         run: docker compose up --detach --wait --wait-timeout 120 postgres
+      - name: PostgreSQL locale matches production
+        # CI, compose and production initialise PostgreSQL with the same
+        # locale, the builtin provider's C.UTF-8 (research: DECISIONS R13;
+        # website_k8s@f0286dc:verseghy-website/postgres/deployment.yaml).
+        # Every new database, Loco's per-test ones included, copies
+        # template1's locale, so template1 shows what the tests run on. The
+        # fields are the provider ('b' is builtin), the builtin locale, the
+        # libc collate and the libc ctype. A step of this job, so no context
+        # changes (ADR 0022 section 3).
+        run: |
+          expected='b C.UTF-8 C.UTF-8 C.UTF-8'
+          query="SELECT format('%s %s %s %s', datlocprovider, coalesce(datlocale, ''), datcollate, datctype) FROM pg_database WHERE datname = 'template1'"
+          if ! actual=$(docker compose exec -T postgres psql --no-psqlrc --username loco --dbname postgres \
+              --set ON_ERROR_STOP=1 --tuples-only --no-align --command "$query"); then
+            echo "::error::Could not read template1's locale from the compose PostgreSQL; the psql error is above."
+            exit 1
+          fi
+          if [[ $actual != "$expected" ]]; then
+            echo "::error::The compose PostgreSQL's template1 has the locale '$actual' (provider, locale, collate, ctype), but production's is '$expected'. Set POSTGRES_INITDB_ARGS in compose.yaml to production's locale arguments, --locale-provider=builtin --locale=C.UTF-8 (website_k8s verseghy-website/postgres/deployment.yaml)."
+            exit 1
+          fi
+          echo "template1 locale: $actual (matches production)"
       - name: Script tests (scripts/tests)
         run: bash scripts/tests/run-all.sh
       - name: cargo nextest

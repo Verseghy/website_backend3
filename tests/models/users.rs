@@ -222,8 +222,9 @@ async fn find_live_by_email_ignores_case_and_finds_inactive_accounts() {
             ("Kis.Anna@Example.TEST", user.id),
             ("kis.anna@example.test", user.id),
             ("KIS.ANNA@EXAMPLE.TEST", user.id),
-            // Accented letters fold under the en_US.utf8 default collation
-            // of the compose database (the doc of find_live_by_email).
+            // Accented letters fold under the builtin C.UTF-8 default
+            // collation of the compose database, which production has too
+            // (the doc of find_live_by_email).
             ("éva.őri@EXAMPLE.test", accented.id),
         ] {
             let found = Model::find_live_by_email(&ctx.db, typed).await;
