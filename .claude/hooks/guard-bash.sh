@@ -13,7 +13,11 @@
 #     - force deletion: a true --force on oc delete or oc replace, whatever
 #       the grace period, and a true --force with --grace-period=0 anywhere;
 #     - oc delete naming a PVC, PV or Argo CD Application in any spelling
-#       (ApplicationSets too, because deleting one deletes its Applications);
+#       (ApplicationSets too, because deleting one deletes its Applications),
+#       also when the command line runs an `oc get` of one of them and the
+#       oc delete takes its resources from another command's output:
+#       `oc delete $(oc get pvc -o name)`, `oc get pvc -o name | xargs oc
+#       delete`, `oc get pvc -o yaml | oc delete -f -`;
 #     - Loco's data-wiping subcommands `db reset`, `db down`, `db truncate`
 #       and `db seed --reset` / `-r` of any binary: cargo loco, the app binary
 #       backend3-cli, or inside oc exec / oc rsh / oc debug;
@@ -24,13 +28,22 @@
 #     127.0.0.1, ::1 or a Unix socket) or cannot be checked, and for cargo
 #     commands it checks the importer source IMPORT_SOURCE_DATABASE_URL the
 #     same way. Any listed command run through oc exec, oc rsh or oc debug
-#     (also as a heredoc, here-string or piped script) runs in the cluster and
-#     is always blocked.
+#     (also as a heredoc, a here-string or an echo or printf script piped into
+#     them, through any further pipeline stages) runs in the cluster and is
+#     always blocked. Only the command part counts there: the words after `--`
+#     for exec and debug; for rsh the words after the pod, the program its
+#     --shell names, and with -f every word. So a pod, container or namespace
+#     named like a client (`oc exec deploy/mysql -- df -h`) is not blocked by
+#     its name, nor is a data path such as /var/lib/mysql.
 #
 #   Layer 3, the load_config guard and the CLI pre-check in the Rust code, is
 #   the one that cannot be bypassed from a shell. This hook is a second line of
 #   defence against agent mistakes, not a security boundary: commands that come
-#   from files or scripts are not visible to it.
+#   from files or scripts are not visible to it (`oc exec -i pod -- sh <
+#   script.sh`, `oc delete -f list.txt`), and neither is text that only a
+#   shell run computes, because the hook reads the command and does not run
+#   it: a variable's value (`P=psql; oc exec pod -- $P`), printf formats and
+#   echo -e escapes, or decoded output (`base64 -d`).
 #
 # Contract with Claude Code (verified against the "Hooks reference" of the
 # Claude Code docs, 2026-10-24)
@@ -50,16 +63,19 @@
 #     process, and jq returns "allow" at once for any command that contains
 #     neither a trigger word (kubectl, oc, db, cargo, psql, ...) nor one of the
 #     variables check 2 reads. Typical commands take a few tens of
-#     milliseconds; long ones are cut into chunks first (see `chunks`), and
-#     each segment sees only the assignments in scope for it, so the work
-#     grows linearly with the length of the command.
+#     milliseconds; long ones, and long text that is split again as commands,
+#     are cut into chunks first (see `chunks`), the lexer keeps what it needs
+#     about a segment's earlier words in flags, and each segment sees only the
+#     assignments in scope for it, so the work grows linearly with the length
+#     of the command.
 #   - The policy is a jq program embedded below, so the hook depends only on
 #     bash and jq. jq's regular expressions do the tokenising in C.
 #   - Shell parsing is approximated, deliberately erring towards blocking. A
 #     word is parsed again as a command only where a shell would run it (the
 #     command string of -c, also after `--` or other options; the arguments of
 #     eval, ssh and watch; a here-string read by a shell; echo or printf
-#     output piped into a shell; and $(...) inside double quotes), and a
+#     output piped into a shell or into oc exec, oc rsh or oc debug; and
+#     $(...) inside double quotes), and a
 #     heredoc body counts as a script only when a shell reads it (the
 #     receiver is matched with quotes and backslashes removed, and a variable
 #     as the receiver counts as a shell), so commit messages and files that
@@ -78,7 +94,16 @@
 #       - a true --force on oc delete or oc replace is blocked even without
 #         --grace-period=0, because kubectl then sets the grace period to 0;
 #       - an ApplicationSet counts like an Application, because deleting one
-#         deletes its Applications.
+#         deletes its Applications;
+#       - an oc delete whose resources come from another command's output
+#         ($(...), a variable, xargs, `-f -` or a process substitution) counts
+#         as naming a protected kind when the same command line runs an
+#         `oc get` of one, because the hook cannot read that output;
+#       - text that oc exec, oc rsh or oc debug reads on stdin (a heredoc, a
+#         here-string or piped echo or printf output) counts as a script that
+#         runs in the cluster, even when the command in the pod is not a
+#         shell. Under xargs the text becomes the oc command's arguments
+#         instead, as xargs passes it.
 #   - It reads DATABASE_URL, PGHOST, PGHOSTADDR, PGSERVICE, MYSQL_HOST and
 #     IMPORT_SOURCE_DATABASE_URL from its own environment (the one Claude Code
 #     passes to hooks) for the "environment" target source of check 2. That is
@@ -124,6 +149,181 @@ def text_only_hint:
   " If the words only appear as text (a commit message, a PR body, a search), "
   + "write the text to a file and pass the file (git commit -F <file>, gh pr create --body-file <file>), "
   + "or use the Grep tool for searches.";
+
+# ------------------------------------------------------------------ helpers
+
+def basename: sub("^.*/"; "");
+
+def is_assignment: test("^[A-Za-z_][A-Za-z0-9_]*=");
+
+# The positional words of an argument list: options are skipped, and so is the
+# word after an option that takes a separate value.
+#   $valopts - the options that take a separate value, for example ["-n"].
+def positionals($valopts):
+  reduce .[] as $w ({skip: false, out: []};
+    if .skip then .skip = false
+    elif ($w | startswith("-")) and $w != "-" then .skip = ($w | IN($valopts[]))
+    else .out += [$w] end)
+  | .out;
+
+# The indices of the positional words of an argument list (as positionals
+# reads them), as a stream. It is lazy, so first(...) or limit(n; ...) stops
+# reading at the word it needs: the checks look for a verb or a subcommand at
+# every occurrence of a trigger word, and reading the whole rest of a long
+# segment each time would make their cost quadratic.
+#   $valopts - the options that take a separate value, for example ["-n"].
+def positional_indices($valopts):
+  foreach .[] as $w ({i: -1, skip: false, hit: false};
+    .i += 1
+    | if .skip then .skip = false | .hit = false
+      elif ($w | startswith("-")) and $w != "-" then .skip = ($w | IN($valopts[])) | .hit = false
+      else .hit = true end;
+    select(.hit) | .i);
+
+# The index of the first positional word of an argument list, or null when
+# there is none.
+#   $valopts - the options that take a separate value, for example ["-n"].
+def first_positional_index($valopts): first(positional_indices($valopts)) // null;
+
+# The first positional word of an argument list, or null when there is none.
+#   $valopts - the options that take a separate value, for example ["-n"].
+def first_positional($valopts):
+  . as $a | ($a | first_positional_index($valopts)) as $k | if $k == null then null else $a[$k] end;
+
+# oc options that take a separate value, so their value is not read as a
+# resource, a verb or a pod (for example the namespace in `-n apps`): the
+# global options of `oc options` (oc 4.22) and the value options of delete,
+# replace, exec, rsh and debug. A boolean option must never be listed: the
+# word after it would be skipped, and a pod taken for its value would let the
+# next word, the command, pass for the pod in check_in_cluster.
+def oc_value_options:
+  ["-n", "--namespace", "-l", "--selector", "-f", "--filename", "-o", "--output",
+   "--field-selector", "--context", "--cluster", "--kubeconfig", "--kuberc", "--server", "-s",
+   "--token", "--user", "--as", "--as-group", "--as-uid", "--as-user-extra", "-k", "--kustomize",
+   "--timeout", "--grace-period", "--request-timeout", "--template", "--raw",
+   "--certificate-authority", "--client-certificate", "--client-key", "--cache-dir",
+   "--tls-server-name", "--loglevel", "-v", "--v", "--log-flush-frequency",
+   "--profile", "--profile-output", "-c", "--container", "--shell",
+   "--pod-running-timeout", "--image", "--image-stream", "--node-name", "--to-namespace",
+   "--as-user"];
+
+# The first `oc exec`, `oc rsh` or `oc debug` in a list of words, as
+# {verb, i} with the index i of its `oc`, or null. Global options may stand
+# between oc and the verb.
+def in_cluster_oc:
+  . as $s
+  | first(range(0; $s | length) as $i
+      | select(($s[$i] | basename) == "oc")
+      | ($s[$i + 1:] | first_positional(oc_value_options)) as $verb
+      | select($verb | IN("exec", "rsh", "debug"))
+      | {verb: $verb, i: $i}) // null;
+
+# The words of a text, cut at blanks with plain string splits. Their cost
+# grows linearly with the text; a regex split (splits) rescans the string for
+# every match (see `chunks`), which is too slow for a long script.
+def blank_words: split("\n")[] | split("\r")[] | split("\t")[] | split(" ")[] | select(length > 0);
+
+# Whether a word is an oc option that names its target in a file instead of
+# a positional word: -f, --filename, -k, --kustomize, also joined to its value.
+def is_filename_option:
+  IN("-f", "--filename", "-k", "--kustomize") or test("^-[fk].|^--(?:filename|kustomize)=");
+
+# The values of the --shell options in a list of words (`--shell X` or
+# `--shell=X`): the program oc rsh starts when no command follows the target.
+def shell_option_values:
+  . as $a
+  | range(0; $a | length) as $i
+  | if $a[$i] == "--shell" then ($a[$i + 1] // empty)
+    elif ($a[$i] | startswith("--shell=")) then $a[$i][8:]
+    else empty end;
+
+# The command part of `oc exec`, `oc rsh` or `oc debug`: the words it runs
+# inside the cluster. The input is the words after the verb. Only these words
+# can start a program there, so a pod, container or namespace named like a
+# database client (`oc exec -n verseghy deploy/mysql -- df -h`) is not one.
+# The rules follow the oc 4.22 sources (pkg/cli/rsh, pkg/cli/debug and the
+# vendored k8s.io/kubectl pkg/cmd/exec):
+#   - exec and debug read their own options up to `--`, and the command is
+#     every word after it. Words between the target and `--` never run: exec
+#     drops them, and debug reads them as more resources or as KEY=VALUE
+#     environment changes. Without `--`, which oc 4.22 refuses for exec
+#     ("exec [POD] [COMMAND] is not supported anymore") but older clients ran,
+#     every word after the target counts.
+#   - rsh stops reading its own options at the target (SetInterspersed(false)),
+#     so the command is every word after the target, options included; with
+#     `--` before the target, the target is the first word after `--`. Its
+#     --shell names the program it starts when no command follows, so that
+#     value counts too. With -f the target comes from the file, and every
+#     positional word is the command (rsh.go: `o.Command = args[0:]`).
+#   $verb - exec, rsh or debug.
+def in_cluster_command($verb):
+  . as $a
+  | ($a | index("--")) as $dash
+  | ($a[:($dash // ($a | length))] | first_positional_index(oc_value_options)) as $t
+  | if $verb == "rsh" then
+      $a[:($t // $dash // ($a | length))] as $opts
+      | [$opts | shell_option_values]
+        + (if any($opts[]; is_filename_option) then
+             (if $t != null then $a[$t:] elif $dash != null then $a[$dash + 1:] else [] end)
+           elif $t != null then $a[$t + 1:]
+           elif $dash != null then $a[$dash + 2:]
+           else [] end)
+    elif $dash != null then $a[$dash + 1:]
+    elif $t != null then $a[$t + 1:]
+    else [] end;
+
+# The synthetic segment for text that oc exec, oc rsh or oc debug reads on
+# stdin, which runs in the cluster: `oc <verb> stdin -- sh -c '<text>'`. The
+# word "stdin" stands in for the target, so that the command part (see
+# in_cluster_command) holds `sh -c '<text>'` for every verb, rsh included.
+#   $verb - exec, rsh or debug.
+def in_cluster_script($verb): ["oc", $verb, "stdin", "--", "sh", "-c", .];
+
+# How xargs or GNU parallel among the words before a command passes its input
+# on to that command: null when neither runs it, or when xargs reads its
+# arguments from a file (-a, --arg-file), because the command then gets the
+# piped input on stdin (GNU xargs leaves stdin alone with -a, and otherwise
+# gives the command /dev/null); {replace: R} when the command's words hold
+# the replace string R (xargs -I R, -i or --replace, and parallel's default
+# {}), so that each input line takes R's place; or {replace: null} when the
+# input words are appended to the command.
+#   $before  - the words before the command;
+#   $command - the command and its arguments.
+def runner_feed($before; $command):
+  (first(range(($before | length) - 1; -1; -1) as $j
+     | select($before[$j] | basename | IN("xargs", "parallel")) | $j) // null) as $x
+  | if $x == null then null
+    elif ($before[$x] | basename) == "xargs"
+         and any($before[$x + 1:][]; IN("-a", "--arg-file") or test("^-a.|^--arg-file=")) then null
+    else
+      $before[$x + 1:] as $o
+      | (first(range(0; $o | length) as $k | $o[$k] as $w
+          | if $w == "-I" then ($o[$k + 1] // empty)
+            elif ($w | startswith("--replace=")) then $w[10:]
+            elif $w == "-i" or $w == "--replace" then "{}"
+            elif ($w | test("^-[Ii].")) then $w[2:]
+            else empty end)
+         // (if ($before[$x] | basename) == "parallel" then "{}" else null end)) as $r
+      | {replace: (if $r != null and $r != "" and any($command[]; contains($r)) then $r else null end)}
+    end;
+
+# Words after which kubectl is being run rather than mentioned.
+def runner_words:
+  ["sudo", "doas", "env", "exec", "command", "builtin", "nohup", "nice", "time",
+   "timeout", "xargs", "watch", "stdbuf", "setsid", "strace", "ionice", "flock",
+   "chroot", "ssh", "eval", "noglob", "rsh", "debug", "-exec", "-execdir", "-ok",
+   "-okdir", "then", "do", "else", "elif", "if", "while", "until", "!", "{"];
+
+# The first positional word after `cargo`: the cargo subcommand, or null.
+# `+toolchain` and global options are skipped. It stops at the subcommand (see
+# positional_indices for why).
+def cargo_subcommand:
+  first(foreach .[] as $w ({skip: false, sub: null};
+      if .skip then .skip = false
+      elif ($w | startswith("+")) then .
+      elif ($w | startswith("-")) then .skip = ($w | IN("--color", "--config", "-Z", "-C"))
+      else .sub = $w end;
+      select(.sub != null) | .sub)) // null;
 
 # ------------------------------------------------------------------ lexing
 #
@@ -183,9 +383,11 @@ def sq_quote: "'" + gsub("'"; "'\\''") + "'";
 # written with `cat <<'EOF'` cannot trip check 1. A body is kept when a shell
 # reads it, and only its $(...) and `...` are kept when the delimiter is
 # unquoted (the shell expands those even in data). A body that oc exec,
-# oc rsh or oc debug feeds to a shell is kept as the -c script of a synthetic
-# `oc <verb> -- sh -c '<body>'` line, so that check 2 sees the database
-# commands in it next to the oc that runs them in the cluster.
+# oc rsh or oc debug reads is kept as the -c script of a synthetic
+# `oc <verb> stdin -- sh -c '<body>'` line (see in_cluster_script), so that
+# check 2 sees the database commands in it next to the oc that runs them in
+# the cluster. lex does the same for here-strings and piped echo or printf
+# text.
 def strip_heredocs:
   gsub("(?<pre>^[^\\n<]*)<<-?[ \\t]*(?<q>['\"]?)(?<d>[A-Za-z0-9_.-]+)\\k<q>(?<rest>[^\\n]*)\\n(?:(?<body>[\\s\\S]*?)\\n)?[ \\t]*\\k<d>[ \\t]*(?=\\n|$)";
     (.pre + " " + .rest) as $line
@@ -193,7 +395,7 @@ def strip_heredocs:
     | (.body // "") as $body
     | $line + "\n"
       + if ($plain | test(in_cluster_receiver_re)) then
-          "oc \($plain | capture(in_cluster_receiver_re).verb) -- sh -c \($body | sq_quote)"
+          "oc \($plain | capture(in_cluster_receiver_re).verb) stdin -- sh -c \($body | sq_quote)"
         elif ($plain | test(shell_receiver_re)) or ($plain | test(var_receiver_re)) then $body
         elif .q == "" then ([$body | scan("\\$\\([\\s\\S]*?\\)|`[^`]*`")] | join("\n"))
         else "" end);
@@ -211,15 +413,31 @@ def split_outside_quotes($sep):
     | if .sq == 0 and .dq == 0 then .out += [.cur | join($sep)] | .cur = [] else . end)
   | (.out + (if (.cur | length) > 0 then [.cur | join($sep)] else [] end))[];
 
+# Cuts a pipeline at every | outside quotes, as a stream of pieces, and keeps
+# the | (or |&) at the end of every piece but the last. lex sees from that
+# trailing separator that the next piece reads this one's output, and passes
+# the piped echo or printf text on to it.
+def split_pipeline:
+  [split_outside_quotes("|")] as $p
+  | range(0; $p | length) as $k
+  # `a |& b` was cut into "a " and "& b": the & belongs to the separator.
+  | ($p[$k] | if $k > 0 and startswith("&") then .[1:] else . end)
+    + (if $k == ($p | length) - 1 then ""
+       elif ($p[$k + 1] | startswith("&")) then "|&"
+       else "|" end);
+
 # jq's scan, match and gsub recompute every match's offset from the start of
-# the string, so their cost grows with (matches x length). A long command is
+# the string, so their cost grows with (matches x length). A long text is
 # therefore cut into chunks before it is lexed: at newlines first, and a piece
 # that is still long at ; then && then || then |. Every one of those is a
-# segment separator, so cutting there outside quotes changes no segment.
-# Commands up to 16 KiB are not cut.
+# segment separator, so cutting there outside quotes changes no segment; at
+# | the separator stays on the piece (see split_pipeline), so that the text an
+# echo or printf pipes into a later stage still reaches it. Text up to 16 KiB
+# is not cut.
 def chunks:
   def refine($seps):
     if length <= 16384 or ($seps | length) == 0 then .
+    elif $seps[0] == "|" then split_pipeline
     else split_outside_quotes($seps[0]) | refine($seps[1:]) end;
   refine(["\n", ";", "&&", "||", "|"]);
 
@@ -233,6 +451,22 @@ def is_shell_word: (sub("^.*/"; "") | IN(shell_words[])) or test("^\\$\\{?(?:SHE
 # (`bash -c -o pipefail '...'`).
 def shell_value_options: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"];
 
+# A command can only be blocked if it contains one of these words, so every
+# other command is allowed without being parsed.
+def trigger_re: "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|sea-orm-cli|cargo";
+
+# The variables check 2 reads.
+def watched_var_re: "DATABASE_URL|PGHOST|PGSERVICE|MYSQL_HOST";
+
+# Whether a piece of shell text can matter to any check: it holds a trigger
+# word, or an assignment that check 2 reads. Quotes and backslashes are
+# dropped first, so k'ube'ctl still counts. split/join is linear, unlike a
+# gsub with one match per quote. lex skips the chunks for which this is false,
+# because no check can block a segment without such a word.
+def may_matter:
+  split("\"") | join("") | split("'") | join("") | split("\\") | join("")
+  | test(trigger_re + "|" + watched_var_re);
+
 # Splits shell text into an array of segments; each segment is an array of
 # words. Nested command strings are appended as further segments, after the
 # segments of the text they came from. A word is split again as a command
@@ -243,114 +477,125 @@ def shell_value_options: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"];
 #   - every argument after eval, ssh or watch;
 #   - the word after `<<<` when the segment runs a shell (`bash <<< '...'`);
 #   - the arguments of an echo or printf whose output is piped into a shell
-#     (`echo '...' | sh`), with printf's \n and \t turned into whitespace;
+#     (`echo '...' | sh`), with printf's \n and \t turned into whitespace,
+#     also through further stages (`echo '...' | tr a b | sh`), and across a
+#     line break after the | (bash continues a pipeline on the next line);
+#   - what oc exec, oc rsh or oc debug reads on stdin, the piped echo or
+#     printf text and its here-strings, which runs inside the cluster: it is
+#     split as commands for check 1, and it also becomes the synthetic
+#     segment `oc <verb> stdin -- sh -c '<text>'` (see in_cluster_script),
+#     as a heredoc does (see strip_heredocs), so that check_in_cluster sees
+#     the database commands in it next to the oc that runs them there. Under
+#     xargs (or GNU parallel) the text is not the command's stdin but its
+#     arguments (see runner_feed), so the commands it runs become segments of
+#     their own instead, with each input line in place of the replace string
+#     (`xargs -I{} oc exec {} -- df -h`), or with the input words appended;
 #   - and, in any other word, every $(...) or `...` inside double quotes.
+# A long text is cut into chunks first (see `chunks`), and chunks that cannot
+# matter (see may_matter) are not lexed.
 #   $depth - the nesting level; nesting stops at 6 to bound the work.
 def lex($depth):
   # Ends the current segment at separator $sep and resets the per-segment
-  # state. When the segment runs a shell and an earlier stage of its pipeline
-  # was an echo or printf, those arguments are split as commands.
+  # state. When the segment reads text on stdin, from an echo or printf
+  # earlier in its pipeline or from its here-strings, that text is handled as
+  # described above.
   def finish_segment($sep):
     ($sep == "|" or $sep == "|&") as $piped
     | if (.cur | length) > 0 then
-        (if $depth < 6 and .pipe != null and any(.cur[]; is_shell_word) then
-           .nested += [.pipe[] | gsub("\\\\n"; "\n") | gsub("\\\\t"; "\t")
-                       | select(test("\\S")) | lex($depth + 1)[]]
-         else . end)
-        | (first(.cur[] | select(test("^[A-Za-z_][A-Za-z0-9_]*=") | not)) // "" | sub("^.*/"; "")) as $command
+        # Only a segment that reads such text needs to find its oc.
+        (if .pipe != null or (.hstr | length) > 0 then .cur | in_cluster_oc else null end) as $oc
+        # printf's \n and \t, with plain string splits (a gsub is quadratic).
+        | [(.pipe // [])[] | split("\\n") | join("\n") | split("\\t") | join("\t")] as $piped_in
+        # echo joins its arguments with spaces; each here-string is a line.
+        | ([($piped_in | join(" ")), .hstr[]] | map(select(test("\\S"))) | join("\n")) as $stdin
+        | .cur as $cur
+        | (if $depth >= 6 or $stdin == "" then .
+           elif $oc != null then
+             runner_feed($cur[:$oc.i]; $cur[$oc.i:]) as $feed
+             | if $feed == null then
+                 .nested += [$stdin | in_cluster_script($oc.verb)] + ($stdin | lex($depth + 1))
+               elif $feed.replace != null then
+                 .nested += [$stdin | split("\n")[] | select(test("\\S")) | sub("^[ \\t]+"; "") as $line
+                             | $cur[:$oc.i] + [$cur[$oc.i:][] | split($feed.replace) | join($line)]]
+               else .nested += [$cur + [$stdin | blank_words]] end
+           elif .pipe != null and .sh then
+             .nested += [$piped_in[] | select(test("\\S")) | lex($depth + 1)[]]
+           else . end)
+        | (first(.cur[] | select(is_assignment | not)) // "" | basename) as $command
         | .pipe = (if $piped then (if ($command | IN("echo", "printf")) then .cur[1:] else .pipe end) else null end)
         | .segs += [.cur] | .cur = []
-      else (if $piped then . else .pipe = null end) end
-    | .copt = false | .cskip = false | .hs = false;
-  reduce (gsub("\\\\\\n"; "") | scan(token_re)) as $t
-    ({segs: [], cur: [], nested: [], pipe: null, copt: false, cskip: false, hs: false};
-     if $t[2] != null then finish_segment($t[2])
-     elif $t[1] != null then .hs = ($t[1] | test("<<<$"))
-     elif $t[3] != null then
-       [$t[3] | scan(part_re)] as $parts
-       | ($parts | map(.[0] // (.[1] | values | dq_unescape) // .[2] // .[3]) | join("")) as $text
-       | (any(.cur[]; is_shell_word)) as $in_shell
-       # .copt: a -c was seen and its command string is still to come;
-       # .cskip: the next word is the value of a shell option.
-       | (if .copt and .cskip then {cmd: false, copt: true, cskip: false}
-          elif .copt and ($text | test("^[-+]")) then
-            {cmd: false, copt: true, cskip: ($text | IN(shell_value_options[]))}
-          elif .copt then {cmd: true, copt: false, cskip: false}
-          else {cmd: false,
-                copt: (($text | test("^-[A-Za-z]*c$")) or $text == "--command"
-                       or ($in_shell and ($text | test("^-[A-Za-z]*c[A-Za-z]*$")))),
-                cskip: false} end) as $c
-       | ($c.cmd or (.hs and $in_shell) or any(.cur[]; sub("^.*/"; "") | IN(reparse_words[]))) as $reparse
-       | .copt = $c.copt | .cskip = $c.cskip | .hs = false
-       | .cur += [$text]
-       | if $depth >= 6 then .
-         elif $reparse then .nested += [$text | select(test("\\S")) | lex($depth + 1)[]]
-         else .nested += [
-           $parts[] | .[1] | values | dq_unescape
-           | scan("\\$\\(([\\s\\S]*)\\)|`([^`]*)`") | (.[0] // .[1])
-           | select(test("\\S"))
-           | lex($depth + 1)[]
-         ]
-         end
-     else . end)
-  | finish_segment("")
-  | .segs + .nested;
-
-# ------------------------------------------------------------------ helpers
-
-def basename: sub("^.*/"; "");
-
-def is_assignment: test("^[A-Za-z_][A-Za-z0-9_]*=");
-
-# The positional words of an argument list: options are skipped, and so is the
-# word after an option that takes a separate value.
-#   $valopts - the options that take a separate value, for example ["-n"].
-def positionals($valopts):
-  reduce .[] as $w ({skip: false, out: []};
-    if .skip then .skip = false
-    elif ($w | startswith("-")) and $w != "-" then .skip = ($w | IN($valopts[]))
-    else .out += [$w] end)
-  | .out;
-
-# oc options that take a separate value, so their value is not read as a
-# resource or a verb (for example the namespace in `-n apps`): the global
-# options of `oc options` (oc 4.22) and the value options of delete, replace,
-# exec, rsh and debug.
-def oc_value_options:
-  ["-n", "--namespace", "-l", "--selector", "-f", "--filename", "-o", "--output",
-   "--field-selector", "--context", "--cluster", "--kubeconfig", "--kuberc", "--server", "-s",
-   "--token", "--user", "--as", "--as-group", "--as-uid", "--as-user-extra", "-k", "--kustomize",
-   "--timeout", "--grace-period", "--request-timeout", "--template", "--raw",
-   "--certificate-authority", "--client-certificate", "--client-key", "--cache-dir",
-   "--tls-server-name", "--loglevel", "-v", "--v", "--log-flush-frequency",
-   "--profile", "--profile-output", "-c", "--container", "--shell",
-   "--pod-running-timeout", "--image", "--node-name", "--to-namespace"];
-
-# Words after which kubectl is being run rather than mentioned.
-def runner_words:
-  ["sudo", "doas", "env", "exec", "command", "builtin", "nohup", "nice", "time",
-   "timeout", "xargs", "watch", "stdbuf", "setsid", "strace", "ionice", "flock",
-   "chroot", "ssh", "eval", "noglob", "rsh", "debug", "-exec", "-execdir", "-ok",
-   "-okdir", "then", "do", "else", "elif", "if", "while", "until", "!", "{"];
-
-# The first positional word after `cargo`: the cargo subcommand. `+toolchain`
-# and global options are skipped.
-def cargo_subcommand:
-  reduce .[] as $w ({skip: false, sub: null};
-    if .sub != null then .
-    elif .skip then .skip = false
-    elif ($w | startswith("+")) then .
-    elif ($w | startswith("-")) then .skip = ($w | IN("--color", "--config", "-Z", "-C"))
-    else .sub = $w end)
-  | .sub;
+      # A line break right after a separator does not end the pipeline:
+      # `echo psql |` and `oc exec -i pod -- sh` on the next line are one.
+      else (if $piped or $sep == "\n" then . else .pipe = null end) end
+    | .copt = false | .cskip = false | .hs = false | .hstr = [] | .sh = false | .rw = false;
+  # Lexes one chunk. $pipe is the piped echo or printf text that the chunk
+  # before passes on, when the two were cut apart inside one pipeline; the
+  # result carries the same for the next chunk.
+  #   .hstr: the here-strings of the current segment, for finish_segment;
+  #   .sh, .rw: whether an earlier word of the current segment is a shell, or
+  #   one of reparse_words. They are flags, set as each word is read, so that
+  #   a word costs the same however long its segment is (looking back over
+  #   the segment for every word made a long segment cost quadratic time).
+  def lex_chunk($pipe):
+    reduce scan(token_re) as $t
+      ({segs: [], cur: [], nested: [], pipe: $pipe, copt: false, cskip: false, hs: false, hstr: [],
+        sh: false, rw: false};
+       if $t[2] != null then finish_segment($t[2])
+       elif $t[1] != null then .hs = ($t[1] | test("<<<$"))
+       elif $t[3] != null then
+         [$t[3] | scan(part_re)] as $parts
+         | ($parts | map(.[0] // (.[1] | values | dq_unescape) // .[2] // .[3]) | join("")) as $text
+         | .sh as $in_shell
+         # .copt: a -c was seen and its command string is still to come;
+         # .cskip: the next word is the value of a shell option.
+         | (if .copt and .cskip then {cmd: false, copt: true, cskip: false}
+            elif .copt and ($text | test("^[-+]")) then
+              {cmd: false, copt: true, cskip: ($text | IN(shell_value_options[]))}
+            elif .copt then {cmd: true, copt: false, cskip: false}
+            else {cmd: false,
+                  copt: (($text | test("^-[A-Za-z]*c$")) or $text == "--command"
+                         or ($in_shell and ($text | test("^-[A-Za-z]*c[A-Za-z]*$")))),
+                  cskip: false} end) as $c
+         | ($c.cmd or (.hs and $in_shell) or .rw) as $reparse
+         | (if .hs then .hstr += [$text] else . end)
+         | .copt = $c.copt | .cskip = $c.cskip | .hs = false
+         | .cur += [$text]
+         | .sh = ($in_shell or ($text | is_shell_word))
+         | .rw = (.rw or ($text | basename | IN(reparse_words[])))
+         | if $depth >= 6 then .
+           elif $reparse then .nested += [$text | select(test("\\S")) | lex($depth + 1)[]]
+           else .nested += [
+             $parts[] | .[1] | values | dq_unescape
+             | scan("\\$\\(([\\s\\S]*)\\)|`([^`]*)`") | (.[0] // .[1])
+             | select(test("\\S"))
+             | lex($depth + 1)[]
+           ]
+           end
+       else . end)
+    | (if (.cur | length) == 0 then .pipe else null end) as $carry
+    | finish_segment("")
+    | {segs: (.segs + .nested), pipe: $carry};
+  reduce (gsub("\\\\\\n"; "") | chunks) as $chunk ({segs: [], pipe: null};
+    # A chunk that reads piped text from the one before is lexed even without
+    # a trigger word of its own (`... psql' |` then ` bash`).
+    if .pipe != null or ($chunk | may_matter) then
+      .pipe as $p | ($chunk | lex_chunk($p)) as $r | .segs += $r.segs | .pipe = $r.pipe
+    # A skipped piece of a pipeline passes the piped text on (see split_pipeline).
+    elif ($chunk | test("\\|&?[ \\t]*$")) then .
+    else .pipe = null end)
+  | .segs;
 
 # ------------------------------------------------------------------ check 1
 
+# kubectl run as the command: every word before it is an assignment, or one
+# of them is a runner word. One pass keeps both facts about the words read so
+# far, so a long segment costs linear time.
 def check_kubectl:
-  . as $s
-  | first(range(0; $s | length) as $i
-      | select(($s[$i] | basename) == "kubectl")
-      | select(($s[:$i] | all(.[]; is_assignment)) or ($s[:$i] | any(.[]; IN(runner_words[]))))
+  first(foreach .[] as $w ({assign: true, runner: false, hit: false};
+      .hit = (($w | basename) == "kubectl" and (.assign or .runner))
+      | .assign = (.assign and ($w | is_assignment))
+      | .runner = (.runner or ($w | IN(runner_words[])));
+      select(.hit))
       | msg(1; "this command runs kubectl. Verseghy repositories use oc, never kubectl. "
                + "Run the same command with oc instead, for example `oc get pods -n <namespace>`."
                + text_only_hint));
@@ -375,7 +620,7 @@ def oc_verb:
   . as $s
   | first(range(0; $s | length) as $i
       | select(($s[$i] | basename) == "oc")
-      | ($s[$i + 1:] | positionals(oc_value_options))[0] // "") // "";
+      | ($s[$i + 1:] | first_positional(oc_value_options)) // "") // "";
 
 # Force deletion. `oc delete` and `oc replace` document --force as
 # "immediately remove resources from API and bypass graceful deletion", and
@@ -402,30 +647,103 @@ def protected_kind:
 def names_protected_kind:
   any(split(",")[] | split("/")[0] | ascii_downcase | split(".")[0]; protected_kind);
 
-# oc delete of a protected kind. Only resource types are matched, as kubectl
-# reads them: the first argument after the verb (`TYPE[,TYPE...]` or
-# `TYPE/NAME`) and the type part of every later `TYPE/NAME` argument. Other
-# words are resource names, so `oc delete deployment app` is not an
-# Application.
-def check_oc_delete:
+# Every `oc <verb>` in a segment, as {before, words, args}: the words before
+# oc, the words after it, and the positional arguments after the verb. The
+# verb is found first, so only an oc with that verb reads all its arguments.
+#   $verb - the oc verb, for example "delete".
+def oc_verb_args($verb):
   . as $s
-  | first(range(0; $s | length) as $i
-      | select(($s[$i] | basename) == "oc")
-      | ($s[$i + 1:] | positionals(oc_value_options)) as $p
-      | select(($p[0] // "") == "delete")
-      | ($p[1:] | to_entries[]) as $e
-      | select(($e.key == 0 or ($e.value | contains("/"))) and ($e.value | names_protected_kind))
-      | $e.value as $arg
-      | msg(1; "`oc delete` names '\($arg)', a PersistentVolumeClaim, PersistentVolume or Argo CD Application (or ApplicationSet). "
-               + "Deleting one can destroy data, and deleting an Application deletes every resource it manages, so agents never do it. "
-               + "A human does it after checking that the volume's reclaim policy is Retain and that a verified backup exists. Stop and ask the maintainer."));
+  | range(0; $s | length) as $i
+  | select(($s[$i] | basename) == "oc")
+  | $s[$i + 1:] as $w
+  | ($w | first_positional_index(oc_value_options)) as $k
+  | select($k != null and $w[$k] == $verb)
+  | {before: $s[:$i], words: $w, args: ($w[$k + 1:] | positionals(oc_value_options))};
+
+# The resource arguments that name a protected kind. Only resource types are
+# matched, as kubectl reads them: the first argument after the verb
+# (`TYPE[,TYPE...]` or `TYPE/NAME`) and the type part of every later
+# `TYPE/NAME` argument. Other words are resource names, so
+# `oc delete deployment app` is not an Application.
+def protected_resource_args:
+  to_entries[]
+  | select((.key == 0 or (.value | contains("/"))) and (.value | names_protected_kind))
+  | .value;
+
+def protected_delete_advice:
+  "Deleting one can destroy data, and deleting an Application deletes every resource it manages, so agents never do it. "
+  + "A human does it after checking that the volume's reclaim policy is Retain and that a verified backup exists. Stop and ask the maintainer.";
+
+# oc delete of a protected kind.
+def check_oc_delete:
+  first(oc_verb_args("delete") | .args | protected_resource_args) as $arg
+  | msg(1; "`oc delete` names '\($arg)', a PersistentVolumeClaim, PersistentVolume or Argo CD Application (or ApplicationSet). "
+           + protected_delete_advice);
+
+# Whether a word holds text that the shell or a runner fills in when it
+# runs: a variable, a $(...) (unquoted, it leaves a lone `$` word, because
+# the lexer splits at the parenthesis), the `{}` of xargs -I{}, parallel and
+# find -exec, or the replace string of the runner (see runner_feed).
+#   $replace - the runner's replace string, or null.
+def holds_expansion($replace): test("[$`]|\\{\\}") or ($replace != null and contains($replace));
+
+# Whether an `oc delete` in a segment gets the resources it deletes from the
+# output of another command, which the hook cannot read:
+#   - it runs under xargs or parallel, which append their input words, and
+#     its first resource argument has the TYPE/NAME form, so kubectl accepts
+#     the appended TYPE/NAME words too (`xargs oc delete pod/web-0`). With a
+#     type written out on its own (`xargs oc delete pod`), kubectl refuses
+#     appended TYPE/NAME words, as it does for $(...) below;
+#   - it has no resource argument and no -f or -k, so they came from a
+#     backtick substitution, which the lexer splits off
+#     (oc delete `oc get pvc -o name`), or from a runner such as xargs;
+#   - the type part of a word that kubectl reads a type from (the first
+#     resource argument and, after a TYPE/NAME one, every other) holds an
+#     expansion: `oc delete $(oc get pvc -o name)`, `oc delete "$r"` in a
+#     loop over such output, `xargs -I X oc delete X`;
+#   - its -f or --filename reads the output: `-f -` or /dev/stdin from a
+#     pipe, a value that holds an expansion, or no value, where a process
+#     substitution `<(...)` was split off.
+# `oc delete pod "$name"` fixes the type in the text, so it is not generated.
+# A file named in the text (`-f pvcs.yaml`) is not visible to the hook.
+def generated_delete:
+  any(oc_verb_args("delete");
+    .args as $args
+    | runner_feed(.before; ["oc"] + .words) as $feed
+    | ($feed != null and $feed.replace == null and (($args[0] // "") | contains("/")))
+      or (($args | length) == 0 and (.words | any(.[]; is_filename_option) | not))
+      or any($args | to_entries[] | select(.key == 0 or ($args[0] | contains("/")));
+             .value | split("/")[0] | holds_expansion($feed.replace))
+      or any(.words as $w | range(0; $w | length) as $i
+             | if $w[$i] == "-f" or $w[$i] == "--filename" then ($w[$i + 1] // "")
+               elif ($w[$i] | startswith("--filename=")) then $w[$i][11:]
+               elif ($w[$i] | test("^-f.")) then $w[$i][2:] | sub("^="; "")
+               else empty end;
+             . == "" or . == "-" or startswith("/dev/") or startswith("/proc/") or holds_expansion($feed.replace)));
+
+# oc delete whose resources another command of the same command line
+# produces, when that command is an `oc get` of a protected kind:
+# `oc delete $(oc get pvc -o name)`, `oc get pvc -o name | xargs oc delete`,
+# `oc get pvc -o yaml | oc delete -f -`, `for r in $(oc get pv -o name); do
+# oc delete "$r"; done`. The producing oc get is a segment of its own, so the
+# segments of the whole command are checked together. The input is the array
+# of all segments.
+def check_generated_delete:
+  . as $segs
+  | first($segs[] | oc_verb_args("get") | .args | protected_resource_args) as $kind
+  | first($segs[] | select(generated_delete))
+  | msg(1; "`oc delete` here gets the resources it deletes from the output of another command ($(...), a variable, xargs or -f -), "
+           + "and this command runs `oc get \($kind)`, a PersistentVolumeClaim, PersistentVolume or Argo CD Application (or ApplicationSet), "
+           + "so it may delete one. " + protected_delete_advice
+           + " If the delete is meant for other resources, run the oc get on its own first, "
+           + "then delete those resources with their type written out (`oc delete pod <name>`).");
 
 def check_db_wipe:
   . as $s
   | first(range(0; $s | length) as $i
       | select($s[$i] == "db")
       | $s[$i + 1:] as $rest
-      | (($rest | positionals(["-e", "--environment"]))[0] // "") as $sub
+      | (($rest | first_positional(["-e", "--environment"])) // "") as $sub
       | select(($sub | IN("reset", "down", "truncate"))
                or ($sub == "seed"
                    and any($rest[]; . == "--reset" or startswith("--reset=") or test("^-[A-Za-z]*r[A-Za-z]*$"))))
@@ -441,7 +759,9 @@ def check_sea_orm_wipe:
   . as $s
   | first(range(0; $s | length) as $i
       | select(($s[$i] | basename) == "sea-orm-cli")
-      | ($s[$i + 1:] | positionals(["-d", "--migration-dir", "-s", "--database-schema", "-u", "--database-url"])) as $p
+      | $s[$i + 1:] as $rest
+      | [limit(2; $rest | positional_indices(["-d", "--migration-dir", "-s", "--database-schema", "-u", "--database-url"]))
+         | $rest[.]] as $p
       | select(($p[0] // "") == "migrate" and (($p[1] // "") | IN("fresh", "refresh", "reset", "down")))
       | msg(1; "`sea-orm-cli migrate \($p[1])` drops tables or rolls back migrations. "
                + "Add a new forward migration instead and apply it with `cargo loco db migrate` against the local database."));
@@ -624,16 +944,43 @@ def local_db_advice:
   + "Use the throwaway compose database (`podman-compose up -d postgres`, "
   + "postgres://loco:loco@localhost:5432/backend3_development); any other database is operated by a human.";
 
+# Whether a word of an in-cluster command part can name the program that
+# runs. A path under /etc, /var, /run, /proc, /sys, /dev or /usr/share counts
+# only in a bin or sbin directory: those trees hold data, configuration and
+# sockets, such as MySQL's data directory /var/lib/mysql, which `ls` or `du`
+# name as files. Every other word counts, so a client run by any other path
+# (`/opt/bitnami/postgresql/bin/psql`, `./psql`) is still found.
+def may_name_program:
+  (test("^/(?:etc|var|run|proc|sys|dev|usr/share)/") | not) or test("/s?bin/[^/]*$");
+
+# A database command run through oc exec, oc rsh or oc debug. The words are
+# stripped of quotes and backslashes and cut at blanks, so an oc inside a
+# quoted command string (`parallel 'oc exec {} -- psql'`) and a client written
+# in quotes inside a script (`sh -c '"psql" ...'`) count too. Only the command
+# part of the first oc exec, rsh or debug counts (see in_cluster_command), so
+# a pod, container or namespace named like a client does not; that command
+# part runs to the end of the segment, so it holds every later one. After a
+# shell word in the command part, the words are also cut at shell
+# separators, so a client inside a `sh -c` script counts after a `;` without
+# a space (`sh -c 'cd tmp;psql'`). Elsewhere they are not, because ( ) | < >
+# in a search pattern or a message are text: `grep -E "oc (exec|rsh) .* psql"`
+# names no verb, and `rg "oc exec [^ ]+ -- (psql|mysql)"` no client.
 def check_in_cluster:
-  [.[] | splits("\\s+") | select(length > 0)] as $f
+  [.[] | unquoted_text | blank_words] as $f
   | first(range(0; $f | length) as $i
       | select(($f[$i] | basename) == "oc")
       | $f[$i + 1:] as $rest
-      | (($rest | positionals(oc_value_options))[0] // "") as $verb
-      | select($verb | IN("exec", "rsh", "debug"))
-      | ($rest | first(db_commands)) as $c
-      | msg(2; "`\($c.name)` runs inside the cluster through `oc \($verb)`, so its database is not local, whatever its options say. "
-               + "Agents never run database commands in the cluster; stop and ask the maintainer."));
+      | ($rest | first_positional_index(oc_value_options)) as $v
+      | select($v != null and ($rest[$v] | IN("exec", "rsh", "debug")))
+      | {verb: $rest[$v], part: ($rest[$v + 1:] | in_cluster_command($rest[$v]))}) as $oc
+  | (first($oc.part | to_entries[] | select(.value | is_shell_word) | .key) // null) as $shell
+  | (if $shell == null then $oc.part
+     else $oc.part[:$shell + 1]
+          + [$oc.part[$shell + 1:][] | splits("[;&|()`<>]+") | select(length > 0)] end) as $words
+  | first($words | map(select(may_name_program)) | db_commands) as $c
+  | msg(2; "`\($c.name)` runs inside the cluster through `oc \($oc.verb)`, so its database is not local, whatever its options say. "
+           + "Agents never run database commands in the cluster; stop and ask the maintainer."
+           + text_only_hint);
 
 #   $vars - the inline values of the watched variables, by name.
 def check_db_target($vars):
@@ -654,21 +1001,6 @@ def check_import_source($vars):
 
 # ------------------------------------------------------------------ verdict
 
-# A command can only be blocked if it contains one of these words, so every
-# other command is allowed without being parsed.
-def trigger_re: "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|sea-orm-cli|cargo";
-
-# The variables check 2 reads.
-def watched_var_re: "DATABASE_URL|PGHOST|PGSERVICE|MYSQL_HOST";
-
-# Whether a piece of shell text can matter to any check: it holds a trigger
-# word, or an assignment that check 2 reads. Quotes and backslashes are
-# dropped first, so k'ube'ctl still counts. split/join is linear, unlike a
-# gsub with one match per quote.
-def may_matter:
-  split("\"") | join("") | split("'") | join("") | split("\\") | join("")
-  | test(trigger_re + "|" + watched_var_re);
-
 # Pairs every segment with the inline values of the watched variables in
 # scope for it: assignments anywhere in that segment or in an earlier one
 # (nested command strings come after the text they came from), the latest per
@@ -686,12 +1018,13 @@ def verdict:
   | if (.tool_name // "Bash") != "Bash" then "allow"
     elif ($cmd | may_matter | not) then "allow"
     else
-      # Chunks that cannot matter are not lexed, which keeps long commands cheap.
-      [$cmd | gsub("\\\\\\n"; "") | (if test("<<") then strip_heredocs else . end)
-       | chunks | select(may_matter) | lex(0)[]] as $segs
-      | (first($segs | scoped_segments[] | .vars as $vars | .seg
-               | (check_kubectl, check_force_delete, check_oc_delete, check_db_wipe, check_sea_orm_wipe,
-                  check_in_cluster, check_db_target($vars), check_import_source($vars))) // null) as $why
+      # lex cuts a long command into chunks and skips those that cannot
+      # matter, which keeps long commands cheap.
+      [$cmd | gsub("\\\\\\n"; "") | (if test("<<") then strip_heredocs else . end) | lex(0)[]] as $segs
+      | (first(($segs | scoped_segments[] | .vars as $vars | .seg
+                | (check_kubectl, check_force_delete, check_oc_delete, check_db_wipe, check_sea_orm_wipe,
+                   check_in_cluster, check_db_target($vars), check_import_source($vars))),
+               ($segs | check_generated_delete)) // null) as $why
       | if $why == null then "allow" else "block\n\($why)" end
     end;
 
