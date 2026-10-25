@@ -128,6 +128,15 @@ ts-rs = { version = "12", features = ["chrono-impl", "serde-compat"] }
 # `preserve_order` stay off, so paths and properties are sorted by name and
 # the snapshot does not depend on declaration order.
 utoipa = "6"
+# Dates, wall times and instants (ADR 0010): the chrono 0.4 types of Loco's
+# prelude, Sea-ORM 2.0 and ts-rs's `chrono-impl` (loco-rs 1.2.0 requires "0.4").
+chrono = "0.4"
+# The compiled-in tz database of src/domain/budapest.rs, pinned exactly (ADR
+# 0010 point 5): new tz data can move the Budapest wall time of a stored
+# instant. 0.10.4 carries tz data 2025b, which budapest::TZ_DATA_VERSION records
+# and a unit test checks. loco-rs 1.2.0's scheduler (tokio-cron-scheduler 0.15)
+# already builds this release, so it adds no crate to Cargo.lock.
+chrono-tz = "=0.10.4"
 # Metrics library (ADR 0023 §9), picked by the bootstrap PR after checking the
 # releases on 2026-10-24: `prometheus-client` (0.25.1 of 2026-09-01), the
 # Prometheus project's own client. Its `Registry` is an explicit value that
@@ -198,6 +207,8 @@ url = { workspace = true }
 percent-encoding = { workspace = true }
 ts-rs = { workspace = true }
 utoipa = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 [[bin]]
 name = "backend3-cli"

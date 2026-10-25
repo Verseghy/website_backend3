@@ -177,11 +177,19 @@ updates:
       # Loco. Not a dependency yet: the importer slice adds it.
       - dependency-name: sqlx
         update-types: ["version-update:semver-major"]
+      # chrono-tz is pinned exactly (ADR 0010 point 5) on the 0.10 line that
+      # loco-rs 1.2.0's scheduler builds (tokio-cron-scheduler 0.15 requires
+      # "0.10"); a new line would be a second tz database and a deliberate PR.
+      # Patch releases still arrive as PRs, and one with new tz data fails the
+      # tz-data test of src/domain/budapest.rs until it records the version.
+      - dependency-name: chrono-tz
+        update-types: ["version-update:semver-major"]
       # More crates whose types cross Loco 1.2.0's API (loco-rs@1.2.0:
       # Cargo.toml and src/prelude.rs). Each must stay on the line loco-rs
       # 1.2.0 requires; another major would be a second copy whose types do
-      # not fit Loco's, and it comes with Loco. Not dependencies yet: the
-      # slices that use them add them.
+      # not fit Loco's, and it comes with Loco. chrono is a dependency since
+      # src/domain/budapest.rs (ADR 0010); the others are not dependencies
+      # yet, and the slices that use them add them.
       # - validator "0.20.0": `Validatable::validator` returns a
       #   Box<dyn validator::Validate>, and models declare their field rules
       #   through Validatable (CLAUDE.md rule 4).
