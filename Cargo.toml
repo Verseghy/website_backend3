@@ -139,6 +139,32 @@ html5ever = "0.40.1"
 # warns about duplicates. The default features add a command-line binary
 # (`main`) and a parse-error list (`errors`) that backend3 does not use.
 scraper = { version = "0.29", default-features = false }
+# Two-factor sign-in (ADR 0006 §6), used by the pure modules
+# src/domain/totp.rs and src/domain/totp_secret.rs. All are RustCrypto crates
+# (pure Rust, MIT OR Apache-2.0) of one generation, the digest 0.11 and
+# cipher 0.5 traits: sqlx-postgres already builds hkdf, hmac and sha2 from it,
+# so only the AES-GCM crates and sha1 are new to the build. hmac and hkdf
+# take sha1's and sha2's types through those traits, so a new 0.x line of
+# one of them builds only together with the others.
+#   aes-gcm - AES-256-GCM for users.totp_secret_encrypted. Default features
+#             off: the nonce is an argument of the pure module (ADR 0008), so
+#             `getrandom` is not needed, and the 48-byte layout is a fixed
+#             array, so `alloc` is not either. `aes` is the cipher itself.
+#   hkdf    - HKDF-SHA-256 (RFC 5869), which derives the cipher key from the
+#             TOTP_ENCRYPTION_KEY secret.
+#   hmac, sha1 - HMAC-SHA-1, the HOTP function under TOTP (RFC 4226,
+#             RFC 6238).
+#   sha2    - SHA-256 for HKDF.
+# sha1 and sha2 need neither `alloc` nor `oid`, their default features.
+aes-gcm = { version = "0.11", default-features = false, features = ["aes"] }
+hkdf = "0.13"
+hmac = "0.13"
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+# Decodes the TOTP_ENCRYPTION_KEY secret (ADR 0006 §6) with the line and
+# engine that jsonwebtoken, under Loco's JWT, decodes JWT_SECRET with
+# (STANDARD, canonical padding).
+base64 = "0.22"
 # DTO-to-TypeScript bindings for the admin API (ADR 0005 §2): major 12 with
 # chrono-impl and serde-compat, as in Loco's own template.
 ts-rs = { version = "12", features = ["chrono-impl", "serde-compat"] }
@@ -258,6 +284,12 @@ utoipa = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 prometheus-client = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
 
 [[bin]]
 name = "backend3-cli"

@@ -4,15 +4,22 @@
 //! files take from the environment through `get_env` (the database URI, for
 //! example) are only checked through the guard, because the CI job may set
 //! them. `config/production.yaml` needs variables without defaults; the CLI
-//! tests in `tests/cli/` load it in a child process.
+//! tests in `tests/cli/` and `totp_encryption_key.rs` load it in a child
+//! process.
 
 use std::net::Ipv4Addr;
 
-use backend3::{app::enforce_database_guard, settings::Settings};
+use backend3::{
+    app::enforce_database_guard,
+    domain::totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT, TotpEncryptionKey},
+    settings::{Settings, SettingsError},
+};
 use loco_rs::{
     config::{CacheConfig, Config, QueueConfig, WorkerMode},
     environment::Environment,
 };
+
+use crate::support::repository_root;
 
 fn load(environment: &Environment) -> Config {
     environment
@@ -130,4 +137,55 @@ fn e2e_serves_the_admin_build_on_port_5150() {
     assert!(config.database.auto_migrate);
     let settings = Settings::from_section(config.settings.as_ref()).expect("settings");
     assert_eq!(settings.admin_ui.dist_dir.to_str(), Some("admin/dist"));
+}
+
+#[test]
+fn local_configs_use_the_published_throwaway_totp_key() {
+    // ADR 0006 §6 and ADR 0034 §2 item 3: the local environments carry one
+    // fixed value that is no secret and says so when decoded, so nobody
+    // mistakes it for a real key. The local environments keep it, and
+    // production refuses the same settings (ADR 0034 §3).
+    let text = std::str::from_utf8(PUBLISHED_LOCAL_KEY_TEXT).expect("readable text");
+    assert!(text.contains("public and throwaway"), "{text}");
+    let expected = TotpEncryptionKey::from_base64(PUBLISHED_LOCAL_KEY).expect("a valid key");
+    for environment in local_environments() {
+        let settings = Settings::from_section(load(&environment).settings.as_ref())
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        assert_eq!(
+            settings.admin_auth.totp_encryption_key, expected,
+            "{environment}"
+        );
+        settings
+            .refuse_published_keys(&environment)
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        assert!(
+            matches!(
+                settings.refuse_published_keys(&Environment::Production),
+                Err(SettingsError::PublishedTotpKey)
+            ),
+            "{environment}: production must refuse this key"
+        );
+    }
+}
+
+#[test]
+fn production_reads_the_totp_key_from_the_environment_without_a_default() {
+    // A secret takes no default (ADR 0023 §11): an unset variable must stop
+    // the process, never fall back to the local value. The escaping filters
+    // are pinned too, because without them a value with a quote fails as a
+    // YAML error that does not name the key. The file is read as text
+    // because loading it needs the variable (tests/boot/totp_encryption_key.rs
+    // runs it end to end).
+    let source = std::fs::read_to_string(repository_root().join("config/production.yaml"))
+        .expect("config/production.yaml");
+    let lines: Vec<&str> = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("totp_encryption_key:"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            r#"    totp_encryption_key: "<%= get_env(name='TOTP_ENCRYPTION_KEY') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>""#
+        ]
+    );
 }

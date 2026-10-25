@@ -91,3 +91,13 @@ settings:
   metrics:
     binding: 127.0.0.1
     port: 9464
+  admin_auth:
+    # The key that encrypts stored TOTP secrets (ADR 0006 §6). A throwaway
+    # local value, public like the compose database's loco/loco and not a
+    # secret, as ADR 0034 §2 item 3 allows
+    # (docs/design/adr/0034-test-hashes-and-throwaway-keys-refused-in-production.md):
+    # the base64 of the 110-byte sentence "backend3 TOTP encryption key:
+    # public and throwaway, for development, test and e2e only; production
+    # refuses it." Production reads its own key from TOTP_ENCRYPTION_KEY,
+    # with no default, and refuses this one at boot (ADR 0034 §3).
+    totp_encryption_key: "YmFja2VuZDMgVE9UUCBlbmNyeXB0aW9uIGtleTogcHVibGljIGFuZCB0aHJvd2F3YXksIGZvciBkZXZlbG9wbWVudCwgdGVzdCBhbmQgZTJlIG9ubHk7IHByb2R1Y3Rpb24gcmVmdXNlcyBpdC4="

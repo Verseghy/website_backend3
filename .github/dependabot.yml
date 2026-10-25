@@ -78,7 +78,13 @@ updates:
   #
   # Not listed, so all their updates flow: thiserror, serde_path_to_error,
   # prometheus-client, proptest, futures-util and insta. None of their types
-  # cross Loco's API, and no ADR pins them.
+  # cross Loco's API, and no ADR pins them. The same holds for the two-factor
+  # crates (ADR 0006 §6): aes-gcm, hkdf, hmac, sha1, sha2 and base64. The four
+  # RustCrypto hash and MAC crates share the digest traits of one generation,
+  # so a new 0.x line of one builds only with the others; its PR fails to
+  # compile and is redone as one deliberate bump of all four. The known-answer
+  # tests in src/domain/totp.rs and src/domain/totp_secret.rs check every
+  # update.
   - package-ecosystem: cargo
     directory: /
     schedule:

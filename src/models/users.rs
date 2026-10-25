@@ -1,5 +1,10 @@
-//! The admin accounts (ADR 0006): finders and password hashing on top of the
-//! generated `users` entity.
+//! The admin accounts (ADR 0006): finders, password hashing and the stored
+//! TOTP secret on top of the generated `users` entity.
+//!
+//! The TOTP secret is encrypted with the account's `id` as associated data
+//! ([`crate::domain::totp_secret`]); [`Model::totp_secret`] decrypts it with
+//! the key the caller passes in, and the code check itself is
+//! [`crate::domain::totp`].
 //!
 //! Passwords are hashed and verified only through `loco_rs::hash`, which uses
 //! Argon2id with the argon2 crate's default parameters (ADR 0006 §4). The
@@ -42,6 +47,8 @@ pub use super::_entities::users::{self, ActiveModel, Column, Entity, Model};
 use crate::domain::{
     email_address,
     password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind},
+    totp::TotpSecret,
+    totp_secret::{self, DecryptError, TotpEncryptionKey},
 };
 
 /// The session-token claim that carries `users.token_version` (ADR 0006 §2).
@@ -324,6 +331,30 @@ impl Model {
         claims.insert(SCOPE_CLAIM.to_owned(), ADMIN_SCOPE.into());
         claims.insert(AUTH_TIME_CLAIM.to_owned(), auth_time.timestamp().into());
         Ok(JWT::new(secret).generate_token(expiration, self.pid.to_string(), claims)?)
+    }
+
+    /// Decrypts this account's stored TOTP secret
+    /// (`users.totp_secret_encrypted`, ADR 0006 §6).
+    ///
+    /// - `key`: the derived key from `settings.admin_auth`, passed in by the
+    ///   caller (ADR 0008 rule 2).
+    ///
+    /// The value is authenticated with this row's `id`, so bytes that were
+    /// copied here from another account's row do not decrypt. Whether
+    /// two-factor is on is `totp_enabled_at`, not this column: during
+    /// enrolment the secret is stored before the first code confirms it.
+    ///
+    /// # Errors
+    ///
+    /// [`DecryptError::Length`] or [`DecryptError::Authentication`] when the
+    /// stored value is not this row's secret under `key`. Either means the
+    /// row was changed outside backend3 or the key is not the one the
+    /// secret was stored with; the caller refuses the code.
+    pub fn totp_secret(&self, key: &TotpEncryptionKey) -> Result<Option<TotpSecret>, DecryptError> {
+        self.totp_secret_encrypted
+            .as_deref()
+            .map(|stored| totp_secret::decrypt(key, self.id, stored))
+            .transpose()
     }
 }
 

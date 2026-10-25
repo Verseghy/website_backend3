@@ -17,12 +17,13 @@ use backend3::{
     app::{App, set_clock, trim_trailing_slash},
     domain::{clock::Clock, task_lock_key::task_lock_key},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::FutureExt;
 use loco_rs::{app::AppContext, testing::prelude::*};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
-    TransactionTrait,
+    TransactionTrait, prelude::Uuid,
 };
 
 /// The admin UI fixture of `config/test.yaml` (ADR 0004 §4).
@@ -126,6 +127,25 @@ pub fn run_cli(env: &[(&str, &str)], args: &[&str], timeout: Duration) -> CliRun
         .read_to_string(&mut stderr)
         .expect("read stderr");
     CliRun { status, stderr }
+}
+
+/// A `TOTP_ENCRYPTION_KEY` for the child processes that load
+/// config/production.yaml ([`run_cli`]): the base64 of 64 bytes made when
+/// the test runs, a new key on every call.
+///
+/// ADR 0034 §3: production refuses every key that this repository holds,
+/// and a test that starts the production configuration uses a key that no
+/// committed file holds. A fixed value here would be such a key that
+/// production accepts. Tests that need a key production refuses use
+/// `backend3::domain::totp_secret::PUBLISHED_LOCAL_KEY` instead.
+///
+/// The bytes are four version 4 UUIDs, from the generator of the uuid crate
+/// that Loco already builds, so the tests need no random crate of their
+/// own. Six bits of each UUID are fixed (version and variant), which leaves
+/// 488 random bits: plenty for a key that only has to be new and unknown.
+pub fn cli_totp_key() -> String {
+    let bytes: Vec<u8> = (0..4).flat_map(|_| Uuid::new_v4().into_bytes()).collect();
+    STANDARD.encode(bytes)
 }
 
 /// Boots the app on its own fresh database (Loco's per-test databases), runs
