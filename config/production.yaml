@@ -27,7 +27,9 @@
 #
 # Optional: LOG_LEVEL, DB_AUTO_MIGRATE (default false: boot runs no
 # migration, so backend3 also boots against a read-only database, ADR 0003),
-# DB_MAX_CONNECTIONS, DB_CONNECT_TIMEOUT, DB_IDLE_TIMEOUT.
+# DB_MAX_CONNECTIONS, DB_CONNECT_TIMEOUT, DB_IDLE_TIMEOUT, and
+# PNG_PRESET_THRESHOLD_PIXELS (below; set by the Deployment from the
+# measurement on the production node, ADR 0033 §5).
 #
 # Safety (ADR 0024 §4, layer 3): `App::load_config` refuses
 # dangerously_truncate, dangerously_recreate and queue.dangerously_flush here,
@@ -142,3 +144,14 @@ settings:
     # is valid YAML too: the Tera strings are single-quoted, and the YAML
     # escapes in them read the same to Tera.
     totp_encryption_key: "<%= get_env(name='TOTP_ENCRYPTION_KEY') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>"
+  # How uploaded images are optimised (ADR 0015 §7, ADR 0033). `png`: oxipng's
+  # preset 2 up to `threshold_pixels` pixels and the cheaper `large_preset`
+  # (0 or 1) above, so a PNG at the pixel budget finishes inside the 120 s
+  # /api/admin timeout (ADR 0033 §5). The threshold is set from a
+  # measurement on the production node; until then the default derived in
+  # src/domain/image_optimise/png/effort.rs. Checked at boot: a value that
+  # breaks the rule stops the server with the key and what to change.
+  image_optimisation:
+    png:
+      threshold_pixels: <%= get_env(name="PNG_PRESET_THRESHOLD_PIXELS", default="6000000") %>
+      large_preset: 0

@@ -5,7 +5,9 @@
 //! real encoders (libjpeg-turbo, libpng, libwebp, the GIF and APNG writers of
 //! `ImageMagick` and `ffmpeg`), so the readers are checked against what
 //! common encoders write. Every corpus file must be listed in [`CORPUS`], so
-//! a file that a later image slice adds gets its expected header too.
+//! a file that a later image slice adds gets its expected header too. The
+//! optimisers of each format test their output over the same corpus, in a
+//! module of their own.
 
 use std::{fs, path::Path};
 
@@ -64,9 +66,14 @@ pub(super) const CORPUS: &[(&str, ImageFormat, u32, u32)] = &[
         8_688,
         5_792,
     ),
+    ("png/animated-metadata.png", ImageFormat::Png, 67, 41),
     ("png/animated.png", ImageFormat::Png, 67, 41),
     ("png/grey16.png", ImageFormat::Png, 67, 41),
+    ("png/hdr.png", ImageFormat::Png, 67, 41),
+    ("png/icc-profile.png", ImageFormat::Png, 67, 41),
+    ("png/metadata.png", ImageFormat::Png, 67, 41),
     ("png/palette.png", ImageFormat::Png, 67, 41),
+    ("png/payload.png", ImageFormat::Png, 67, 41),
     ("png/rgb.png", ImageFormat::Png, 67, 41),
     ("png/rgba-interlaced.png", ImageFormat::Png, 67, 41),
     ("webp/animated.webp", ImageFormat::WebP, 67, 41),
@@ -82,7 +89,7 @@ pub(super) fn corpus_file(path: &str) -> Vec<u8> {
 }
 
 /// Whether a corpus file is a header-only file of `over-budget/`.
-fn is_over_budget(path: &str) -> bool {
+pub(super) fn is_over_budget(path: &str) -> bool {
     path.starts_with("over-budget/")
 }
 

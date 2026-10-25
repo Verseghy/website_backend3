@@ -339,3 +339,481 @@ The maintainer answered the three questions this section once left open on
    (ADR 0033 §2).
 3. **A cap on progressive scans** (D79): "WebP limits as built, the same
    totals for GIF, and a JPEG scan cap" (ADR 0033 §4, and the section above).
+
+## PNG
+
+### Result
+
+PNG uploads are recompressed losslessly by **oxipng 10.2.1** with
+libdeflate, after a chunk walk that keeps only what
+[ADR 0015](adr/0015-media-separate-static-server-media-library-image-optimisatio.md)
+§7 and
+[ADR 0033](adr/0033-image-optimisation-ssim-floor-reference-parsing-cpu-limits-a.md)
+§6 keep (the last section).
+
+| Setting | Value | Why |
+|---|---|---|
+| Encoder | oxipng 10.2.1, default features off, libdeflate through `libdeflater` | the smallest files for their CPU time of the candidates below; no command-line tool, no rayon (one optimisation uses one thread), no Zopfli |
+| Preset | 2 up to `settings.image_optimisation.png.threshold_pixels` pixels, `large_preset` above it (0, or 1 if the node allows it); the default threshold is 6,000,000, with preset 0 above | ADR 0033 §5: preset 2 below a pixel count and a cheaper preset above it, so a PNG at the pixel budget finishes inside the 120-second `/api/admin` timeout (below). The production values are set from a measurement on the node |
+| Pixel count | the canvas, plus every frame of a kept animation at its own size | the encoder recompresses each image of the file |
+| Chunks | `StripChunks::None` on the walk's rewrite | oxipng may not swap an `iCCP` for `sRGB` or drop one |
+| Pixels | `optimize_alpha` and `scale_16` off; bit-depth reduction off for a 16-bit `tRNS` sample whose bytes differ; greyscale reduction off when `cICP` is kept | no decoded pixel may change, and no colour may be read differently |
+| Time limit | none | a deadline would read the clock and make the output depend on the machine; the preset bounds the time instead |
+| Licences | oxipng MIT, libdeflater and libdeflate-sys Apache-2.0, the bundled libdeflate MIT, rgb MIT, bytemuck Zlib OR Apache-2.0 OR MIT | all on the `deny.toml` list; `cargo deny` passes |
+
+### How the PNG encoders were measured
+
+| Criterion | Method |
+|---|---|
+| Output size | The bytes each candidate writes for each measurement image, against the input. |
+| Similarity | Lossless candidates must decode to the same pixels. The tests compare every image of every corpus PNG, frames included, and generated files of every colour type, bit depth and interlace method, with an animation frame, as 16-bit RGBA through the `png` crate, a decoder independent of oxipng. |
+| CPU time | `/usr/bin/time` user + system seconds of one optimisation, in a release build, on one thread (ADR 0015 §7 runs one optimisation at a time on a blocking thread), with its peak resident memory. |
+| Build cost | The CPU seconds (user + system) of a cold `cargo build --release` from an empty `target/`: first of a scratch crate whose only dependency is the candidate, then of backend3 with and without it (research: gap-14 §6.2). CPU seconds approximate the wall time of the same build on one CPU, which is how a cold build on the hub is projected. |
+| Licence | `cargo deny check bans licenses sources` passes with the candidate's whole tree (ADR 0022 §4). |
+
+The figures come from a desktop with 24 hardware threads (AMD Ryzen 9
+5900X), while other work ran on the same machine, so the CPU seconds carry
+a few per cent of noise. The candidates were built with rustc 1.98.1 and
+the whole optimiser with the repository's 1.99.1. The presets were timed
+again on 2026-10-25 for the threshold (below), with the same images; the
+figures matched the first run to within 2 %.
+
+The build figures here ran on this desktop, and they stand, as the JPEG
+section's and the OpenAPI spike's did
+([openapi-spike.md](openapi-spike.md) §4): Pipelines-as-Code builds
+`master` only
+([ADR 0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md)),
+so a branch has no BuildRun to compare, and no cold build was timed on a
+GitHub runner. Two figures are still to come, and are added here when they
+exist:
+
+1. the duration of the first `master` PAC BuildRun after this change,
+   compared with the one before it, in the next docs change (ADR 0022 §1);
+2. the CPU time and peak memory on the edge node, ADR 0015 §7's "CPU time
+   on the node", from which k8s-backend3-deploy sets the threshold
+   (ADR 0033 §5). The node's CPU is not known yet (ADR 0023), and the
+   hub's build nodes have much slower cores than this desktop (research:
+   gap-14 §6.2), so the times below are a lower bound.
+
+The candidates were:
+
+- **oxipng 10.2.1** with libdeflate, through `libdeflater` (Apache-2.0),
+  which compiles the bundled C libdeflate (MIT) with the C compiler of the
+  build stage. Presets 0 to 4 were measured; preset 2 is oxipng's default.
+- **oxipng with Zopfli** (its `zopfli` feature, pure Rust), on the filters
+  of preset 2.
+- **The `png` crate's own encoder** (0.18.1, pure Rust) at
+  `Compression::High` with adaptive filtering: decode, then write the same
+  colour type and bit depth again. It is the pure-Rust path, with no C build
+  step.
+
+### Measurement images
+
+They are not committed: the corpus images are too small to time, and the
+large ones are 30 MB and more each. The commands below make them, with
+ImageMagick 7.1.2-34 and the DejaVu Sans font, and FFmpeg 8.1.3 for the
+animations; running them again gives the same files. They show no people.
+
+| Image | Content | Input |
+|---|---|---:|
+| chart | 1200×800 line chart, 8-colour palette | 6,871 B |
+| logo | 800×800 RGBA, translucent discs | 28,661 B |
+| screenshot | 1920×1080 RGB, a timetable-like page with text | 104,872 B |
+| photo | 3000×2000 RGB, a blurred plasma fractal (photo-like detail) | 4,159,285 B |
+| camera-50mp | 8688×5792 RGB (50.3 MP): the same content at the size of a 50-megapixel camera, just above the pixel budget | 32,287,917 B |
+| photo-budget | 8640×5760 RGB (49.8 MP), cut from camera-50mp to fit the budget | 31,935,714 B |
+| rgba16-budget | 8640×5760 16-bit RGBA, a gradient at constant translucency: a small file that decodes to 398 MB | 420,890 B |
+| noise-rgb | 6000×6000 RGB random noise: the largest file per pixel, near the 128 MiB upload limit | 108,071,441 B |
+| noise-rgba16 | 4000×4000 16-bit RGBA random noise, at the 128 MiB upload limit | 128,079,897 B |
+| photo16x8-budget | photo-budget as 16-bit RGBA at 50 % opacity: each sample's low byte repeats its high one, as in a 16-bit export of an 8-bit photograph | 44,918,152 B |
+| photo16-limit | the plasma photograph at 16-bit RGBA, 50 % opacity and 11 significant bits per sample, just under the 128 MiB upload limit (with all 16 bits it is 222 MB) | 124,468,612 B |
+| apng2-photo16, apng3-photo16 | APNGs of two and three different 16-bit photographs made like photo16x8-budget, each frame the whole canvas, the first the default image: 99.6 and 149.3 megapixels in all, the second just under the 128 MiB upload limit | 93,168,490 B and 120,627,704 B |
+| apng5-rgba16 | an APNG of five 16-bit gradients like rgba16-budget at 50 % to 54 % opacity: 249 megapixels in all, just under the 256 Mi-pixel total of ADR 0033 §4 | 2,041,481 B |
+
+```sh
+# chart: a line chart with axes, quantised to an 8-colour palette.
+magick -size 1200x800 xc:white -fill none -strokewidth 1 -stroke '#7f7f7f' \
+  -draw 'line 100,100 100,700' -draw 'line 100,700 1100,700' \
+  -strokewidth 4 -stroke '#1f77b4' \
+  -draw 'polyline 100,640 250,520 400,580 550,300 700,360 850,200 1000,260 1100,150' \
+  -stroke '#d62728' \
+  -draw 'polyline 100,600 250,610 400,450 550,500 700,420 850,460 1000,380 1100,400' \
+  -colors 8 PNG8:chart.png
+
+# logo: three translucent discs on a transparent canvas.
+magick -size 800x800 xc:none \
+  -fill 'rgba(31,119,180,0.6)' -draw 'circle 300,300 300,80' \
+  -fill 'rgba(214,39,40,0.6)' -draw 'circle 500,300 500,80' \
+  -fill 'rgba(44,160,44,0.6)' -draw 'circle 400,480 400,260' \
+  PNG32:logo.png
+
+# screenshot: a timetable-like page, a grid of cells with subjects and rooms.
+set -- Matematika Történelem Biológia Fizika Kémia Irodalom Angol Német Informatika
+cells=''
+for row in 0 1 2 3 4 5 6 7 8; do
+  for col in 0 1 2 3 4 5; do
+    x=$((120 + col * 290)); y=$((140 + row * 100))
+    cells="$cells stroke #c8c8c8 fill white rectangle $x,$y $((x + 280)),$((y + 90)) stroke none"
+    if [ $(((row + col) % 3)) -ne 0 ]; then
+      eval subject=\${$(((row * 7 + col * 5) % 9 + 1))}
+      cells="$cells fill #1f3864 text $((x + 16)),$((y + 40)) '$subject'"
+      cells="$cells fill #7f7f7f text $((x + 16)),$((y + 72)) '$((100 + row * 10 + col)). terem'"
+    fi
+  done
+done
+magick -size 1920x1080 xc:'#f4f4f4' -font DejaVu-Sans -pointsize 22 \
+  -fill '#1f3864' -draw 'rectangle 0,0 1919,90' \
+  -fill white -pointsize 36 -draw 'text 120,60 "Órarend"' -pointsize 22 \
+  -strokewidth 1 -draw "$cells" PNG24:screenshot.png
+
+# photo: photo-like detail, a blurred plasma fractal.
+magick -seed 14 -size 3000x2000 plasma:fractal -blur 0x2 PNG24:photo.png
+
+# camera-50mp, and photo-budget cut from it.
+magick -seed 14 -size 8688x5792 plasma:fractal -blur 0x2 PNG24:camera-50mp.png
+magick camera-50mp.png -crop 8640x5760+0+0 +repage PNG24:photo-budget.png
+
+# rgba16-budget: a 16-bit vertical gradient at constant 50 % opacity.
+magick -size 8640x5760 gradient:black-white -alpha set -channel A \
+  -evaluate set 50% +channel -depth 16 PNG64:rgba16-budget.png
+
+# noise-rgb and noise-rgba16: random noise, which no filter or compressor
+# shrinks, at the largest sizes the 128 MiB upload limit lets through.
+magick -seed 7 -size 6000x6000 xc: +noise Random -depth 8 PNG24:noise-rgb.png
+magick -seed 7 -size 4000x4000 xc: +noise Random -alpha set -channel A \
+  +noise Random +channel -depth 16 PNG64:noise-rgba16.png
+
+# photo16x8-budget and photo16-limit: 16-bit RGBA at the budget.
+magick photo-budget.png -alpha set -channel A -evaluate set 50% +channel \
+  -depth 16 PNG64:photo16x8-budget.png
+magick -seed 14 -size 8640x5760 plasma:fractal -blur 0x2 -alpha set -channel A \
+  -evaluate set 50% +channel -depth 11 -depth 16 PNG64:photo16-limit.png
+
+# apng2-photo16 and apng3-photo16: full-canvas frames of three different
+# 16-bit photographs. The three-frame file is written at FFmpeg's highest
+# compression, which brings it under the upload limit.
+for i in 1 2 3; do
+  magick -seed $((13 + i)) -size 8640x5760 plasma:fractal -blur 0x2 -alpha set \
+    -channel A -evaluate set 50% +channel -depth 8 -depth 16 PNG64:frame$i.png
+done
+ffmpeg -framerate 1 -i frame%d.png -frames:v 2 -plays 0 -f apng apng2-photo16.png
+ffmpeg -framerate 1 -i frame%d.png -frames:v 3 -plays 0 -pred mixed \
+  -compression_level 9 -f apng apng3-photo16.png
+
+# apng5-rgba16: five full-canvas 16-bit gradients, each at another opacity.
+for i in 1 2 3 4 5; do
+  magick -size 8640x5760 gradient:black-white -alpha set -channel A \
+    -evaluate set $((49 + i))% +channel -depth 16 PNG64:grad$i.png
+done
+ffmpeg -framerate 1 -i grad%d.png -frames:v 5 -plays 0 -f apng apng5-rgba16.png
+```
+
+### Results
+
+Output bytes, with the share of the input, and CPU seconds of one
+optimisation of the image as it is (without the chunk walk). Presets 0 to 2
+of the photographs and the noise images are from the second run:
+
+| Image | oxipng 0 | oxipng 1 | oxipng 2 | oxipng 3 | oxipng 4 | Zopfli | `png` crate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| chart | | 6,096 (89 %), 0.03 s | 5,639 (82 %), 0.08 s | 5,639 (82 %), 0.11 s | 5,087 (74 %), 0.18 s | 4,743 (69 %), 3.0 s | 8,217 (120 %), 0.00 s |
+| logo | | 23,123 (81 %), 0.06 s | 22,913 (80 %), 0.12 s | 22,913 (80 %), 0.20 s | 21,179 (74 %), 0.33 s | 20,422 (71 %), 9.3 s | 27,971 (98 %), 0.01 s |
+| screenshot | | 89,814 (86 %), 0.16 s | 82,404 (79 %), 0.46 s | 82,404 (79 %), 0.66 s | 79,756 (76 %), 1.2 s | 75,369 (72 %), 44 s | 99,895 (95 %), 0.04 s |
+| photo | 4,050,310 (97 %), 0.62 s | 3,654,956 (88 %), 3.6 s | 3,649,171 (88 %), 6.7 s | 3,335,453 (80 %), 16.7 s | 3,334,899 (80 %), 16.3 s | 3,677,620 (88 %), 288 s | 4,177,896 (100.4 %), 5.6 s |
+| camera-50mp | 31,997,355 (99 %), 5.2 s | 28,252,592 (88 %), 32.5 s | 28,117,581 (87 %), 59.0 s | 26,193,029 (81 %), 122.5 s | | | 32,306,225 (100.06 %), 44.8 s |
+| photo-budget | 31,645,564 (99 %), 5.1 s | 27,943,524 (88 %), 32.1 s | 27,792,598 (87 %), 58.0 s | | | | |
+| rgba16-budget | 219,827 (52 %), 3.1 s | 229,803 (55 %), 4.9 s | 219,874 (52 %), 7.4 s | | | | |
+| noise-rgb | 108,015,299 (99.9 %), 3.0 s | 108,015,299 (99.9 %), 5.8 s | 108,015,299 (99.9 %), 8.4 s | | | | |
+| noise-rgba16 | 128,014,964 (99.9 %), 3.5 s | 128,014,964 (99.9 %), 7.2 s | 128,014,964 (99.9 %), 10.2 s | | | | |
+
+Peak resident memory of one optimisation with oxipng preset 2: 11-19 MiB
+for chart, logo and screenshot, 56 MiB for photo, 441 MiB for camera-50mp
+(the `png` crate: 238 MiB), 767 MiB for rgba16-budget and 520-615 MiB for
+the noise images. Preset 0 peaks higher than preset 2 on large photographs
+and noise (7 % on camera-50mp, 19 % on the noise images, at most 734 MiB),
+and the same on rgba16-budget.
+
+The whole optimiser, `optimise_png` (the chunk walk, then oxipng at preset
+2), in a release build of backend3:
+
+| Image | Output | CPU seconds | Peak memory |
+|---|---:|---:|---:|
+| chart | 5,470 B (80 %) | 0.08 | 11 MiB |
+| logo | 22,726 B (79 %) | 0.12 | 12 MiB |
+| screenshot | 82,217 B (78 %) | 0.45 | 19 MiB |
+| photo | 3,648,984 B (88 %) | 6.6 | 60 MiB |
+| photo-budget | 27,792,411 B (87 %) | 57.7 | 468 MiB |
+| rgba16-budget | 219,705 B (52 %) | 7.4 | 767 MiB |
+
+The outputs are a little smaller than oxipng's alone because the chunk walk
+has removed the text, time and background chunks that ImageMagick writes.
+The walk checks every CRC and inflates the image data once to find where
+its stream ends, about a tenth of the time on the photo.
+
+The whole optimiser at the budget and the upload limit, measured on
+2026-10-25 with the same release build: at preset 0, which the default
+effort uses above 6 megapixels, and at the presets the table names. The
+peak is the resident memory of the whole process; it includes the upload,
+which the caller holds while the optimiser runs, so the last column, the
+peak above the upload, is what the optimisation itself adds:
+
+| Image | Preset | Output | CPU seconds | Peak | Above the upload |
+|---|---:|---:|---:|---:|---:|
+| photo-budget | 0 | 31,645,377 B (99 %) | 5.6 | 497 MiB | 465 MiB |
+| rgba16-budget | 0 | 219,658 B (52 %) | 3.3 | 762 MiB | 760 MiB |
+| noise-rgba16 | 2 | 128,014,777 B (99.9 %) | 10.8 | 738 MiB | 613 MiB |
+| photo16x8-budget | 0 | 44,901,525 B (100 %) | 10.4 | 1,076 MiB | 1,031 MiB |
+| photo16x8-budget | 1 | 36,262,568 B (81 %) | 98.7 | 1,026 MiB | 981 MiB |
+| photo16x8-budget | 2 | 36,178,525 B (81 %) | 151.8 | 1,026 MiB | 981 MiB |
+| photo16-limit | 0 | 124,422,861 B (100 %) | 15.3 | 1,484 MiB | 1,363 MiB |
+| photo16-limit | 1 | 117,661,540 B (95 %) | 74.0 | 1,358 MiB | 1,238 MiB |
+| photo16-limit | 2 | 117,726,994 B (95 %) | 110.4 | 1,360 MiB | 1,239 MiB |
+| apng2-photo16 | 0 | 92,850,901 B (99.7 %) | 15.7-17.0 | 1,457 MiB | 1,366 MiB |
+| apng3-photo16 | 0 | 120,197,575 B (99.6 %) | 20.7 | 1,536 MiB | 1,419 MiB |
+| apng5-rgba16 | 0 | 2,033,936 B (99.6 %) | 19.0-21.2 | 1,147 MiB | 1,143 MiB |
+
+Memory follows the decoded size first: oxipng holds the decoded image and
+filtered copies of it, eight bytes a pixel for 16-bit RGBA against three
+for 8-bit RGB. The file adds to it as well, through the rewrite and
+oxipng's compressed candidates, which is why photo16-limit, at 124 MB,
+adds about 330 MiB more than photo16x8-budget, of the same size in
+pixels. An
+animation adds a frame's working copies to the decoded default image,
+which oxipng keeps while it recompresses each frame in turn, so the peak
+grows with the size of one frame and the length of the file, not with the
+number of frames: five frames of rgba16-budget peak 380 MiB above the
+still image, three 16-bit photographs only 50 MiB above two.
+
+### At the pixel budget
+
+- **Memory.** One optimisation of an image at the budget peaks at about
+  470 MiB above the upload for an 8-bit RGB photograph and 760 MiB to
+  1,370 MiB for 16-bit RGBA, the more the larger its file. The largest
+  measured is an animation: apng3-photo16, three 16-bit photographs in
+  120.6 MB, peaks 1,419 MiB above the upload and 1,536 MiB with it. These
+  are the PNG worst case at the budget and the 128 MiB upload limit (the
+  table above). ADR 0015 §7 runs one optimisation at a time per process.
+  The maintainer's answer to D81 (research: DECISIONS R15) keeps a high
+  memory limit from the measured worst case and a request well below it;
+  these figures are the PNG part of that worst case. The preset changes
+  them little: preset 0 peaks 5-10 % above preset 2 on the 16-bit
+  photographs.
+- **Time.** oxipng's time grows with the decoded size, so the widest
+  pixels cost the most: at preset 2, about 3.05 CPU seconds per megapixel
+  for photo16x8-budget, 2.2 for photo16-limit and 1.16 for an 8-bit RGB
+  photograph; random noise, the largest file per pixel, costs less than
+  0.65, because libdeflate gives up on it quickly. ADR 0015 §7 answers the
+  upload only when the final bytes are in place, one optimisation at a
+  time, and ADR 0023 §5 gives `/api/admin` a 120-second router timeout, so
+  at preset 2 photo-budget's 58 CPU seconds, and photo16x8-budget's 152,
+  would leave no room for the upload's transfer, a second upload waiting
+  behind the first, or slower cores on the node.
+
+### Choice of the preset and the default threshold
+
+The maintainer's answer to D82 (research: DECISIONS R15, ADR 0033 §5) is
+preset 2 below a pixel-count threshold and a cheaper preset, 1 or lower,
+above it, with the threshold set on the node. The default, which holds
+until that measurement, is derived from the figures above:
+
+1. One upload's 120 seconds must hold its transfer and two optimisations:
+   its own and the one it may wait for behind the semaphore. Leaving about
+   20 seconds for the transfer, each optimisation gets about 50 seconds on
+   the node.
+2. The node's cores are not known; assumed twice as slow as this desktop,
+   one optimisation gets about **25 CPU seconds here**.
+3. Preset 2 reaches 25 seconds at about 8 megapixels of the costliest
+   pixels measured, 16-bit RGBA (photo16x8-budget, 3.05 CPU seconds per
+   megapixel), and at about 21 megapixels of an 8-bit RGB photograph.
+   Preset 1 takes 32 to 99 seconds at the budget, above 25, so the cheaper
+   preset is **0**, which takes at most about 21 seconds at the budget and
+   the upload limit: 15.3 for photo16-limit and 19.0 to 21.2 for the
+   249-megapixel apng5-rgba16.
+4. The threshold is **6,000,000 pixels**, a margin below 8 megapixels for
+   the noise of these figures and for content costlier than the measured
+   photographs: preset 2 then takes at most about 18 seconds. It keeps
+   preset 2 for screenshots up to 1440p (3.7 megapixels) and for
+   photographs up to 6 megapixels.
+
+A threshold derived from the 8-bit RGB photograph alone would be about 16
+megapixels, but a 16-bit RGBA image of that size takes about 49 CPU
+seconds at preset 2 here, twice the share of step 2.
+
+The price is size above the threshold: preset 0 leaves a photograph at
+99-100 % of its size, where preset 2 reaches 80-95 %, and graphics lose
+part of their saving (at preset 0 the screenshot keeps 94 % of its size
+instead of 78 %, the chart 92 % instead of 80 % and the logo 82 % instead
+of 79 %); gradients and noise come out the same at both. On
+the node, k8s-backend3-deploy times presets 0 to 2 on photo-budget,
+photo16x8-budget and apng3-photo16, sets `PNG_PRESET_THRESHOLD_PIXELS`
+(read by `config/production.yaml`) to the pixel count at which preset 2
+takes about a quarter of the timeout there for the costliest of them, and
+may raise the cheaper preset to 1 if its time at the budget fits the same
+share. Preset 2 below the threshold is fixed by ADR 0033 §5.
+`PngEffort::new` refuses a threshold of 0 and a cheaper preset above 1,
+and the server stops at boot with the key and what to change.
+
+An animated PNG counts the pixels of every kept frame, since the encoder
+recompresses each one. At the animation totals of ADR 0033 §4, which the
+maintainer kept for APNG at the WebP and GIF values (D102, research:
+DECISIONS R16), apng5-rgba16, 249 megapixels in five frames, took 19.0 to
+21.2 CPU seconds at preset 0, inside the 25 seconds of step 2; the 16-bit
+photographs, the costliest pixels at preset 0 (0.31 CPU seconds a
+megapixel for photo16-limit), fit the upload limit only three frames at a
+time, 149 megapixels and 20.7 seconds. The node timing above, which
+includes apng3-photo16, shows whether that holds on the node.
+
+### The other candidates
+
+- The `png` crate cannot reduce colour type, bit depth or palette, so it
+  wrote files larger than the input for the chart and both photos. Under
+  the "never larger" rule backend3 would then keep the input's image data,
+  so the pure-Rust path optimises much less for the same CPU time. It saves
+  about 6 CPU seconds of build.
+- Zopfli is 9-16 % smaller than libdeflate on graphics but 40-100 times
+  slower, and larger on the photo; inside an upload request that is too
+  slow.
+- Preset 3 equals preset 2 on these graphics, and preset 4 is 3-10 %
+  smaller at 2.3-2.8 times the CPU time, still under two seconds. On the
+  photo both are 9 % smaller at about 2.5 times the CPU time; at the budget
+  that is 122.5 seconds on camera-50mp (7 % smaller), past the 120-second
+  timeout even on this desktop. Preset 1 halves preset 2's time for 1-9 %
+  larger graphics.
+- The C build step is libdeflate's 11 C files, compiled by the `gcc` that
+  the Containerfile's rust stage already installs, so the Containerfile
+  does not change; a local `podman build` of it compiles libdeflate in the
+  UBI 9 stage. libdeflate picks its SIMD code paths at run time from the
+  CPU it runs on, so the binary keeps the default target (ADR 0022 §2).
+
+Cold release build of the candidate alone (three runs for oxipng and `png`):
+
+| Candidate | Crates compiled | CPU seconds |
+|---|---:|---:|
+| oxipng, default features off | 14 (oxipng, libdeflater, libdeflate-sys, rgb, bytemuck, indexmap and the build tools) | 10.4-10.9 |
+| oxipng with Zopfli | 17 | 12.8 |
+| `png` crate | 12 | 4.7-5.1 |
+
+A cold release build of the whole of backend3 took 874 CPU seconds before
+oxipng was added and 852 after it, while other builds loaded the machine:
+the difference is inside the noise. Until the first `master` BuildRun
+after this change, the isolated figure above, about 11 CPU seconds or
+1.3 % of the whole build, is the estimate of the cost on the hub.
+
+### What the optimiser does with a PNG
+
+`optimise_png` first rewrites the upload from the parts that ADR 0015 §7
+and ADR 0033 §6 keep, then lets oxipng re-encode that rewrite. For a still
+image the rules follow what libpng 1.6.58 does with each chunk; libpng does
+not decode animations, so the animation follows the PNG specification
+(third edition) as the `png` crate, Chromium's PNG decoder, reads it. The
+module documentation of `src/domain/image_optimise/png/chunks.rs` and
+`png/apng.rs` lists the rules one by one, with the few places where the
+walk is stricter.
+
+- **Kept:** `IHDR`, `PLTE` (for indexed colour; cut to the entries the bit
+  depth can index), the first valid `tRNS` (the transparency of the
+  pixels; its samples masked to the bit depth, as PNG requires of
+  decoders), the image data, and the first valid `sRGB`, `gAMA`, `cHRM`,
+  `cICP`, `mDCV` and `cLLI` and the first `iCCP` before `PLTE` and the
+  data, where PNG places them. The HDR chunks are kept byte for byte when
+  libpng takes them: `cICP` with matrix coefficients 0 (PNG holds RGB
+  only) and a full-range flag of 0 or 1, and `mDCV` and `cLLI` with light
+  levels up to 2³¹ − 1. An `iCCP` is kept only if its profile passes
+  libpng's checks: an ICC profile of its declared size, at most 8,000,000
+  bytes, whose tags lie inside it, in the colour space of the colour type.
+  The profile is kept byte for byte; oxipng may recompress its zlib
+  stream. The first `eXIf` before the data is read as ADR 0033 §3 reads
+  the EXIF Orientation and rewritten as the TIFF structure of that tag
+  alone, 26 bytes or the 22-byte form for a shorter original, or dropped
+  when it has no valid Orientation.
+- **Animation:** an APNG keeps every frame with its `fcTL` up to the
+  animation's first defect; each frame's data is checked to decode to
+  exactly the frame's size, cut at the end of its zlib stream, written as
+  one `fdAT` and recompressed by oxipng like `IDAT`, with the sequence
+  numbers counted again. Every frame lies inside the canvas, which the
+  pixel budget bounds, so no frame is larger than the budget allows.
+- **A broken animation** (ADR 0033 §6, D103, "Keep the frames before the
+  defect"): the file is first checked as a still PNG is, so a file cut
+  short inside its animation, or whose default image does not decode, is
+  refused as corrupt whatever its frames hold, except that an animation
+  above the totals (below) is refused for its totals even when its
+  default image does not decode, since they are counted first. Otherwise
+  the first defect of the animation, in file order, decides what is kept:
+  a sequence number
+  that is not the next one, an `fcTL` of the wrong size or values, a
+  frame outside the canvas, a misplaced `fdAT`, a frame without one,
+  an animation chunk lost to its CRC, or frame data that is not one zlib
+  stream of exactly the frame's rows with known filter types, among the
+  rest the module lists. The frame it lies in is dropped with every later
+  frame, and the frames before it are kept; one that lies in no frame,
+  such as an `fdAT` right after the image data, keeps the frames that
+  ended before it. At most as many frames as `acTL` announces are kept,
+  and a frame past that number is no defect. The stored `acTL` announces
+  the frames kept, with the upload's play count; when none is left, the
+  animation chunks are dropped and the still default image is stored.
+  Visitors see the frames that Chromium and Firefox both show before the
+  damage. A chunk outside the animation is judged by the still-image
+  rules wherever it stands, between the frames too, and never cuts the
+  animation: an `IDAT` after the first run, or a `PLTE` of an image that
+  is not indexed that is not 3 to 768 bytes long, follows another or does
+  not match its CRC, is dropped, as libpng ignores it. The `png` crate
+  stops at each of these, so on such a file the stored animation plays
+  frames past the point where Chromium stops on the upload; they are the
+  upload's own frames, and the stored file decodes in full.
+- **The totals:** an animation whose kept frames, counted from the chunks
+  alone, are more than 4096 or hold more than 256 Mi pixels with the
+  default image is refused from its frame headers before any image data
+  is inflated, the default image's included (only the first `iCCP`
+  profile may have been inflated by then), as an animated WebP or GIF
+  above those totals is (`ImageError::AnimationTooLarge`; D102). A frame
+  whose data then turns out not to decode still counts. The walk checks the
+  frame chunks as it reads them and copies a frame's data only while the
+  frames up to it are within the totals, so a file of many frame chunks
+  costs no more memory than its own size.
+- **Dropped:** every other chunk, including text, time, physical size,
+  background and significant-bit, and private or unknown ancillary
+  chunks; a truecolour image's suggested palette, which still places the
+  colour chunks where libpng takes it; colour, HDR, `tRNS` and `eXIf`
+  chunks that are misplaced, repeated or malformed, which decoders ignore;
+  an `iCCP` after the first,
+  unread, so that an upload costs at most one profile of inflate work;
+  image data after the first run of `IDAT`; everything after `IEND`; and
+  the bytes after the end of the zlib stream of the image data, a frame or
+  the profile.
+- **Refused** as not decodable, as libpng refuses them: a cut-short file or
+  one without `IEND`, a critical chunk with a wrong CRC or an unknown type,
+  a second `IHDR` or a second palette of an indexed image, an indexed image
+  without a valid palette before its data, an empty suggested palette
+  where libpng would take one, and image data that is not one zlib stream
+  (its Adler-32 included) of the declared size or has a row of an unknown
+  filter type. Image data that decodes to more than the declared size is
+  refused too, where libpng only warns: the extra decoded bytes are data no
+  viewer shows. libpng only warns about a wrong CRC on `IEND` and on the
+  palette of an image that is not indexed, and so does the walk.
+- **The stored bytes** are oxipng's output whenever it is no larger than
+  the upload. oxipng runs with `force`, so it always writes its own
+  encoding rather than handing back the rewrite when it cannot beat the
+  rewrite's image data. Only when its output is larger than the upload,
+  because the upload was compressed harder than the preset compresses, is
+  the rewrite stored: written chunk by chunk, with the upload's own image
+  data and frame streams, checked to decode to exactly the image and cut
+  where each stream ends. The rewrite is never larger than the upload, so
+  neither is the result.
+- **oxipng's settings:** `StripChunks::None`, so it keeps the rewrite's
+  chunks (recompressing only the profile, whose name it then sets to
+  `icc`, and the frames): other settings would let it replace an sRGB-like
+  profile by `sRGB`, or drop `iCCP` when `sRGB` is also present, although
+  PNG gives `iCCP` precedence. oxipng 10.2.1 keeps a 16-bit `tRNS` value
+  when it reduces an image to 8 bits, so a transparent colour that matched
+  no pixel would match some; when the kept `tRNS` of a 16-bit image has a
+  sample whose two bytes differ, its bit-depth reduction is turned off.
+  oxipng knows `iCCP` and `sRGB` but not `cICP`, so greyscale reduction is
+  turned off when `cICP` is kept. With `acTL` present, oxipng itself turns
+  off every reduction and interlacing change, since the frames share the
+  format of `IHDR`.
+- **Never changed:** the format, the width, the height, every decoded
+  pixel and every kept frame with its timing, offset, disposal and
+  blending.
+  oxipng may change the colour type, bit depth, palette order, filters and
+  interlacing (it removes Adam7) of a still image, which are encoding
+  choices.

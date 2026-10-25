@@ -42,7 +42,12 @@ One folder per format, plus `over-budget/`.
 | `png/rgba-interlaced.png` | 8-bit truecolour with alpha, Adam7 interlaced |
 | `png/palette.png` | 8-bit indexed colour |
 | `png/grey16.png` | 16-bit greyscale |
-| `png/animated.png` | Animated PNG (`acTL`, `fcTL`, `fdAT`) |
+| `png/animated.png` | Animated PNG (`acTL`, `fcTL`, `fdAT`): three frames, the first of them the default image |
+| `png/animated-metadata.png` | `animated.png` with a `tEXt` comment and an `eXIf` that holds Orientation 6 and an invented camera make |
+| `png/metadata.png` | 8-bit truecolour with `cHRM`, `bKGD`, `pHYs`, a `tEXt` comment and an `eXIf` that holds Orientation 6, a camera make, a body serial number and a GPS position, all invented |
+| `png/icc-profile.png` | 8-bit truecolour with an `iCCP` chunk holding an invented 464-byte display profile, `cHRM`, and the same profile again as text in `zTXt`, as ImageMagick writes it |
+| `png/payload.png` | `rgb.png` with a private chunk (`prVt`) before the image data and an HTML snippet after `IEND` |
+| `png/hdr.png` | 16-bit truecolour with the HDR colour chunks of the PNG third edition, all values invented: `cICP` (BT.2020 primaries, the PQ transfer, full range), `mDCV` (a BT.2020 mastering display of 1000 cd/m²) and `cLLI`, and a `tEXt` comment |
 | `gif/still.gif` | GIF89a, one frame |
 | `gif/gif87a.gif` | GIF87a |
 | `gif/animated.gif` | GIF89a, three frames and a loop extension |
@@ -110,6 +115,69 @@ frames() { magick \( -size 67x41 gradient:'#1f6f8b-#f2c14e' \) \( -size 67x41 gr
 frames gif/animated.gif
 frames -quality 80 webp/animated.webp
 ffmpeg -i gif/animated.gif -map_metadata -1 -fflags +bitexact -flags +bitexact -plays 0 -f apng png/animated.png
+
+# png/metadata.png: a comment, a density and invented EXIF fields (exiv2 0.28.9).
+draw -set comment 'backend3 test corpus' -density 72 $png PNG24:png/metadata.png
+exiv2 -M'set Exif.Image.Orientation Short 6' -M'set Exif.Image.Make Ascii backend3' \
+  -M'set Exif.Photo.BodySerialNumber Ascii 0000000000' \
+  -M'set Exif.GPSInfo.GPSLatitudeRef Ascii N' -M'set Exif.GPSInfo.GPSLatitude Rational 1/1 2/1 3/1' \
+  -M'set Exif.GPSInfo.GPSLongitudeRef Ascii E' -M'set Exif.GPSInfo.GPSLongitude Rational 4/1 5/1 6/1' \
+  png/metadata.png
+
+# png/icc-profile.png: an ICC v2.1 display profile written by hand (sRGB
+# primaries, gamma 2.2, description "backend3 test"), attached by ImageMagick.
+# -strip would remove iCCP too, so only the date, time and bKGD are excluded.
+{ printf '\x00\x00\x01\xd0\x00\x00\x00\x00\x02\x10\x00\x00mntrRGB XYZ '
+  printf '\x07\xea\x00\x0a\x00\x19\x00\x00\x00\x00\x00\x00acsp'
+  printf '\x00%.0s' $(seq 1 28)
+  printf '\x00\x00\xf6\xd6\x00\x01\x00\x00\x00\x00\xd3\x2d'
+  printf '\x00%.0s' $(seq 1 48)
+  printf '\x00\x00\x00\x09'
+  printf 'desc\x00\x00\x00\xf0\x00\x00\x00\x68cprt\x00\x00\x01\x58\x00\x00\x00\x16'
+  printf 'wtpt\x00\x00\x01\x70\x00\x00\x00\x14rXYZ\x00\x00\x01\x84\x00\x00\x00\x14'
+  printf 'gXYZ\x00\x00\x01\x98\x00\x00\x00\x14bXYZ\x00\x00\x01\xac\x00\x00\x00\x14'
+  printf 'rTRC\x00\x00\x01\xc0\x00\x00\x00\x0egTRC\x00\x00\x01\xc0\x00\x00\x00\x0e'
+  printf 'bTRC\x00\x00\x01\xc0\x00\x00\x00\x0e'
+  printf 'desc\x00\x00\x00\x00\x00\x00\x00\x0ebackend3 test\x00'
+  printf '\x00%.0s' $(seq 1 78)
+  printf 'text\x00\x00\x00\x00AGPL-3.0-only\x00\x00\x00'
+  printf 'XYZ \x00\x00\x00\x00\x00\x00\xf6\xd6\x00\x01\x00\x00\x00\x00\xd3\x2d'
+  printf 'XYZ \x00\x00\x00\x00\x00\x00\x6f\xa2\x00\x00\x38\xf5\x00\x00\x03\x90'
+  printf 'XYZ \x00\x00\x00\x00\x00\x00\x62\x99\x00\x00\xb7\x85\x00\x00\x18\xda'
+  printf 'XYZ \x00\x00\x00\x00\x00\x00\x24\xa0\x00\x00\x0f\x84\x00\x00\xb6\xcf'
+  printf 'curv\x00\x00\x00\x00\x00\x00\x00\x01\x02\x33\x00\x00'; } > corpus.icc
+draw -profile corpus.icc -define png:exclude-chunks=date,time,bKGD PNG24:png/icc-profile.png
+
+# png/payload.png: rgb.png with a prVt chunk spliced in after IHDR (its CRC
+# from coreutils cksum) and an HTML snippet appended after IEND.
+crc=$(printf 'prVtbackend3 test data' | cksum -a crc32b --raw | od -An -tx1 | tr -d ' \n' | sed 's/../\\x&/g')
+{ head -c 33 png/rgb.png
+  printf '\x00\x00\x00\x12prVtbackend3 test data'; printf "$crc"
+  tail -c +34 png/rgb.png
+  printf '<html><body>backend3 test payload after IEND</body></html>\n'; } > png/payload.png
+
+# png/animated-metadata.png and png/hdr.png: chunks spliced in after IHDR
+# (the first 33 bytes). chunk() writes a chunk: its length, type, data and
+# CRC (coreutils cksum).
+chunk() {
+  printf "$(printf '%08x' "$(stat -c %s "$2")" | sed 's/../\\x&/g')"
+  printf '%s' "$1"; cat "$2"
+  { printf '%s' "$1"; cat "$2"; } | cksum -a crc32b --raw
+}
+printf 'Comment\0backend3 test corpus' > text.bin
+# EXIF, little-endian: IFD0 with Make "backend3" and Orientation 6.
+printf 'II*\0\x08\0\0\0\x02\0\x0f\x01\x02\0\x09\0\0\0\x26\0\0\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0backend3\0' > exif.bin
+{ head -c 33 png/animated.png; chunk tEXt text.bin; chunk eXIf exif.bin
+  tail -c +34 png/animated.png; } > png/animated-metadata.png
+# cICP: primaries 9 (BT.2020), transfer 16 (PQ), matrix 0, full range.
+# mDCV: the BT.2020 primaries and D65 in units of 0.00002, 1000 cd/m² and
+# 0.0001 cd/m² in units of 0.0001 cd/m². cLLI: 1000 and 400 cd/m².
+draw -strip -depth 16 $png PNG48:hdr-base.png
+printf '\x09\x10\x00\x01' > cicp.bin
+printf '\x8a\x48\x39\x08\x21\x34\x9b\xaa\x19\x96\x08\xfc\x3d\x13\x40\x42\x00\x98\x96\x80\x00\x00\x00\x01' > mdcv.bin
+printf '\x00\x98\x96\x80\x00\x3d\x09\x00' > clli.bin
+{ head -c 33 hdr-base.png; chunk cICP cicp.bin; chunk mDCV mdcv.bin; chunk cLLI clli.bin
+  chunk tEXt text.bin; tail -c +34 hdr-base.png; } > png/hdr.png
 
 # jpeg/exif-orientation.jpg: baseline.jpg with an APP1 segment spliced in after
 # its 18-byte APP0 segment: "Exif\0\0", a little-endian TIFF header and one IFD

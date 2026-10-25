@@ -101,3 +101,12 @@ settings:
     # refuses it." Production reads its own key from TOTP_ENCRYPTION_KEY,
     # with no default, and refuses this one at boot (ADR 0034 §3).
     totp_encryption_key: "YmFja2VuZDMgVE9UUCBlbmNyeXB0aW9uIGtleTogcHVibGljIGFuZCB0aHJvd2F3YXksIGZvciBkZXZlbG9wbWVudCwgdGVzdCBhbmQgZTJlIG9ubHk7IHByb2R1Y3Rpb24gcmVmdXNlcyBpdC4="
+  # How uploaded images are optimised (ADR 0015 §7, ADR 0033). `png`: the
+  # oxipng preset by image size (ADR 0033 §5), preset 2 up to
+  # `threshold_pixels` pixels and the cheaper `large_preset` (0 or 1) above;
+  # the default derived in src/domain/image_optimise/png/effort.rs. Checked
+  # at boot.
+  image_optimisation:
+    png:
+      threshold_pixels: 6000000
+      large_preset: 0

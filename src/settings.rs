@@ -22,13 +22,18 @@
 //! settings keep only the derived cipher key, never the configured value.
 //! Production also refuses the public throwaway key of the local
 //! environments ([`Settings::refuse_published_keys`], ADR 0034 §3).
+//!
+//! The PNG encoder effort (`settings.image_optimisation.png`, ADR 0033 §5)
+//! is checked here in full, through [`PngEffort::new`], so a value that would
+//! break the rule stops the boot with a message that names the key and says
+//! what to change, before any upload is optimised with it.
 
 use std::{net::IpAddr, path::PathBuf};
 
 use loco_rs::environment::Environment;
 use serde::{Deserialize, Deserializer, de::Error as _};
 
-use crate::domain::totp_secret::TotpEncryptionKey;
+use crate::domain::{image_optimise::PngEffort, totp_secret::TotpEncryptionKey};
 
 /// The root key of the section in `config/<env>.yaml`.
 pub const SETTINGS_KEY: &str = "settings";
@@ -43,6 +48,8 @@ pub struct Settings {
     pub metrics: MetricsSettings,
     /// Admin sign-in (ADR 0006 §6, §8).
     pub admin_auth: AdminAuthSettings,
+    /// How uploaded images are optimised (ADR 0015 §7, ADR 0033).
+    pub image_optimisation: ImageOptimisationSettings,
 }
 
 /// Settings of admin sign-in (ADR 0006).
@@ -137,14 +144,54 @@ pub const METRICS_BINDING_KEY: &str = "settings.metrics.binding";
 /// The full key of [`MetricsSettings::port`], for error messages.
 pub const METRICS_PORT_KEY: &str = "settings.metrics.port";
 
+/// How uploaded images are optimised (ADR 0015 §7, ADR 0033). The upload
+/// code passes these values to the optimisers; nothing in
+/// `src/domain/image_optimise/` reads them itself (ADR 0008).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageOptimisationSettings {
+    /// The oxipng presets by image size (ADR 0033 §5): `threshold_pixels`,
+    /// up to which preset 2 is used, and `large_preset`, the cheaper preset
+    /// above it, checked by [`PngEffort::new`]. The production value comes
+    /// from a measurement on the production node.
+    #[serde(deserialize_with = "png_effort")]
+    pub png: PngEffort,
+}
+
+/// The full key of [`ImageOptimisationSettings::png`], for error messages.
+pub const IMAGE_OPTIMISATION_PNG_KEY: &str = "settings.image_optimisation.png";
+
+/// The keys of `settings.image_optimisation.png`, as written in the YAML.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PngEffortFields {
+    /// [`PngEffort::threshold_pixels`].
+    threshold_pixels: u64,
+    /// [`PngEffort::large_preset`].
+    large_preset: u8,
+}
+
+/// Reads `settings.image_optimisation.png` and checks it with
+/// [`PngEffort::new`]. The error goes back through serde, so
+/// [`Settings::from_section`] reports it at the key's full path, with
+/// [`PngEffortError`](crate::domain::image_optimise::PngEffortError)'s
+/// message on what to change.
+///
+/// - `deserializer`: the deserializer at that key.
+fn png_effort<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PngEffort, D::Error> {
+    let fields = PngEffortFields::deserialize(deserializer)?;
+    PngEffort::new(fields.threshold_pixels, fields.large_preset).map_err(D::Error::custom)
+}
+
 /// Why the `settings:` section could not be turned into [`Settings`].
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
     /// The configuration has no `settings:` section at all.
     #[error(
         "the configuration has no `settings:` section; backend3 needs at least \
-         {ADMIN_UI_DIST_DIR_KEY}, {METRICS_BINDING_KEY}, {METRICS_PORT_KEY} and \
-         {TOTP_ENCRYPTION_KEY_KEY} (see config/test.yaml for an example)"
+         {ADMIN_UI_DIST_DIR_KEY}, {METRICS_BINDING_KEY}, {METRICS_PORT_KEY}, \
+         {TOTP_ENCRYPTION_KEY_KEY} and {IMAGE_OPTIMISATION_PNG_KEY} (see config/test.yaml for \
+         an example)"
     )]
     Missing,
     /// A key is missing, unknown or has the wrong type.
@@ -199,8 +246,9 @@ impl Settings {
     /// Returns a [`SettingsError`] naming the offending key when the section
     /// is missing, has an unknown or missing key, a value of the wrong type
     /// (a metrics binding that is not an IP address and a metrics port above
-    /// 65535 included), an empty `dist_dir`, metrics port 0, or a TOTP
-    /// encryption key that is not base64 of at least 64 bytes.
+    /// 65535 included), an empty `dist_dir`, metrics port 0, a TOTP
+    /// encryption key that is not base64 of at least 64 bytes, or a PNG
+    /// effort that [`PngEffort::new`] refuses.
     pub fn from_section(section: Option<&serde_json::Value>) -> Result<Self, SettingsError> {
         let section = section.ok_or(SettingsError::Missing)?;
         let settings: Self =
@@ -295,19 +343,42 @@ mod tests {
         json!({ "totp_encryption_key": PUBLISHED_LOCAL_KEY })
     }
 
+    /// The `image_optimisation` value of the committed configuration files.
+    fn image_optimisation() -> Value {
+        json!({ "png": png() })
+    }
+
+    /// The PNG effort of the committed configuration files.
+    fn png() -> Value {
+        json!({ "threshold_pixels": 6_000_000, "large_preset": 0 })
+    }
+
     /// A complete section with the given admin UI directory and metrics
-    /// sub-section.
+    /// sub-section, the local environments' TOTP key and the committed
+    /// image optimisation values.
     fn section(dist_dir: &str, metrics: &Value) -> Value {
+        with_png(dist_dir, metrics, &png())
+    }
+
+    /// A complete section with the given admin UI directory, metrics
+    /// sub-section and PNG effort.
+    fn with_png(dist_dir: &str, metrics: &Value, png: &Value) -> Value {
         json!({
             "admin_ui": { "dist_dir": dist_dir },
             "metrics": metrics,
             "admin_auth": admin_auth(),
+            "image_optimisation": { "png": png },
         })
     }
 
     /// A complete section whose `admin_ui` value is `admin_ui`.
     fn with_admin_ui(admin_ui: &Value) -> Value {
-        json!({ "admin_ui": admin_ui, "metrics": metrics(), "admin_auth": admin_auth() })
+        json!({
+            "admin_ui": admin_ui,
+            "metrics": metrics(),
+            "admin_auth": admin_auth(),
+            "image_optimisation": image_optimisation(),
+        })
     }
 
     /// A complete section with the TOTP key replaced by `key`.
@@ -316,6 +387,7 @@ mod tests {
             "admin_ui": { "dist_dir": "x" },
             "metrics": metrics(),
             "admin_auth": { "totp_encryption_key": key },
+            "image_optimisation": image_optimisation(),
         })
     }
 
@@ -349,6 +421,9 @@ mod tests {
                     totp_encryption_key: TotpEncryptionKey::from_base64(PUBLISHED_LOCAL_KEY)
                         .expect("valid"),
                 },
+                image_optimisation: ImageOptimisationSettings {
+                    png: PngEffort::DEFAULT,
+                },
             }
         );
     }
@@ -363,6 +438,7 @@ mod tests {
             METRICS_BINDING_KEY,
             METRICS_PORT_KEY,
             TOTP_ENCRYPTION_KEY_KEY,
+            IMAGE_OPTIMISATION_PNG_KEY,
         ] {
             assert!(message.contains(key), "{message}");
         }
@@ -386,13 +462,18 @@ mod tests {
                     "admin_ui": { "dist_dir": "x" },
                     "metrics": metrics(),
                     "admin_auth": admin_auth(),
+                    "image_optimisation": image_optimisation(),
                     "admin_uii": {},
                 }),
                 "settings.admin_uii",
             ),
             (json!("text"), "settings"),
             (
-                json!({ "admin_ui": { "dist_dir": "x" }, "admin_auth": admin_auth() }),
+                json!({
+                    "admin_ui": { "dist_dir": "x" },
+                    "admin_auth": admin_auth(),
+                    "image_optimisation": image_optimisation(),
+                }),
                 "settings",
             ),
             (section("x", &json!({ "port": 9464 })), "settings.metrics"),
@@ -413,12 +494,22 @@ mod tests {
                 section("x", &json!({ "binding": "::1", "port": 1, "path": "/" })),
                 "settings.metrics.path",
             ),
+            // No admin_auth.
             (
-                json!({ "admin_ui": { "dist_dir": "x" }, "metrics": metrics() }),
+                json!({
+                    "admin_ui": { "dist_dir": "x" },
+                    "metrics": metrics(),
+                    "image_optimisation": image_optimisation(),
+                }),
                 "settings",
             ),
             (
-                json!({ "admin_ui": { "dist_dir": "x" }, "metrics": metrics(), "admin_auth": {} }),
+                json!({
+                    "admin_ui": { "dist_dir": "x" },
+                    "metrics": metrics(),
+                    "admin_auth": {},
+                    "image_optimisation": image_optimisation(),
+                }),
                 "settings.admin_auth",
             ),
             (
@@ -426,10 +517,68 @@ mod tests {
                     "admin_ui": { "dist_dir": "x" },
                     "metrics": metrics(),
                     "admin_auth": { "totp_encryption_key": PUBLISHED_LOCAL_KEY, "extra": 1 },
+                    "image_optimisation": image_optimisation(),
                 }),
                 "settings.admin_auth.extra",
             ),
             (with_totp_key(&json!("")), TOTP_ENCRYPTION_KEY_KEY),
+        ];
+        for (section, expected_path) in cases {
+            let (path, message) = invalid(&section);
+            assert_eq!(path, expected_path, "{section}: {message}");
+        }
+    }
+
+    #[test]
+    fn image_optimisation_errors_name_the_full_key_path() {
+        let cases = [
+            // No image_optimisation.
+            (
+                json!({
+                    "admin_ui": { "dist_dir": "x" },
+                    "metrics": metrics(),
+                    "admin_auth": admin_auth(),
+                }),
+                "settings",
+            ),
+            (
+                with_png("x", &metrics(), &json!({ "threshold_pixels": 1 })),
+                "settings.image_optimisation.png",
+            ),
+            (
+                with_png(
+                    "x",
+                    &metrics(),
+                    &json!({ "threshold_pixels": 1, "large_preset": 0, "level": 3 }),
+                ),
+                "settings.image_optimisation.png.level",
+            ),
+            (
+                with_png(
+                    "x",
+                    &metrics(),
+                    &json!({ "threshold_pixels": -1, "large_preset": 0 }),
+                ),
+                "settings.image_optimisation.png.threshold_pixels",
+            ),
+            (
+                with_png(
+                    "x",
+                    &metrics(),
+                    &json!({ "threshold_pixels": 1, "large_preset": 300 }),
+                ),
+                "settings.image_optimisation.png.large_preset",
+            ),
+            // Preset 2 below the threshold is fixed (ADR 0033 §5), so the
+            // key that set it in earlier drafts is unknown.
+            (
+                with_png(
+                    "x",
+                    &metrics(),
+                    &json!({ "threshold_pixels": 1, "preset": 3, "large_preset": 0 }),
+                ),
+                "settings.image_optimisation.png.preset",
+            ),
         ];
         for (section, expected_path) in cases {
             let (path, message) = invalid(&section);
@@ -556,6 +705,7 @@ mod tests {
             "admin_ui": { "dist_dir": "x" },
             "metrics": metrics(),
             "admin_auth": admin_auth(),
+            "image_optimisation": image_optimisation(),
             "admin_uii": {},
         });
         let message = Settings::from_section(Some(&section))
@@ -584,6 +734,32 @@ mod tests {
         let error = Settings::from_section(Some(&section)).expect_err("port 0");
         assert!(matches!(error, SettingsError::MetricsPortZero));
         assert!(error.to_string().contains(METRICS_PORT_KEY), "{error}");
+    }
+
+    #[test]
+    fn the_png_effort_is_checked_at_its_key() {
+        // Each rule of PngEffort::new, reported at the key with its message.
+        for (png, message) in [
+            (
+                json!({ "threshold_pixels": 0, "large_preset": 0 }),
+                "threshold_pixels is 0",
+            ),
+            (
+                json!({ "threshold_pixels": 1, "large_preset": 2 }),
+                "large_preset is 2",
+            ),
+        ] {
+            let (path, found) = invalid(&with_png("x", &metrics(), &png));
+            assert_eq!(path, IMAGE_OPTIMISATION_PNG_KEY, "{png}");
+            assert!(found.starts_with(message), "{png}: {found}");
+        }
+        // A valid value other than the default is taken as it is.
+        let png = json!({ "threshold_pixels": 8_000_000, "large_preset": 1 });
+        let settings = Settings::from_section(Some(&with_png("x", &metrics(), &png))).unwrap();
+        assert_eq!(
+            settings.image_optimisation.png,
+            PngEffort::new(8_000_000, 1).unwrap()
+        );
     }
 
     #[test]
@@ -632,6 +808,24 @@ mod tests {
             // Any key but the published one starts in production too.
             prop_assume!(bytes != PUBLISHED_LOCAL_KEY_TEXT);
             prop_assert!(settings.refuse_published_keys(&Environment::Production).is_ok());
+        }
+
+        #[test]
+        fn the_png_effort_is_taken_exactly_when_png_effort_new_takes_it(
+            threshold in any::<u64>(),
+            large_preset in any::<u8>(),
+        ) {
+            let png = json!({ "threshold_pixels": threshold, "large_preset": large_preset });
+            let parsed = Settings::from_section(Some(&with_png("x", &metrics(), &png)))
+                .map(|settings| settings.image_optimisation.png);
+            match PngEffort::new(threshold, large_preset) {
+                Ok(effort) => prop_assert_eq!(parsed.ok(), Some(effort)),
+                Err(error) => {
+                    let message = parsed.expect_err("refused").to_string();
+                    prop_assert!(message.contains(IMAGE_OPTIMISATION_PNG_KEY), "{}", message);
+                    prop_assert!(message.contains(&error.to_string()), "{}", message);
+                }
+            }
         }
 
         #[test]
