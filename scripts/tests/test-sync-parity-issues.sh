@@ -15,7 +15,8 @@
 #     writes each run made.
 #   - Most cases use scripts/tests/fixtures/parity-small.md, or a copy that the
 #     case changes. One case only parses the real docs/design/parity.md, in a
-#     dry run against an empty stub, and counts its IDs.
+#     dry run against an empty stub, and checks that it finds as many IDs as
+#     the Total of the file's Counts table.
 #   - Every case prints PASS or FAIL with the reasons. The exit status is 1 if
 #     any case failed.
 #
@@ -215,17 +216,79 @@ run_case() {
 # ---------------------------------------------------------------------------
 # Cases: the sync behaviour.
 
+# counts_table FILE: print "<sum of the section rows> <Total>" for the Counts
+# table of a parity file (the section headed "## <n>. Counts"), or nothing when
+# that section has no section row or no "| **Total** | **<n>** |" row. Header
+# and separator rows are skipped because their count cell is not a number.
+#   FILE  the parity file to read
+counts_table() {
+  awk -F'|' '
+    /^## / { in_counts = ($0 ~ /^## [0-9]+\. Counts[[:space:]]*$/); next }
+    !in_counts || NF != 4 { next }
+    {
+      label = $2; value = $3
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", label)
+      gsub(/^[[:space:]*]+|[[:space:]*]+$/, "", value)
+      if (value !~ /^[0-9]+$/) next
+      if (label == "**Total**") { total = value; have_total = 1 } else { sum += value; rows++ }
+    }
+    END { if (have_total && rows > 0) print sum, total }
+  ' "$1"
+}
+
 case_real_parity_file() {
-  # 183 is the total in the Counts table (section 22) of parity.md. A PR that
-  # adds an ID updates that table and this number together.
+  # The expected number of IDs is the Total of the Counts table (section 22)
+  # of parity.md, and the table's section rows must add up to that Total. A PR
+  # that adds an ID updates the table; this case then checks that the parser
+  # finds exactly that many IDs, so neither the table nor a row can drift.
+  local sum="" total=""
+  read -r sum total < <(counts_table "$REPO_ROOT/docs/design/parity.md")
+  if [[ -z "$total" ]]; then
+    fail_case "docs/design/parity.md has no Counts table with section rows and a '| **Total** | **<n>** |' row"
+    return
+  fi
+  expect_eq "$sum" "$total" "sum of the Counts rows against the table's Total"
   new_state
   # The default --parity-file is docs/design/parity.md of the checkout.
   run_script --repo "$REPO" --project "$PROJECT" --dry-run
   expect_status 0
   expect_writes 0
-  expect_eq "$(grep -c '^create issue \[' "$OUT")" 183 "create lines"
-  expect_eq "$(grep -o '^create issue \[[^]]*\]' "$OUT" | sort -u | wc -l | tr -d ' ')" 183 "distinct IDs"
-  expect_contains "$OUT" "summary: created 183, updated 0, closed 0, added to the project 183, fields set 549, unchanged 0 (dry run: nothing was changed)"
+  expect_eq "$(grep -c '^create issue \[' "$OUT")" "$total" "create lines"
+  expect_eq "$(grep -o '^create issue \[[^]]*\]' "$OUT" | sort -u | wc -l | tr -d ' ')" "$total" "distinct IDs"
+  # A first run sets three board fields per ID: Disposition, ADR and Area.
+  expect_contains "$OUT" "summary: created $total, updated 0, closed 0, added to the project $total, fields set $((3 * total)), unchanged 0 (dry run: nothing was changed)"
+}
+
+case_counts_table_reader() {
+  # counts_table reads the section rows and the Total of section 22 only, and
+  # prints nothing when the Total row is missing.
+  new_state
+  cat >"$PARITY" <<'EOF'
+## 21. Platform items (PLT)
+
+| ID | Feature | Disposition | ADR | Notes |
+|---|---|---|---|---|
+| PLT-01 | A row whose count-like cell must not count | new | none | 7 |
+
+## 22. Counts
+
+| Section | IDs |
+|---|---|
+| Shared behaviour (SHR) | 18 |
+| Platform features of backend1 (AUTH, I18N) | 33 |
+| **Total** | **51** |
+
+## 23. Open items
+
+| Item | Rows |
+|---|---|
+| Something | 5 |
+EOF
+  expect_eq "$(counts_table "$PARITY")" "51 51" "counts of a well-formed table"
+  edit_parity '$0 == "| Shared behaviour (SHR) | 18 |" { $0 = "| Shared behaviour (SHR) | 19 |" } { print }'
+  expect_eq "$(counts_table "$PARITY")" "52 51" "counts after one section row changed"
+  edit_parity '!/^\| \*\*Total\*\* \|/ { print }'
+  expect_eq "$(counts_table "$PARITY")" "" "counts without a Total row"
 }
 
 case_first_run() {
@@ -601,7 +664,8 @@ case_parity_undefined_reference() {
 
 # ---------------------------------------------------------------------------
 
-run_case "real docs/design/parity.md parses to 183 IDs (dry run, empty stub)" case_real_parity_file
+run_case "real docs/design/parity.md parses to the Total of its Counts table, and the rows add up to it (dry run, empty stub)" case_real_parity_file
+run_case "the Counts table reader sums section 22 only and needs its Total row" case_counts_table_reader
 run_case "first run creates every issue, adds it to the board and sets its fields" case_first_run
 run_case "second run with no change makes no write call" case_second_run_no_change
 run_case "changed disposition: one body edit and one field edit" case_changed_disposition

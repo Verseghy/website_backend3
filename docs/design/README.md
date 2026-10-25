@@ -491,7 +491,7 @@ The Containerfile stays on UBI 9 because the hub's build nodes cannot run UBI 10
 
 ## Architecture decision records
 
-ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). ADR 0025 was accepted on 2026-10-25; it amends ADR 0012 §1 and one sentence of ADR 0005 §5. ADR 0026 was accepted on 2026-10-25; it amends ADR 0003, two consequences of ADR 0012, and ADR 0019. ADR 0027 was accepted on 2026-10-25; it amends ADR 0022 §4 and two sub-bullets of ADR 0012 §4. ADR 0028 was accepted on 2026-10-25; it amends ADR 0024 §4 and carries the updated recipe list of ADR 0024 §2. ADR 0029 was accepted on 2026-10-25; it amends the `Workflow policy` and `Toolchain` rows of ADR 0022 §3. ADR 0030 was accepted on 2026-10-25; it amends ADR 0021 §2. The [ADR index](adr/README.md) has longer summaries and the template.
+ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). ADR 0025 was accepted on 2026-10-25; it amends ADR 0012 §1 and one sentence of ADR 0005 §5. ADR 0026 was accepted on 2026-10-25; it amends ADR 0003, two consequences of ADR 0012, and ADR 0019. ADR 0027 was accepted on 2026-10-25; it amends ADR 0022 §4 and two sub-bullets of ADR 0012 §4. ADR 0028 was accepted on 2026-10-25; it amends ADR 0024 §4 and carries the updated recipe list of ADR 0024 §2. ADR 0029 was accepted on 2026-10-25; it amends the `Workflow policy` and `Toolchain` rows of ADR 0022 §3. ADR 0030 was accepted on 2026-10-25; it amends ADR 0021 §2. ADR 0032 was accepted on 2026-10-25; it amends ADR 0019 §3. The [ADR index](adr/README.md) has longer summaries and the template.
 
 | ADR | Decision | Status | Summary |
 |---|---|---|---|
@@ -525,6 +525,7 @@ ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the ma
 | [0028](adr/0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md) | Guardrails as built, wider checks and a fail-closed hook | Accepted | Amends ADR 0024 §4: the hook as built, namespace, project, Argo CD, patch, port-forward and `mariadb` checks, and a fail-closed exec-form hook entry, in both repositories. |
 | [0029](adr/0029-no-filters-or-job-conditions-on-required-ci-jobs.md) | No filters or job conditions on required CI jobs | Accepted | Amends ADR 0022 §3: no filter or job-level condition can skip a required PR check, the schedule guard excepted, and no `needs:` or `continue-on-error` can turn its failure into a pass; the `Toolchain` row names all its checks. |
 | [0030](adr/0030-app-and-kit-namespaces-in-the-hungarian-message-file.md) | App and kit namespaces in the Hungarian message file | Accepted | Amends ADR 0021 §2: `kit.*` for the copied kit files' own strings, `app.*` for backend3's shell; `ra.*` stays exactly the English pack plus three kit-only keys. |
+| [0032](adr/0032-backend1-s-public-rest-api-retired.md) | backend1's public REST API retired | Accepted | Amends ADR 0019 §3: backend1's `routes/api.php` is not ported (PUB-14, retired); the first `/api/v1` slice pins its `404`s. |
 
 ## Specs
 

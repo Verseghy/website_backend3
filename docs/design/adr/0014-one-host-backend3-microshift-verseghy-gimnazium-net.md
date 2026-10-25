@@ -83,7 +83,7 @@ HAProxy keeps its rate-limit counters per Route. That is why the public API and 
 
 - Every `/api/v1/**` response carries `Access-Control-Allow-Origin: *`, errors included. Credentials are never allowed. This serves the Angular site on `https://verseghy-gimnazium.net`, and the staging and development frontends, without a list to maintain. It is the REST draft's recorded default, DEC-18 ([public-api.md](../public-api.md) §2.1).
 - The Angular site's GET requests carry no custom headers. They are CORS simple requests, so the browser sends no preflight.
-- Loco's global `cors` middleware stays disabled. A tower-http `CorsLayer` is attached to the `/api/v1` routes only, for example with Loco's `Routes::layer`. The bootstrap PR picks the exact mechanism ([public-api.md](../public-api.md) O-3). As a result, `/admin` and `/api/admin` never send CORS headers.
+- Loco's global `cors` middleware stays disabled. A tower-http `CorsLayer` is attached to the `/api/v1` routes only, for example with Loco's `Routes::layer`. The bootstrap PR (Verseghy/website_backend3#186) kept Loco's middleware off; the first `/api/v1` slice attaches the layer ([public-api.md](../public-api.md) O-3). As a result, `/admin` and `/api/admin` never send CORS headers.
 - Requests without an `Origin` header are served normally. That covers the SSR pod and `curl`. CORS controls what browsers may read. It is not access control.
 
 ### Configuration and the Angular switch

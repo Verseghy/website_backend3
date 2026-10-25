@@ -141,7 +141,7 @@ server:
 
 | Header on `/admin` responses | Value |
 |---|---|
-| `Content-Security-Policy` | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://www.youtube.com https://padlet.com; media-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'` |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; font-src 'self'; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://www.youtube.com https://padlet.com; media-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'` |
 | `X-Frame-Options` | `DENY` |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=()` |
@@ -154,7 +154,7 @@ What the CSP values allow, and why:
 - **`style-src 'unsafe-inline'`.** A deliberate exception. The rich-text editor and the UI kit set `style` attributes for table widths, text alignment and popover positions.
 - **`img-src 'self'`.** Works because `/storage` is routed on the admin host, and because the admin API returns every media URL that the admin loads root-relative, as `/storage/...`, never as an absolute legacy-host URL ([ADR 0015](0015-media-separate-static-server-media-library-image-optimisatio.md) §2, §3).
 - **`frame-src`.** Matches the editor's embed allow-list ([ADR 0013](0013-rich-text-editor-and-html-sanitiser.md)).
-- **`blob:` images.** Cover previews of files chosen for upload until the upload finishes. Pasted images are never inserted (research: DECISIONS 15d), so they need no CSP allowance. `data:` stays only if the admin UI kit itself uses `data:` images. The bootstrap PR checks this with the CSP-violation E2E and removes `data:` from `img-src` if nothing needs it.
+- **`blob:` images.** Cover previews of files chosen for upload until the upload finishes. Pasted images are never inserted (research: DECISIONS 15d), so they need no CSP allowance. `data:` was to stay only if the admin UI kit itself used `data:` images. The bootstrap PR (Verseghy/website_backend3#186) checked this: the built admin contains no `data:` URL, and the CSP-violation E2E passes without it. So `img-src` allows no `data:` (`ADMIN_CONTENT_SECURITY_POLICY` in `src/controllers/admin_ui.rs`).
 
 `/api/admin` responses also carry `Cache-Control: no-store`.
 

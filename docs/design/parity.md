@@ -280,9 +280,9 @@ Source: research: SYNTHESIS §3.13.
 
 ## 18. Public read API (PUB)
 
-These rows track the backend2 reads the Angular site depends on. They are needed to retire backend2 (ADR [0019]). Each endpoint's paths, wire shapes, errors and fixes are in [public-api.md][api]. Its tests are written from that contract and must cover the production-only data shapes listed in ADR [0019]. Here `port-with-fix` means the same data and meaning over REST, with the fixes the contract names.
+These rows track the backend2 reads the Angular site depends on. They are needed to retire backend2 (ADR [0019]). Each endpoint's paths, wire shapes, errors and fixes are in [public-api.md][api]. Its tests are written from that contract and must cover the production-only data shapes listed in ADR [0019]. Here `port-with-fix` means the same data and meaning over REST, with the fixes the contract names. PUB-14 is the one row of another kind: backend1's own public REST API, which ADR [0032] retires.
 
-Source: research: SYNTHESIS §5.4, §5.16.
+Source: research: SYNTHESIS §5.4, §5.16; for PUB-14, §4.8 and §5.15.2.
 
 | ID | Feature | Disposition | ADR | Notes |
 |---|---|---|---|---|
@@ -299,6 +299,7 @@ Source: research: SYNTHESIS §5.4, §5.16.
 | PUB-11 | Page by slug | port-with-fix | [0018], [api] | §7.12. Hidden and unknown pages answer 404. |
 | PUB-12 | Colleagues | port | [0020], [api] | §7.13 |
 | PUB-13 | API description and health endpoints | replaced | [0005] | §7.18. The GraphQL schema and GraphiQL are replaced by an OpenAPI 3.1 document at `/api/v1/openapi.json`, snapshot-tested, plus Loco's health endpoints. |
+| PUB-14 | backend1's public REST API (`routes/api.php`), with no consumer since 2022 | retired | [0032] | Not ported. Its read routes are `/api/posts/*`, `/api/events/*`, `/api/canteen/*`, `/api/colleagues/*`, `/api/pages/*` and `/api/menu/*`; it also has the authenticated `/api/user` (`website_backend@0dead98:routes/api.php`). Its newsletter routes are NWS-02. The Angular site reads backend2 today and `/api/v1` ([public-api.md][api]) after the switch. The closing PR, the first `/api/v1` slice, has request tests that pin a `404` for every route of that file. |
 
 ## 19. Release-1 additions (NEW-01 to NEW-04)
 
@@ -382,10 +383,10 @@ Repository, delivery, deployment and cut-over work. Items in website_k8s and web
 | Posts (POS-H, POS-C, POS-L, POS-F) | 34 |
 | Labels, authors, colleagues, dishes, canteen days, events, newsletter | 32 |
 | Platform features of backend1 (AUTH, RBAC, NAV, PAGE, MENU, FILE, EDIT, MEDIA, LOG, BKP, SITE, CLI, I18N) | 33 |
-| Public read API (PUB) | 13 |
+| Public read API (PUB) | 14 |
 | New (NEW) | 14 |
 | Platform items (PLT) | 39 |
-| **Total** | **183** |
+| **Total** | **184** |
 
 ## 23. Open items
 
@@ -419,4 +420,5 @@ These rows depend on something no decision has settled yet. Each is settled in t
 [0023]: adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md
 [0024]: adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md
 [0026]: adr/0026-backend2-unchanged-and-running-until-decommissioning.md
+[0032]: adr/0032-backend1-s-public-rest-api-retired.md
 [api]: public-api.md

@@ -151,6 +151,7 @@ Examples: `feat(db,api,admin): add labels with trash and history`, `fix(api): ke
 - A follow-up website_k8s PR adds website_backend3's required contexts to Prow branch protection (ADR 0022).
 - The bootstrap PR adds: the `PR title` and `No session links` jobs, `THIRD_PARTY.md` and the licence files, `deny.toml`, the npm licence check, the Dependabot prefixes and the admin footer source link.
 - The first PR confirms that self-approval sets `approved`.
+- The repository settings check (PLT-01 in [parity.md](../parity.md)) was completed on 2026-10-25 ([ADR 0019](0019-scope-parity-tracking-retired-features-release-1-additions.md) section 1, rule 3).
 
 **What must be true in code and tests**
 

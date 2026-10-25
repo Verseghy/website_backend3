@@ -1,6 +1,6 @@
 # 0019. Scope: parity tracking, retired features, release-1 additions
 
-- Status: Amended by [0026](0026-backend2-unchanged-and-running-until-decommissioning.md) (2026-10-25)
+- Status: Amended by [0026](0026-backend2-unchanged-and-running-until-decommissioning.md) and [0032](0032-backend1-s-public-rest-api-retired.md) (2026-10-25)
 - Decision questions: Q25a, Q25b, Q28, Q29, Q30, Q31, and the dashboard-statistics part of Q27 (the image part of Q27 is in ADR 0015)
 
 ## Context
