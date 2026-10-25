@@ -77,7 +77,27 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 
 The throwaway local PostgreSQL 18 runs from `compose.yaml` on `127.0.0.1:5432`
 (user `loco`, password `loco`; local values, not secrets). Its data lives in a
-tmpfs, so every start begins empty.
+tmpfs, so every start begins empty. CI starts the same file, so CI, compose
+and production share the image family, the major and the locale: the official
+`postgres` image at PostgreSQL 18
+(website_k8s@f0286dc:verseghy-website/postgres/kustomization.yaml), which is
+what ADR 0020 asks of the tests, initialised with the builtin `C.UTF-8` locale
+(`--locale-provider=builtin --locale=C.UTF-8`,
+website_k8s@f0286dc:verseghy-website/postgres/deployment.yaml; research:
+DECISIONS R13). `compose.yaml` passes those arguments in
+`POSTGRES_INITDB_ARGS`, and the CI `Test` job fails unless `template1` reports
+that locale. The minor may differ: production's Argo CD Image Updater follows
+the 18 minor releases by itself, while `compose.yaml` pins its tag and digest
+and nothing bumps them automatically, so a compose bump is a manual change. A
+container keeps the environment it was created with. Run in the checkout that
+created it, `podman-compose up -d postgres` (or `docker compose up -d
+postgres`) sees that `compose.yaml` changed the service and recreates the
+container, so it picks up a change such as the locale arguments on its own;
+`podman-compose up -d --force-recreate postgres` recreates it in any case.
+`podman start`, `podman-compose start` or `restart`, and `up --no-recreate`
+reuse the old container: one created before the locale arguments keeps the
+image's default `en_US.utf8`, although the tmpfs makes initdb run again at
+every start.
 
 ```sh
 podman-compose up -d postgres     # local PostgreSQL with backend3_test, backend3_development and backend3_e2e

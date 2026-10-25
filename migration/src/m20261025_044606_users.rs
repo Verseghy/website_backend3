@@ -25,9 +25,10 @@
 //!   anonymised (ADR 0009, ADR 0011 §3). The finder for sign-in compares
 //!   `lower(email)` too, so it can use this index and always agrees with it.
 //!   `lower()` folds by the database's default collation: accented letters
-//!   too under the `en_US.utf8` locale of the official PostgreSQL image, only
-//!   ASCII under the C locale. `hu_icu` is not used here: ADR 0020 accepts
-//!   ICU upgrades because no index uses that collation ("Consequences").
+//!   too under the builtin `C.UTF-8` locale that production, compose and CI
+//!   initialise PostgreSQL with, only ASCII under the C locale. `hu_icu` is
+//!   not used here: ADR 0020 accepts ICU upgrades because no index uses that
+//!   collation ("Consequences").
 //! - The two CHECK constraints of ADR 0006 §7, verbatim, fix the shape of an
 //!   anonymised row.
 

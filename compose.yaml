@@ -4,6 +4,8 @@
 # - The major version matches production: PostgreSQL 18. The image is pinned
 #   by the digest of its multi-arch index; a bump changes tag and digest
 #   together.
+# - The locale matches production too: initdb runs with the builtin C.UTF-8
+#   locale (POSTGRES_INITDB_ARGS below). CI's Test job checks it.
 # - The credentials are local throwaway values, not secrets. POSTGRES_USER is
 #   the image's bootstrap superuser, so it may CREATE DATABASE for Loco's
 #   per-test databases (`_loco_test_<random>_<timestamp>`).
@@ -21,6 +23,30 @@ services:
       POSTGRES_USER: loco
       POSTGRES_PASSWORD: loco
       POSTGRES_DB: backend3_test
+      # Production parity (research: DECISIONS R13): the locale arguments
+      # that production's initdb gets, copied exactly from
+      # website_k8s@f0286dc:verseghy-website/postgres/deployment.yaml. The
+      # builtin C.UTF-8 locale sorts by code point and does not depend on the
+      # image's glibc; Hungarian order comes from the explicit hu_icu
+      # collation (ADR 0020). Without them the image initialises with its
+      # libc en_US.utf8 default, a default collation and character
+      # classification that production does not have. Every database here,
+      # Loco's per-test ones included, copies template1's locale, and the CI
+      # Test job fails unless template1 reports this one.
+      # Production's other two arguments, --auth-local and --auth-host, are
+      # left out on purpose: they only keep the pg_hba.conf that production
+      # replaces free of trust lines, while `docker compose exec postgres
+      # psql` (the CI locale check and the E2E database step) relies on the
+      # image's trust for local socket connections.
+      # initdb reads this when it initialises the data directory (here: at
+      # every start, because of the tmpfs), from the environment the
+      # container was created with. `podman-compose up -d postgres` (or
+      # `docker compose up -d`) sees the changed service and recreates a
+      # container created from an older compose.yaml, so it picks this up;
+      # `podman-compose up -d --force-recreate postgres` recreates it in any
+      # case. `podman start`, `podman-compose start` or `restart` and
+      # `up --no-recreate` reuse the old container, which keeps en_US.utf8.
+      POSTGRES_INITDB_ARGS: --locale-provider=builtin --locale=C.UTF-8
     # The image runs every file in /docker-entrypoint-initdb.d once, when the
     # data directory is initialised (here: on every start, because of the
     # tmpfs). Write the script, then hand over to the image's own entrypoint
