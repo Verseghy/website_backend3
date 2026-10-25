@@ -1,6 +1,6 @@
 # 0024. AI maintainability: instruction files, the Loco skill, guardrails
 
-- Status: Amended by [0028](0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md) (2026-10-25)
+- Status: Amended by [0028](0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md) and [0034](0034-test-hashes-and-throwaway-keys-refused-in-production.md) (2026-10-25)
 - Decision questions: Q24, Q37, Q43a, Q43b
 
 ## Context

@@ -1,6 +1,6 @@
 # 0001. Record architecture decisions
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0034](0034-test-hashes-and-throwaway-keys-refused-in-production.md) (2026-10-25)
 - Decision questions: Q12 (the "design document first" part; PR slicing and review are recorded in [ADR 0012](0012-delivery-review-commits-and-licensing.md)), Q24
 
 ## Context

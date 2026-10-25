@@ -10,6 +10,9 @@
 #                 (built by the Deployment from the backend-secrets key,
 #                 ADR 0002, ADR 0023 §11)
 #   HOST          https://backend3.microshift.verseghy-gimnazium.net (ADR 0014)
+#   JWT_SECRET    the admin session secret: base64 of at least 64 random
+#                 bytes, from the backend-secrets key backend3-jwt-secret
+#                 (ADR 0006 §1, ADR 0023 §11)
 #
 # Optional: LOG_LEVEL, DB_AUTO_MIGRATE (default false: boot runs no
 # migration, so backend3 also boots against a read-only database, ADR 0003),
@@ -87,6 +90,20 @@ database:
   auto_migrate: <%= get_env(name="DB_AUTO_MIGRATE", default="false") %>
   dangerously_truncate: false
   dangerously_recreate: false
+
+# The admin session (ADR 0006 §1): HS512, the Loco default. JWT_SECRET has no
+# default, so the configuration does not load without it and the server does
+# not start. Quoted, so that YAML always reads it as text.
+auth:
+  jwt:
+    secret: "<%= get_env(name="JWT_SECRET") %>"
+    # Two hours (ADR 0006 §1); the session cookie's Max-Age is this value.
+    expiration: 7200
+    # The session cookie first, then the Bearer header of scripts.
+    location:
+      - from: Cookie
+        name: __Host-admin_session
+      - from: Bearer
 
 settings:
   admin_ui:

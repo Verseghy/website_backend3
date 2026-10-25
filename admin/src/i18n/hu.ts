@@ -374,6 +374,9 @@ export const hu = {
   },
   errors: {
     not_found: "A keresett elem nem található.",
+    invalid_credentials: "Hibás e-mail-cím vagy jelszó.",
+    invalid_body: "A kérés formátuma hibás. Frissítsd az oldalt, és próbáld újra!",
+    body_too_large: "Az elküldött adat túl nagy.",
   } satisfies Record<ErrorCode, string>,
 } as const satisfies MessageTree
 

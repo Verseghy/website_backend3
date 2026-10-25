@@ -22,6 +22,11 @@
 //! `before_save` hook below does not stamp `updated_at` the way Loco's
 //! generated model does; the content write paths set it explicitly.
 //!
+//! Sign-in ([`Model::authenticate`]) and the session token
+//! ([`Model::generate_session_token`]) live here too, and the
+//! [`Authenticable`] impl lets Loco's `JWTWithUser` extractor load the
+//! account a token names (ADR 0006 §1).
+//!
 //! The entity derives no serde (`[package.metadata.db.entity]` in
 //! `Cargo.toml`), so a [`Model`] can be neither a response nor a request
 //! body: accounts go out only through allow-listed DTOs, without the password
@@ -29,11 +34,25 @@
 //! which Sea-ORM requires, so a `Model` is never logged with `?`, which would
 //! print both.
 
-use loco_rs::{hash, prelude::*};
+use chrono::{DateTime, Utc};
+use loco_rs::{auth::jwt::JWT, hash, prelude::*};
 use sea_orm::sea_query::Func;
 
 pub use super::_entities::users::{self, ActiveModel, Column, Entity, Model};
-use crate::domain::password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind};
+use crate::domain::{
+    email_address,
+    password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind},
+};
+
+/// The session-token claim that carries `users.token_version` (ADR 0006 §2).
+pub const TOKEN_VERSION_CLAIM: &str = "tv";
+/// The session-token claim that names what the token may do (ADR 0006 §1).
+pub const SCOPE_CLAIM: &str = "scope";
+/// The session-token claim that holds when the password step succeeded, in
+/// seconds since the Unix epoch like `exp` (ADR 0006 §1).
+pub const AUTH_TIME_CLAIM: &str = "auth_time";
+/// The `scope` of a full admin session (ADR 0006 §1).
+pub const ADMIN_SCOPE: &str = "admin";
 
 /// `lower(email) = lower($1)`: the e-mail comparison of sign-in, written as
 /// the expression of the unique index `users_lower_email_key`.
@@ -164,15 +183,23 @@ impl Model {
     /// PostgreSQL with, it folds accented letters too (Unicode simple case
     /// mapping), under the C locale only ASCII.
     ///
+    /// An address that no account can hold ([`email_address::can_be_stored`])
+    /// is not sent to the database, where it would fail the whole query
+    /// instead of matching nothing.
+    ///
     /// # Errors
     ///
     /// [`ModelError::EntityNotFound`] when no live account has the address,
-    /// including when only a trashed or anonymised one has it;
+    /// including when only a trashed or anonymised one has it and when no
+    /// account can hold it;
     /// [`ModelError::DbErr`] when the query fails.
     pub async fn find_live_by_email<C>(db: &C, email: &str) -> ModelResult<Self>
     where
         C: ConnectionTrait,
     {
+        if !email_address::can_be_stored(email) {
+            return Err(ModelError::EntityNotFound);
+        }
         Entity::find()
             .filter(lower_email_equals(email))
             .filter(Column::DeletedAt.is_null())
@@ -220,5 +247,107 @@ impl Model {
     #[must_use]
     pub fn verify_password(&self, password: &str) -> bool {
         verify_stored_password(self.password_hash.as_deref(), password)
+    }
+
+    /// Checks a browser sign-in and returns the account that may start an
+    /// admin session, or `None` when the sign-in fails (ADR 0006 §4).
+    ///
+    /// - `db`: the connection or transaction to query.
+    /// - `email`: the address as the user typed it, matched without regard
+    ///   to case ([`Model::find_live_by_email`]).
+    /// - `password`: the password as typed.
+    ///
+    /// Every failure costs one Argon2id verification, so the time does not
+    /// tell them apart ("Same answer for every failure"): an unknown, trashed
+    /// or anonymised address, or one that no account can hold, verifies
+    /// [`DUMMY_PASSWORD_HASH`], and the account's state is checked only after
+    /// its own password. A sign-in fails when the password is wrong, when the
+    /// account has none, when it is inactive, and, until the two-factor step
+    /// and the forced password change of ADR 0006 §4 exist, when it has
+    /// two-factor turned on or must change its password: those accounts must
+    /// never get a full `admin` session from the password alone, and they get
+    /// the same failure as a wrong password until then (the maintainer's
+    /// answer of 2026-10-25, research: DECISIONS R15 (D74)).
+    ///
+    /// The Argon2 work runs on the request's task, as in Loco's own sign-in
+    /// handler.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::DbErr`] when the query fails. A failed sign-in is
+    /// `Ok(None)`, never an error.
+    pub async fn authenticate<C>(db: &C, email: &str, password: &str) -> ModelResult<Option<Self>>
+    where
+        C: ConnectionTrait,
+    {
+        let user = match Self::find_live_by_email(db, email).await {
+            Ok(user) => user,
+            Err(ModelError::EntityNotFound) => {
+                verify_dummy_password(password);
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        // The password first, before any state check could end the
+        // evaluation, so an account that may not sign in costs what a wrong
+        // password costs.
+        let password_matches = user.verify_password(password);
+        let may_sign_in =
+            user.active && user.totp_enabled_at.is_none() && !user.must_change_password;
+        Ok((password_matches && may_sign_in).then_some(user))
+    }
+
+    /// Signs a full admin session token for this account (ADR 0006 §1).
+    ///
+    /// - `secret`: the base64 JWT secret, `auth.jwt.secret`.
+    /// - `expiration`: the token's lifetime in seconds, `auth.jwt.expiration`.
+    /// - `auth_time`: when the password step succeeded, the app clock's "now"
+    ///   that the caller read (ADR 0010 point 7). The claim holds it in whole
+    ///   seconds since the Unix epoch, a JWT `NumericDate` like `exp`.
+    ///
+    /// The token is Loco's HS512 JWT: Loco's `pid` claim (this account's
+    /// UUID) and `exp` (the current time plus `expiration`, which Loco
+    /// computes), plus [`TOKEN_VERSION_CLAIM`] with `token_version`,
+    /// [`SCOPE_CLAIM`] with [`ADMIN_SCOPE`] and [`AUTH_TIME_CLAIM`].
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::Jwt`] when `secret` is not valid base64 or signing fails.
+    pub fn generate_session_token(
+        &self,
+        secret: &str,
+        expiration: u64,
+        auth_time: DateTime<Utc>,
+    ) -> ModelResult<String> {
+        let mut claims = serde_json::Map::new();
+        claims.insert(TOKEN_VERSION_CLAIM.to_owned(), self.token_version.into());
+        claims.insert(SCOPE_CLAIM.to_owned(), ADMIN_SCOPE.into());
+        claims.insert(AUTH_TIME_CLAIM.to_owned(), auth_time.timestamp().into());
+        Ok(JWT::new(secret).generate_token(expiration, self.pid.to_string(), claims)?)
+    }
+}
+
+/// Lets Loco's `JWTWithUser<users::Model>` extractor load the account that a
+/// session token names (ADR 0006 §1).
+#[async_trait::async_trait]
+impl Authenticable for Model {
+    /// backend3 has no API keys: the starter's `api_key` column is not
+    /// created (ADR 0006 §4), and scripts use Bearer session tokens, so no
+    /// key ever matches.
+    ///
+    /// - `_db`: unused.
+    /// - `_api_key`: unused.
+    async fn find_by_api_key(_db: &DatabaseConnection, _api_key: &str) -> ModelResult<Self> {
+        Err(ModelError::EntityNotFound)
+    }
+
+    /// Loads the account whose `pid` the token's `pid` claim holds, whatever
+    /// its state: the admin session check rejects trashed, anonymised and
+    /// inactive accounts with the reason (ADR 0006 §1).
+    ///
+    /// - `db`: the application's connection.
+    /// - `claims_key`: the token's `pid` claim.
+    async fn find_by_claims_key(db: &DatabaseConnection, claims_key: &str) -> ModelResult<Self> {
+        Self::find_by_pid(db, claims_key).await
     }
 }

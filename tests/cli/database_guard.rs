@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crate::support::{ConnectionProbe, run_cli};
+use crate::support::{CLI_JWT_SECRET, ConnectionProbe, run_cli};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const NON_LOCAL: &str = "127.0.0.2";
@@ -64,6 +64,7 @@ fn the_probe_address_is_reachable_when_no_guard_applies() {
             ("LOCO_ENV", "production"),
             ("DATABASE_URL", &url),
             ("HOST", "http://localhost"),
+            ("JWT_SECRET", CLI_JWT_SECRET),
             ("DB_CONNECT_TIMEOUT", "300"),
         ],
         &["db", "status"],

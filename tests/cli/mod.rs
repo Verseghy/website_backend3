@@ -12,3 +12,4 @@
 mod database_guard;
 mod metrics_port;
 mod precheck;
+mod session_secret;

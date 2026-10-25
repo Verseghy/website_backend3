@@ -9,8 +9,11 @@
 //! `satisfies Record<ErrorCode, string>`, so a code added here without a
 //! Hungarian message fails the admin type check.
 //!
-//! Codes are added by the slice that first returns them. The bootstrap only
-//! needs `not_found`, for unknown `/api/admin` paths.
+//! Codes are added by the slice that first returns them: `not_found` for
+//! unknown `/api/admin` paths, `invalid_credentials` for every failed
+//! sign-in (ADR 0006 §4), and `invalid_body` and `body_too_large` for a
+//! request body that cannot be read as the endpoint's JSON DTO (the
+//! maintainer's answer of 2026-10-25, research: DECISIONS R15 (D74)).
 
 use std::collections::BTreeMap;
 
@@ -32,6 +35,17 @@ use ts_rs::TS;
 pub enum ErrorCode {
     /// `404`: the resource or the API path does not exist.
     NotFound,
+    /// `401`: the sign-in failed. One code for every reason (a wrong
+    /// password, an unknown e-mail address, a deactivated or trashed
+    /// account), so the answer does not reveal which accounts exist.
+    InvalidCredentials,
+    /// `422`: the request body is not the JSON the endpoint takes: not JSON,
+    /// not sent as `application/json`, or with a field that is missing,
+    /// unknown or of the wrong type. An error on the whole request, so
+    /// `field` is `null`.
+    InvalidBody,
+    /// `413`: the request body is larger than the request body limit.
+    BodyTooLarge,
 }
 
 impl ErrorCode {
@@ -40,6 +54,14 @@ impl ErrorCode {
     pub const fn status(self) -> u16 {
         match self {
             Self::NotFound => 404,
+            Self::InvalidCredentials => 401,
+            // ADR 0021 §4's row for submitted values that fail validation.
+            // A body that is not the DTO's JSON is read as such a value
+            // (research: DECISIONS R15 (D74)).
+            Self::InvalidBody => 422,
+            // ADR 0021 §4 has no row for it; 413 with the JSON envelope
+            // follows ADR 0015 §6, whose upload limit answers it (D74).
+            Self::BodyTooLarge => 413,
         }
     }
 
@@ -50,6 +72,9 @@ impl ErrorCode {
         match self {
             // The same text as Loco's `ErrorDetail` and the public API.
             Self::NotFound => "Resource was not found",
+            Self::InvalidCredentials => "The e-mail address or the password is wrong",
+            Self::InvalidBody => "The request body is not the JSON this endpoint takes",
+            Self::BodyTooLarge => "The request body is larger than the limit",
         }
     }
 }
@@ -134,10 +159,36 @@ mod tests {
 
     #[test]
     fn codes_map_to_statuses() {
-        assert_eq!(ErrorCode::NotFound.status(), 404);
+        for (code, status, wire) in [
+            (ErrorCode::NotFound, 404, "not_found"),
+            (ErrorCode::InvalidCredentials, 401, "invalid_credentials"),
+            (ErrorCode::InvalidBody, 422, "invalid_body"),
+            (ErrorCode::BodyTooLarge, 413, "body_too_large"),
+        ] {
+            assert_eq!(code.status(), status, "{code:?}");
+            assert_eq!(serde_json::to_value(code).expect("serializes"), json!(wire));
+        }
+    }
+
+    #[test]
+    fn the_sign_in_failure_envelope_serializes_exactly() {
         assert_eq!(
-            serde_json::to_value(ErrorCode::NotFound).expect("serializes"),
-            json!("not_found")
+            serde_json::to_string(&ErrorEnvelope::new(ErrorCode::InvalidCredentials))
+                .expect("serializes"),
+            r#"{"error":"invalid_credentials","description":"The e-mail address or the password is wrong","field":null,"params":{}}"#
+        );
+    }
+
+    #[test]
+    fn the_body_envelopes_serialize_exactly() {
+        assert_eq!(
+            serde_json::to_string(&ErrorEnvelope::new(ErrorCode::InvalidBody)).expect("serializes"),
+            r#"{"error":"invalid_body","description":"The request body is not the JSON this endpoint takes","field":null,"params":{}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorEnvelope::new(ErrorCode::BodyTooLarge))
+                .expect("serializes"),
+            r#"{"error":"body_too_large","description":"The request body is larger than the limit","field":null,"params":{}}"#
         );
     }
 
@@ -145,7 +196,7 @@ mod tests {
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");
