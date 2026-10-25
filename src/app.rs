@@ -476,8 +476,15 @@ impl Hooks for App {
     }
 
     /// Truncates the application tables. Loco calls it for `db truncate`
-    /// and for `dangerously_truncate`; there are no application tables yet,
-    /// and each slice adds its own here.
+    /// and for `dangerously_truncate`, which backend3 keeps off everywhere.
+    ///
+    /// It never covers `users`, `activity_log` or `revisions`. The two
+    /// history tables are append-only, and their triggers reject `TRUNCATE`
+    /// (ADR 0011 §5); they reference `users`, so PostgreSQL would refuse to
+    /// truncate `users` without them. Emptying the accounts alone would also
+    /// leave history pointing at nobody. A development database is reset by
+    /// recreating it instead (AGENTS.md, "Commands"). Each entity slice adds
+    /// only its own tables here.
     async fn truncate(_ctx: &AppContext) -> Result<()> {
         Ok(())
     }

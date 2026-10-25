@@ -28,6 +28,7 @@ pub mod clock;
 pub mod database_target;
 pub mod http_metrics;
 pub mod image_optimise;
+pub mod password_hash;
 pub mod rich_text;
 pub mod route_coverage;
 pub mod task_lock_key;

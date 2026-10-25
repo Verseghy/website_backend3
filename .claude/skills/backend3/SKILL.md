@@ -40,14 +40,25 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    or `generate model`), following ADR 0009 (naming, `bigint` identity ids,
    `timestamptz`, `CHECK`s, an index on every foreign key) and ADR 0010 for
    instants. If the entity is admin-editable, it joins the safety net in this
-   PR: recipe 2.
+   PR: recipe 2. The slice adds only its own tables to `App::truncate` in
+   `src/app.rs`, never `users`, `activity_log` or `revisions` (the
+   `AGENTS.md` commands say why and how to start a development database
+   over).
 3. **Entities**: `cargo loco db migrate`, then `cargo loco db entities`. Never
-   edit `src/models/_entities/`. Both `db entities` and `generate model` shell
-   out to `sea-orm-cli`, which is not part of the build: install the version
-   that matches the locked `sea-orm` once, with
+   edit `src/models/_entities/`; `src/models/mod.rs` allows `missing_docs` for
+   it, so the generated code needs no doc comments. The entities derive no
+   serde (`[package.metadata.db.entity]` in `Cargo.toml`): responses and
+   request bodies are DTOs (ADR 0005), and fixtures and seeds are built
+   through the models, because Loco's YAML `db::seed` needs serde on the
+   entity. Both `db entities` and `generate model` shell out to
+   `sea-orm-cli`, which is not part of the build: install the version that
+   matches the locked `sea-orm` once, with
    `cargo install sea-orm-cli@2.0.4 --locked` (the `AGENTS.md` commands). The
    first run for a table also writes `src/models/<name>.rs`, whose generated
    `before_save` reads the system time: change it as recipe 7 step 5 says.
+   The `users` model's `before_save` only gives a new account its `pid` and
+   never stamps `updated_at`, because account events leave it alone (ADR 0011
+   §4).
 4. **Pure logic** (validation rules, orderings, conversions) goes in
    `src/domain/<name>.rs` with unit tests and at least one proptest property
    per function with a non-trivial input space (ADR 0008 rule 1).
@@ -105,7 +116,10 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
    `created_at`, `updated_at` as `timestamptz NOT NULL`; `created_by`,
    `updated_by` as nullable `bigint` foreign keys to `users(id)`; plus
    `deleted_at timestamptz NULL` and `deleted_by` unless the entity cannot be
-   deleted (like site settings). Index the foreign keys.
+   deleted (like site settings). Index the foreign keys. Declare them
+   `ON DELETE RESTRICT`, as `users`' own are, not Loco's default `SET NULL`
+   for a nullable reference: accounts are anonymised, never deleted, and
+   keep every reference (ADR 0011 §6, ADR 0006 §7).
 2. **Uniqueness over live rows** uses partial unique indexes
    `... WHERE deleted_at IS NULL` (ADR 0011 section 3, ADR 0009 constraints).
    Decide for each rule whether trashed rows count, as the ADRs say.

@@ -200,6 +200,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# Flags that `cargo loco db entities` passes to sea-orm-cli on top of Loco's
+# own (loco-rs 1.2.0 src/db/entities.rs). The entities derive no serde:
+# entities never serialize to a client, handlers convert them into DTOs
+# (ADR 0005), and `users` holds the password hash and the TOTP secret
+# (ADR 0011 §4, "Never secrets"). Without the derives, a `format::json` of a
+# model, or a model as a request body, does not compile. Loco's YAML
+# `db::seed` needs them, so seeds and fixtures go through the models instead.
+[package.metadata.db.entity]
+with-serde = "none"
+
 [lints]
 workspace = true
 

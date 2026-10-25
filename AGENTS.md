@@ -100,6 +100,14 @@ Local database URLs: `postgres://loco:loco@localhost:5432/backend3_development`,
 `.../backend3_test` and `.../backend3_e2e`. Tests, development and E2E refuse
 any database that is not local.
 
+To start the development database over, recreate it: `podman-compose down`,
+then `podman-compose up -d postgres`, which starts all three databases empty
+(the tmpfs), then `cargo loco db migrate`. Never use `db truncate` or
+`db reset` for this; the guardrail hook blocks both. `App::truncate` never
+empties `users`, `activity_log` or `revisions`: the two history tables are
+append-only and reject `TRUNCATE` (ADR 0011 §5), and they reference
+`users`, so none of the three can be truncated on its own.
+
 The admin UI (`admin/`, Node.js LTS major in `admin/.node-version`):
 
 ```sh
