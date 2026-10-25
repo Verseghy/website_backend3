@@ -11,7 +11,10 @@ Dependencies that cargo or npm fetch are not vendored, so they are not listed
 here. CI checks their licences instead: `cargo-deny` against `deny.toml`, and
 the `Admin licenses` job against `admin/license-policy.json`
 ([ADR 0022](docs/design/adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md)
-section 4).
+section 4). The licences beyond ADR 0022's table are allowed for named crates
+and packages only, as
+[ADR 0027](docs/design/adr/0027-per-package-licence-exceptions-and-the-loco-advisory-ignores.md)
+lists them.
 
 ## Vendored code
 

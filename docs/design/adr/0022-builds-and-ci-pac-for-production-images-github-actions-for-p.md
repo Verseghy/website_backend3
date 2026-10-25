@@ -1,6 +1,6 @@
 # 0022. Builds and CI: PAC for production images, GitHub Actions for PR checks
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0027](0027-per-package-licence-exceptions-and-the-loco-advisory-ignores.md) (2026-10-25)
 - Decision questions: Q34a, Q34b
 
 ## Context

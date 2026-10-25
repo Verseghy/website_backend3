@@ -81,6 +81,13 @@ export function packageName(id) {
  * Checks the shape of a policy and returns it typed. Every entry must name a
  * licence and give a reason, so the file stays reviewable.
  *
+ * An exception must also scope a licence that `allow` does not already admit
+ * for every package. ADR 0027 keeps every licence beyond ADR 0022 §4's table
+ * out of `allow` and admits it per package; an exception for a licence that
+ * `allow` still lists would only look scoped. It would never be relied on
+ * (`evaluateLicenses` credits the `allow` entry), so it is rejected here
+ * rather than left to the "matches no installed package" warning.
+ *
  * @param {unknown} raw - the parsed `license-policy.json`.
  * @returns {LicensePolicy} the same object, validated.
  * @throws {Error} naming the first malformed entry and what it lacks.
@@ -119,6 +126,14 @@ export function validatePolicy(raw) {
       )
     }
     assertSpdxId(entry.license, `exceptions[${index}]`)
+  })
+  const allowedForAll = new Set(allow.map((entry) => entry.license))
+  exceptions.forEach((entry, index) => {
+    if (allowedForAll.has(entry.license)) {
+      throw new Error(
+        `license-policy.json exceptions[${index}] scopes "${entry.license}" to ${entry.package}, but allow already admits "${entry.license}" for every package, so the exception has no effect. Remove "${entry.license}" from allow to scope it, or remove the exception (ADR 0027).`
+      )
+    }
   })
   return /** @type {LicensePolicy} */ (raw)
 }
@@ -199,7 +214,7 @@ export function evaluateLicenses(packages, policy) {
       : [info.licenses]
 
     for (const expression of expressions) {
-      const problem = problemWith(expression, isAllowed, (license) => {
+      const problem = problemWith(name, expression, isAllowed, (license) => {
         if (scoped.has(license) && !allowed.has(license)) {
           usedExceptions.add(`${name}:${license}`)
         } else {
@@ -225,12 +240,14 @@ export function evaluateLicenses(packages, policy) {
 /**
  * Returns what is wrong with one licence expression, or `null` when it passes.
  *
+ * @param {string} name - the package name, so the advice can say which
+ *   `exceptions` entry would admit it.
  * @param {string | undefined} expression - the licence license-checker found.
  * @param {(license: string) => boolean} isAllowed - the policy for this package.
  * @param {(license: string) => void} markUsed - told which licences it relied on.
  * @returns {string | null} the problem, phrased as what to do.
  */
-function problemWith(expression, isAllowed, markUsed) {
+function problemWith(name, expression, isAllowed, markUsed) {
   if (
     expression === undefined ||
     expression.trim() === "" ||
@@ -253,7 +270,11 @@ function problemWith(expression, isAllowed, markUsed) {
   }
   const used = satisfies(parsed, isAllowed)
   if (used === null) {
-    return "licence not allowed by admin/license-policy.json. Replace the dependency, or add the licence in a PR that states why it may be combined with AGPL-3.0-only (ADR 0022 §4)."
+    // ADR 0027 §3: a licence beyond ADR 0022 §4's table enters for one named
+    // package, never on `allow`, so the advice names the per-package route.
+    // A licence exception (`WITH`) cannot be admitted by any entry, because
+    // validatePolicy accepts only plain SPDX ids.
+    return `licence not allowed by admin/license-policy.json. Replace the dependency, or add an \`exceptions\` entry for "${name}" with the licence it is used under, in a PR that states why that licence may be combined with AGPL-3.0-only (ADR 0022 §4, ADR 0027). \`allow\` takes only the licences of ADR 0022 §4's allow-list, and no entry can admit a licence exception (WITH).`
   }
   used.forEach(markUsed)
   return null

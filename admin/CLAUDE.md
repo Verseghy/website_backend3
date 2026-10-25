@@ -64,7 +64,10 @@ ADR 0005 (bindings) before changing anything here.
 - **Dependencies.** Install with `npm ci`; `package-lock.json` is committed.
   A new production dependency must pass `npm run licenses`; a licence that is
   not in `license-policy.json` is added only in a PR that states why it may be
-  combined with AGPL-3.0-only (ADR 0022 §4).
+  combined with AGPL-3.0-only (ADR 0022 §4). `allow` holds only licences of
+  ADR 0022 §4's allow-list (deny.toml's `allow`); any other licence,
+  including 0BSD and BlueOak-1.0.0, is an `exceptions` entry that names the
+  package, one entry per package (ADR 0027).
 - **Pinned majors.** `../.github/dependabot.yml` keeps Dependabot's version
   updates off the majors the ADRs pin: `@types/node` on the `.node-version`
   major, react-router 7, ra-core 5 and its peers, React 19, Vite 8,

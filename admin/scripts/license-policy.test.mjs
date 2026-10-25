@@ -133,6 +133,16 @@ describe("evaluateLicenses", () => {
     ])
   })
 
+  it("tells the operator to add an exception for the failing package, not to widen allow (ADR 0027)", () => {
+    const [violation] = evaluateLicenses(
+      tree({ "@scope/other@1.0.0": "OFL-1.1" }),
+      POLICY
+    ).violations
+    expect(violation.problem).toBe(
+      'licence not allowed by admin/license-policy.json. Replace the dependency, or add an `exceptions` entry for "@scope/other" with the licence it is used under, in a PR that states why that licence may be combined with AGPL-3.0-only (ADR 0022 §4, ADR 0027). `allow` takes only the licences of ADR 0022 §4\'s allow-list, and no entry can admit a licence exception (WITH).'
+    )
+  })
+
   it("judges every entry of a legacy licences array", () => {
     expect(
       evaluateLicenses(tree({ "x@1.0.0": ["MIT", "GPL-2.0-only"] }), POLICY)
@@ -210,8 +220,131 @@ describe("validatePolicy", () => {
       { allow: [{ license: "MIT OR ISC", reason: "r" }], exceptions: [] },
       /one plain SPDX id/,
     ],
+    [
+      "an exception for a licence that allow admits for every package",
+      {
+        allow: [
+          { license: "MIT", reason: "r" },
+          { license: "0BSD", reason: "r" },
+        ],
+        exceptions: [
+          { package: "@fonts/inter", license: "OFL-1.1", reason: "r" },
+          { package: "tslib", license: "0BSD", reason: "r" },
+        ],
+      },
+      /exceptions\[1\] scopes "0BSD" to tslib, but allow already admits "0BSD" for every package, so the exception has no effect\. Remove "0BSD" from allow to scope it, or remove the exception \(ADR 0027\)\./,
+    ],
   ])("rejects %s", (_label, raw, message) => {
     expect(() => validatePolicy(raw)).toThrow(message)
+  })
+})
+
+/**
+ * The committed policy itself, as ADR 0027 decides it: a licence beyond ADR
+ * 0022 §4's table enters for named packages only, like deny.toml's crate
+ * exceptions.
+ */
+describe("the committed license-policy.json (ADR 0027)", () => {
+  // Read inside each test, never while the file is collected, so that a
+  // syntax error in either file fails these tests with its message instead of
+  // the whole test file. Not validated here: "accepts the committed policy"
+  // above reports a malformed policy.
+  /** @returns {import("./license-policy.mjs").LicensePolicy} the policy. */
+  const readCommitted = () =>
+    JSON.parse(
+      readFileSync(
+        resolve(import.meta.dirname, "../license-policy.json"),
+        "utf8"
+      )
+    )
+
+  // ADR 0022 §4's `[licenses] allow` row. The test below ties this copy to
+  // deny.toml, so the ADR, deny.toml and the npm policy cannot drift apart.
+  const ADR_0022_TABLE = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "BSL-1.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+  ]
+
+  /**
+   * The licence ids of deny.toml's `[licenses] allow` array. A small reader,
+   * not a TOML parser: the admin has no TOML dependency, and this one array
+   * of quoted ids is all it needs. Comments go first, so an id or a bracket
+   * in a comment is never read. The Admin test job checks out the whole
+   * repository, so `../../deny.toml` is there.
+   *
+   * @returns {string[]} the ids, in file order.
+   * @throws {Error} when the table or the array is missing.
+   */
+  const readDenyTomlAllow = () => {
+    const text = readFileSync(
+      resolve(import.meta.dirname, "../../deny.toml"),
+      "utf8"
+    )
+      .split("\n")
+      .map((line) => line.replace(/#.*$/, ""))
+      .join("\n")
+    const table = /^\[licenses\][ \t]*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(text)
+    if (table === null) {
+      throw new Error("deny.toml has no [licenses] table.")
+    }
+    const array = /^allow\s*=\s*\[([^\]]*)\]/m.exec(table[1])
+    if (array === null) {
+      throw new Error("deny.toml's [licenses] table has no `allow = [...]`.")
+    }
+    return [...array[1].matchAll(/"([^"]*)"/g)].map((match) => match[1])
+  }
+
+  it("matches ADR 0022 §4's table with deny.toml's allow", () => {
+    expect(readDenyTomlAllow()).toEqual(ADR_0022_TABLE)
+  })
+
+  it("allows for every package only licences of ADR 0022 §4's table", () => {
+    const outside = readCommitted()
+      .allow.map((entry) => entry.license)
+      .filter((license) => !ADR_0022_TABLE.includes(license))
+    expect(outside).toEqual([])
+  })
+
+  it("passes each licence beyond the table for its named packages and fails it for any other", () => {
+    const committed = readCommitted()
+    const result = evaluateLicenses(
+      tree({
+        // The packages ADR 0027 names, at the versions installed today.
+        "tslib@2.8.1": "0BSD",
+        "isexe@3.1.5": "BlueOak-1.0.0",
+        "minimatch@10.2.6": "BlueOak-1.0.0",
+        "@fontsource-variable/inter@5.3.0": "OFL-1.1",
+        "caniuse-lite@1.0.30001819": "CC-BY-4.0",
+        // glob 13 is BlueOak-1.0.0 and already in the installed tree as a
+        // development dependency; it must not reach production unreviewed.
+        "glob@13.0.6": "BlueOak-1.0.0",
+        "some-helper@1.0.0": "0BSD",
+        "some-font@1.0.0": "OFL-1.1",
+        "some-data@1.0.0": "CC-BY-4.0",
+      }),
+      committed
+    )
+    expect(result.violations.map((violation) => violation.id)).toEqual([
+      "glob@13.0.6",
+      "some-helper@1.0.0",
+      "some-font@1.0.0",
+      "some-data@1.0.0",
+    ])
+    // ADR 0027's case: a dependency update brings another BlueOak-1.0.0
+    // package into production. The advice is the one-line exception PR.
+    expect(result.violations[0].problem).toMatch(
+      /add an `exceptions` entry for "glob" with the licence it is used under/
+    )
+    expect(result.violations[0].problem).toMatch(
+      /`allow` takes only the licences of ADR 0022 §4's allow-list/
+    )
   })
 })
 

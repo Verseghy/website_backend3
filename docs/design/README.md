@@ -491,7 +491,7 @@ The Containerfile stays on UBI 9 because the hub's build nodes cannot run UBI 10
 
 ## Architecture decision records
 
-ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). ADR 0025 was accepted on 2026-10-25; it amends ADR 0012 §1 and one sentence of ADR 0005 §5. ADR 0026 was accepted on 2026-10-25; it amends ADR 0003, two consequences of ADR 0012, and ADR 0019. The [ADR index](adr/README.md) has longer summaries and the template.
+ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the maintainer had also answered the follow-up questions on the detailed editor design (research: DECISIONS 15a-15g). ADR 0025 was accepted on 2026-10-25; it amends ADR 0012 §1 and one sentence of ADR 0005 §5. ADR 0026 was accepted on 2026-10-25; it amends ADR 0003, two consequences of ADR 0012, and ADR 0019. ADR 0027 was accepted on 2026-10-25; it amends ADR 0022 §4 and two sub-bullets of ADR 0012 §4. The [ADR index](adr/README.md) has longer summaries and the template.
 
 | ADR | Decision | Status | Summary |
 |---|---|---|---|
@@ -516,11 +516,12 @@ ADRs 0001 to 0024 were accepted on 2026-10-24. ADR 0013 was accepted once the ma
 | [0019](adr/0019-scope-parity-tracking-retired-features-release-1-additions.md) | Scope: parity tracking, retired features, release-1 additions | Amended | Parity issues per ID, three retired features, four additions, frontend2 out of scope; the dashboard shows usage statistics and self-hosted API read counts. |
 | [0020](adr/0020-search-and-hungarian-ordering.md) | Search and Hungarian ordering | Accepted | Derived plain-text column with `unaccent`, ICU `hu` ordering. |
 | [0021](adr/0021-hungarian-only-admin-ui.md) | Hungarian-only admin UI | Accepted | One complete Hungarian message file; English only as a fallback. |
-| [0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md) | Builds and CI: PAC for production images, GitHub Actions for PR checks | Accepted | Hub builds the images; GitHub Actions checks the PRs. |
+| [0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md) | Builds and CI: PAC for production images, GitHub Actions for PR checks | Amended | Hub builds the images; GitHub Actions checks the PRs. |
 | [0023](adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) | Operations: hardening, rate limits, monitoring, backups, secrets | Accepted | Hardened internet-facing admin, router limits from day one, hub-only monitoring, backups extended to the new parts, backend3's keys in the shared `backend-secrets`. |
 | [0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) | AI maintainability: instruction files, the Loco skill, guardrails | Accepted | Tracked instruction files, exact-pinned vendored skill with a CI check, committed guardrails. |
 | [0025](adr/0025-delivery-exceptions-for-the-backend3-slice-plan.md) | Delivery exceptions for the backend3 slice plan | Accepted | Amends ADR 0012 §1 and ADR 0005 §5: six named slice classes of about 500 lines each, the users screens after labels, the spike endpoints re-added by the two posts slices. |
 | [0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md) | backend2 unchanged and running until decommissioning | Accepted | Amends ADR 0003, ADR 0012 and ADR 0019: no change in website_backend2 (PLT-29 retired); backend2 and its Redis keep running on the frozen data through the parallel run and retire with backend1 and MySQL at decommissioning. |
+| [0027](adr/0027-per-package-licence-exceptions-and-the-loco-advisory-ignores.md) | Per-package licence exceptions and the Loco advisory ignores | Accepted | Amends ADR 0022 §4 and ADR 0012 §4: the licences beyond ADR 0022's table only for named crates and packages, in both `deny.toml` and the npm policy; three advisory ignores until the Loco bump. |
 
 ## Specs
 
