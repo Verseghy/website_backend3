@@ -516,7 +516,8 @@ Everything that decides what HTML is allowed is pure and lives in `src/domain/ri
 src/domain/rich_text/
   mod.rs          module docs: why the module exists, the invariants (allow-list == editor output; S(S(x)) == S(x))
   policy.rs       SanitizePolicy, POLICY_VERSION, validation of the policy itself
-  sanitize.rs     Sanitizer: the ammonia Builder, the fixed-point loop, SanitizedHtml, the removal report
+  sanitize.rs     Sanitizer: the ammonia Builder, the fixed-point loop, SanitizedHtml
+  report.rs       the removal report: counts per rule, derived from a parse identical to ammonia's (§7.2)
   attrs.rs        attribute_filter dispatch, integer and enum helpers
   url_rules.rs    same-origin relative URLs, image_src, embed_src, the /storage link rule
   css/            the per-element grammar, value parsers, canonical form, alphabet guard
@@ -572,6 +573,7 @@ b.attribute_filter(move |element, attribute, value| attrs::filter(&p, element, a
 - **Enumerated attributes** (`ol[type]`, `a[target]`, the forced iframe attributes) are listed **only** in `tag_attribute_values`. ammonia admits an attribute listed in both maps with any value. `tag_attribute_values` matches values case-insensitively and keeps them verbatim, so the filter canonicalises them.
 - **`rel`** is never in `tag_attributes`, because `link_rel` asserts that it is not.
 - **`Sanitizer::sanitize(input)`** cleans, runs the structural pass, and repeats until the output equals the input of the pass, at most three passes. A non-converging input is refused (`content_not_normalisable`) and logged as an error, because it means a parser or serialiser mismatch. It returns `SanitizedHtml`, a newtype that only this function constructs, plus a removal report: counts per rule, which the drift canary, the import, revert and `content_normalize` use.
+- **The removal report** is derived, because ammonia reports nothing about what it removes and its allow-list step runs before any callback. `report.rs` parses the input as ammonia does (html5ever 0.40.1, a fragment in a `div` context, into scraper 0.29's tree) and walks it with the same tables and rules, in ammonia's order. Proptests compare its counts with ammonia's real output. When the output equals the input byte for byte, nothing was removed, so the report is empty and that second parse is skipped.
 
 ### 7.3 Attribute filter and the CSS grammar
 

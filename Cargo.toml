@@ -117,6 +117,27 @@ tracing = "0.1"
 # this same crate, so the guard sees the host exactly as the driver will.
 url = "2"
 percent-encoding = "2"
+# The server sanitiser (ADR 0013 §5, docs/design/editor.md §7). ammonia is
+# pinned exactly: the stored bytes depend on its internals (the forced
+# attributes kept in place, `rel` appended last, the `swap_remove` in its
+# attribute filter; editor.md §7.4), which the "Pinned ammonia behaviour" unit
+# tests of editor.md §13.6 pin, so every bump is a deliberate PR that runs them.
+ammonia = "=4.2.4"
+# The HTML parser of ammonia 4.2.4 ("^0.40"). The sanitiser parses its input
+# with this same copy and in the same fragment context as ammonia does, to
+# explain what ammonia removed (the removal report, editor.md §7.2).
+html5ever = "0.40.1"
+# The tree for that parse (`scraper::HtmlTreeSink`). scraper 0.29 is the DOM
+# editor.md §7.6 names for the sanitiser's checks; it shares html5ever 0.40
+# and cssparser 0.38 with ammonia. loco-rs keeps its own scraper 0.25 line
+# (html5ever 0.36, cssparser 0.36, selectors 0.33), so the graph holds two
+# copies of html5ever, markup5ever, tendril, string_cache, web_atoms,
+# cssparser, selectors, ego-tree and servo_arc, and one more version of the
+# phf crates. ammonia 4.2.4
+# requires html5ever ^0.40, so they cannot be merged, and deny.toml only
+# warns about duplicates. The default features add a command-line binary
+# (`main`) and a parse-error list (`errors`) that backend3 does not use.
+scraper = { version = "0.29", default-features = false }
 # DTO-to-TypeScript bindings for the admin API (ADR 0005 §2): major 12 with
 # chrono-impl and serde-compat, as in Loco's own template.
 ts-rs = { version = "12", features = ["chrono-impl", "serde-compat"] }
@@ -209,6 +230,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 percent-encoding = { workspace = true }
+ammonia = { workspace = true }
+html5ever = { workspace = true }
+scraper = { workspace = true }
 ts-rs = { workspace = true }
 utoipa = { workspace = true }
 chrono = { workspace = true }

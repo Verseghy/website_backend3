@@ -1,0 +1,48 @@
+//! The server side of the rich-text pipeline: content-v1 and its sanitiser
+//! (ADR 0013, docs/design/editor.md §3 and §7).
+//!
+//! Both public sites insert post and page bodies as trusted HTML, so the
+//! server decides what readers' browsers run. Every body that backend3
+//! stores is content-v1, one HTML dialect defined as data in [`policy`], and
+//! the [`Sanitizer`] is the barrier that enforces it on every write path.
+//!
+//! The invariants the finished pipeline holds (editor.md §7):
+//!
+//! - **The allow-list equals editor output.** `S(e) == e` for every body the
+//!   editor emits, so saving an unchanged body changes no byte.
+//! - **Idempotence.** `S(S(x)) == S(x)`, byte for byte.
+//! - **Determinism.** Two sanitiser instances produce the same bytes.
+//! - **No forgery.** The content write service takes only
+//!   [`SanitizedHtml`], which only [`Sanitizer::sanitize`] constructs.
+//!
+//! This module holds the policy tables, the URL rules, the attribute filter,
+//! the ammonia builder and the removal report. The CSS grammar (editor.md
+//! §3.3) and the structural pass with its fixed-point loop (§7.5), which
+//! restores the canonical attribute order and completes the invariants
+//! above, follow in their own modules; until then every `style` attribute
+//! is dropped and [`Sanitizer::sanitize`] is a single ammonia pass.
+//!
+//! Like everything under `src/domain/`, the module is pure (ADR 0008): the
+//! policy comes in as an argument, built once at boot from the settings.
+//!
+//! ```
+//! use backend3::domain::rich_text::{RemovalRule, SanitizePolicy, Sanitizer};
+//!
+//! let sanitizer = Sanitizer::new(SanitizePolicy::content_v1()).expect("a valid policy");
+//! let result = sanitizer
+//!     .sanitize(r#"<p onclick="x">Hello <img src="data:image/png;base64,AA" alt="kép"></p>"#)
+//!     .expect("a small input");
+//! assert_eq!(result.html.as_str(), r#"<p>Hello <img alt="kép"></p>"#);
+//! assert_eq!(result.report.count(RemovalRule::ImageSrcRejected), 1);
+//! assert_eq!(result.report.count(RemovalRule::AttributeNotAllowed), 1);
+//! ```
+
+pub mod attrs;
+pub mod policy;
+pub mod report;
+pub mod sanitize;
+pub mod url_rules;
+
+pub use policy::{POLICY_VERSION, PolicyError, SanitizePolicy};
+pub use report::{Removal, RemovalReport, RemovalRule};
+pub use sanitize::{SanitizeError, Sanitized, SanitizedHtml, Sanitizer};
