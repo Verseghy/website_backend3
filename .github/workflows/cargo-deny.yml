@@ -46,7 +46,9 @@ defaults:
 jobs:
   bans-licenses-sources:
     name: cargo-deny check bans licenses sources
-    # The scheduled run is for advisories only.
+    # The scheduled run is for advisories only. This exact condition is the one
+    # job-level `if:` that ADR 0029 allows on a required job: it is true on
+    # every pull_request and push event, so it never skips the PR check.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 15

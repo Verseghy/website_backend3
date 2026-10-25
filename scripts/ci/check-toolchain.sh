@@ -21,9 +21,11 @@
 #      digest, and the admin stage's ubi9/nodejs-<major> image matches
 #      admin/.node-version (ADR 0022 section 2: the hub's build nodes cannot run
 #      a UBI 10 / RHEL 10 userland). `FROM <earlier stage>` is allowed.
-# Rule 4 goes beyond the three items in ADR 0022's table for this job; it is
-# the static half of the Containerfile rules, which no other check covers
-# before the post-merge PAC build.
+# Rule 4 is the static half of the Containerfile rules, which no other check
+# covers before the post-merge PAC build. ADR 0022 section 3's table named
+# rules 1-3 for this job, without rule 1's legacy-file check; ADR 0029
+# section 3 brings the job's row up to date with all four rules and
+# check-workspace-deps.sh.
 #
 # A toolchain bump changes rust-toolchain.toml and the Containerfile ARG in the
 # same PR; a Node.js bump changes admin/.node-version, the ARG and the image
