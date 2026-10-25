@@ -7,3 +7,4 @@
 mod image_optimise;
 mod image_optimise_jpeg;
 mod image_optimise_png;
+mod image_optimise_webp_gif;

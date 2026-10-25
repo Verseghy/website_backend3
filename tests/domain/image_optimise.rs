@@ -30,6 +30,7 @@ const CORPUS_DIR: &str = "tests/fixtures/images";
 pub(super) const CORPUS: &[(&str, ImageFormat, u32, u32)] = &[
     ("gif/animated.gif", ImageFormat::Gif, 67, 41),
     ("gif/gif87a.gif", ImageFormat::Gif, 67, 41),
+    ("gif/metadata.gif", ImageFormat::Gif, 67, 41),
     ("gif/still.gif", ImageFormat::Gif, 67, 41),
     ("jpeg/baseline.jpg", ImageFormat::Jpeg, 67, 41),
     ("jpeg/camera.jpg", ImageFormat::Jpeg, 67, 41),
@@ -76,9 +77,15 @@ pub(super) const CORPUS: &[(&str, ImageFormat, u32, u32)] = &[
     ("png/payload.png", ImageFormat::Png, 67, 41),
     ("png/rgb.png", ImageFormat::Png, 67, 41),
     ("png/rgba-interlaced.png", ImageFormat::Png, 67, 41),
+    ("webp/animated-metadata.webp", ImageFormat::WebP, 67, 41),
     ("webp/animated.webp", ImageFormat::WebP, 67, 41),
+    ("webp/lossless-metadata.webp", ImageFormat::WebP, 67, 41),
+    ("webp/lossless-noise.webp", ImageFormat::WebP, 67, 41),
     ("webp/lossless.webp", ImageFormat::WebP, 67, 41),
+    ("webp/lossy-alpha-q95.webp", ImageFormat::WebP, 67, 41),
     ("webp/lossy-alpha.webp", ImageFormat::WebP, 67, 41),
+    ("webp/lossy-metadata.webp", ImageFormat::WebP, 67, 41),
+    ("webp/lossy-textured.webp", ImageFormat::WebP, 67, 41),
     ("webp/lossy.webp", ImageFormat::WebP, 67, 41),
 ];
 

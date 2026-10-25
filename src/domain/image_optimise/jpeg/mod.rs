@@ -90,7 +90,11 @@ pub enum JpegKept {
     Stripped(NotReencoded),
 }
 
-/// Why a JPEG keeps its stripped original.
+/// Why a JPEG keeps its stripped original. A lossy still WebP whose
+/// re-encode is not kept reports the same reasons
+/// ([`Treatment::ReEncodeDiscarded`](super::Treatment::ReEncodeDiscarded)),
+/// since ADR 0033 §1 holds both formats to one keep rule; `ColourModel` is
+/// the one reason that only a JPEG gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotReencoded {
     /// The re-encode was not at least 5 % smaller (ADR 0015 §7). This is
@@ -109,10 +113,10 @@ pub enum NotReencoded {
     /// The image is RGB, CMYK or YCCK, which the re-encode does not
     /// reproduce; it was decoded as the check only (ADR 0033 §2).
     ColourModel,
-    /// `MozJPEG` reported an error while encoding or while decoding the
-    /// re-encode for its SSIM, for example when memory ran out. The stripped
-    /// original is still a correct result, so the upload is not refused for
-    /// a failure of the encoder.
+    /// The encoder (`MozJPEG`, or libwebp for a WebP) reported an error while
+    /// encoding or while decoding the re-encode for its SSIM, for example
+    /// when memory ran out. The stripped original is still a correct result,
+    /// so the upload is not refused for a failure of the encoder.
     EncoderFailed,
 }
 

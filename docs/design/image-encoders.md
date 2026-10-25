@@ -817,3 +817,414 @@ walk is stricter.
   oxipng may change the colour type, bit depth, palette order, filters and
   interlacing (it removes Adam7) of a still image, which are encoding
   choices.
+
+## WebP
+
+ADR 0015 §7: "Metadata is removed. Lossy WebP is re-encoded at the same
+quality target and kept only under the same at-least-5 % rule as JPEG.
+Lossless WebP keeps its pixels and animation."
+[ADR 0033](adr/0033-image-optimisation-ssim-floor-reference-parsing-cpu-limits-a.md)
+amends it: a still lossy WebP's re-encode is kept only when it is also at a
+luma SSIM of at least 0.98 (§1), an animated lossy WebP is stripped only
+(§3), the chunks are read as libwebp reads them (§3), and an animation is
+held to 4096 frames and 256 Mi pixels (§4). Only the lossy still image
+needs an encoder; lossless and animated WebP are stripped and decoded, never
+re-encoded (`src/domain/image_optimise/webp/mod.rs` lists which chunks are
+kept). The maintainer accepted libwebp as a C build dependency for this.
+
+### Method
+
+- **Size and similarity.** Each input is re-encoded with the settings
+  below. The size is compared with the at-least-5 % rule, and the
+  similarity is the keep rule's own measure: the mean SSIM of the two luma
+  (Y) planes that libwebp decodes, at full resolution, with
+  `src/domain/image_optimise/ssim.rs` (11 × 11 Gaussian window, σ = 1.5),
+  the function JPEG's measurement and the corpus tests use.
+- **Images.** The photographs are the 10 CC0 photographs of the JPEG
+  measurement above (2.7 to 14.0 megapixels, no people), saved by
+  ImageMagick 7.1.2-34 (libwebp 1.6.0) as lossy WebP at quality 80, 90 and
+  95, as cameras, phones and editing tools write them. The settings were
+  chosen earlier on ImageMagick's built-in pictures (`logo:`, 640×480;
+  `wizard:`, 480×640; `rose:` enlarged to 700×460) and on seeded plasma
+  fractals, blurred like a photograph (3000×2000 and 6000×4000), each as
+  lossy WebP at quality 75, 90 and 100. The memory and worst-case inputs
+  are synthetic patterns of 7000×7000 pixels (49 megapixels, just under the
+  default budget of 50) that libwebp and the `gif` crate wrote. None of
+  them is committed.
+- **CPU time.** Wall time of one call, release build, or the thread CPU
+  time where a table says so, on a 24-thread AMD Ryzen 9 5900X workstation
+  shared with other builds, so the figures are upper bounds for that
+  machine. The edge node's cores are slower, so only the ratios between
+  candidates and paths carry over.
+- **Memory.** The peak resident set (`/usr/bin/time`, maximum RSS) of a
+  process that reads one file and runs the optimiser on it, release build.
+- **Build cost.** The research's method (research: gap-14 §6.2): a cold
+  `cargo build --release --locked` from an empty `target/` on the same
+  machine, timed with `/usr/bin/time`. CPU seconds (user + sys) approximate
+  the build's time on one CPU and are compared with and without the
+  dependency. `cargo build --timings` gives the share of each new crate.
+
+### Candidates
+
+| Candidate | Licence | Verdict |
+|---|---|---|
+| libwebp 1.6.0 through [`webpx`](https://crates.io/crates/webpx/0.4.1) 0.4.1 and `libwebp-sys` 0.14.4 | webpx `MIT OR Apache-2.0`; libwebp-sys `MIT`; the libwebp sources it bundles `BSD-3-Clause` | **Chosen.** libwebp is the reference encoder that `cwebp` and the browsers' decoders come from. webpx is a safe API over it, so backend3 keeps `unsafe_code = "forbid"`, and it exposes libwebp's decoder limits, scaled decoding, YUV input and output, and error reasons. |
+| libwebp through [`webp`](https://crates.io/crates/webp/0.3.1) 0.3.1 and `libwebp-sys` 0.9.6 | `MIT OR Apache-2.0`; `MIT` | Not chosen, not measured. Its decoder has no limits and gives no error reason (`Option`), its encoder takes only RGB or RGBA, and its animation decoder holds every frame in memory at once. Its libwebp is a snapshot from after 1.3.1: its `vendor/` sources carry the CVE-2023-4863 fix (`HuffmanTablesSegment` in `src/utils/huffman_utils.h`), but none of the fixes of releases 1.4 to 1.6. |
+| [`image-webp`](https://crates.io/crates/image-webp/0.2.4) 0.2.4, pure Rust | `MIT OR Apache-2.0` | Not usable: its encoder writes lossless WebP only. |
+| [`zenwebp`](https://crates.io/crates/zenwebp/0.4.6) 0.4.6, a pure-Rust port of libwebp | `AGPL-3.0-only OR LicenseRef-Imazen-Commercial` | Not measured. `AGPL-3.0-only` is not on the `deny.toml` list, and adding a licence needs its own PR (ADR 0022 §4). |
+
+### Settings
+
+| Setting | Value | Why |
+|---|---|---|
+| Quality | 85 | ADR 0015 §7's "same quality target" as JPEG; libwebp's scale follows JPEG's |
+| Method (effort) | 4, libwebp's default | Method 6 was 0-5 % smaller at 1.3-2.4 times the encode time (table below) |
+| Input | the `VP8 ` bitstream decoded to YUV 4:2:0 planes | VP8 stores YUV 4:2:0, so the re-encode adds no colour conversion and holds 1.5 bytes per pixel instead of 4 |
+| Keep rule | at least 5 % smaller, then a luma SSIM of at least 0.98 against the decoded original | ADR 0033 §1, the rule JPEG keeps (`reencode_is_kept`, `reencode_meets_ssim_floor`); the SSIM compares the Y plane of the original's decode with the Y plane of the re-encode's, and runs only for a re-encode that passed the size test |
+| Alpha | not re-encoded: the `ALPH` chunk is kept as it is | it is lossless already and independent of the colour bitstream, so a transparent image keeps its alpha exactly |
+| Threads | none | the decoders and the encoder run on the blocking thread of the upload (ADR 0015 §7) |
+| Decode check | every pixel decoded, scaled down to one pixel | proves the image decodes without holding a decoded copy of it |
+| Decoder limits | the pixel budget per image | webpx's other defaults are not backend3's rules: its 64 MiB input limit would refuse uploads that ADR 0015 §6 allows (128 MiB), and libwebp checks its 16383-pixel side limit itself |
+| Animation limits | at most 4096 frames and 256 Mi pixels in all frames, counted while the frames are read and refused at the frame that passes one, before any frame is decoded or the stripped copy is written | the decode check costs CPU time per frame, which the per-canvas budget does not bound; webpx's defaults for untrusted input, which ADR 0033 §4 accepts for WebP, GIF and APNG (`MAX_ANIMATION_FRAMES`, `MAX_ANIMATION_PIXELS`, shared with the PNG optimiser) |
+| Metadata | written by backend3 | the ICC profile and the Orientation-only EXIF go back into the re-encode (`VP8X`, `ICCP`, `EXIF`); the EXIF is read with the reader JPEG uses (ADR 0033 §3) |
+
+An animation is checked frame by frame: each frame's image chunks are
+decoded as a still image, as libwebp's own animation decoder does before it
+composes them, and backend3 checks that every frame fits the canvas. Composing
+the frames onto the canvas would only show that the decoded frames fit, and
+would cost the canvas size for every frame, however small the frame.
+
+### Results
+
+The photographs, through `optimise_webp` as uploads, measured on 2026-10-25.
+"Stored" is the bytes stored after the keep rule of ADR 0033 §1, summed over
+the set and divided by the input's bytes (the inputs carry no metadata, so
+they are what the strip leaves); "size rule alone" is what the 5 % rule
+without the SSIM floor would have stored.
+
+| Set | Re-encodes at least 5 % smaller | Of those, below SSIM 0.98 | Stored | Size rule alone | SSIM of the re-encodes | Time per file |
+|---|---:|---:|---:|---:|---|---:|
+| quality 80 | 0 of 10 (0.976 to 1.069 of the input) | — | 1.000 | 1.000 | 0.988 to 0.998 | 0.12 to 1.0 s |
+| quality 90 | 10 of 10 (0.667 to 0.863) | 1 (0.979) | 0.806 | 0.792 | 0.979 to 0.995 | 0.22 to 1.5 s |
+| quality 95 | 10 of 10 (0.327 to 0.663) | 5 (0.958 to 0.979) | 0.786 | 0.490 | 0.958 to 0.991 | 0.24 to 1.8 s |
+
+The photographs below the floor at quality 95 are the textured ones the
+JPEG measurement found: foliage, fur, water and a night scene. The settings
+were chosen on the earlier inputs, by size and time; the keep rule did not
+yet have its SSIM half, so their similarity is not repeated here (their
+lowest SSIM, on an older 8 × 8 measure, was 0.984):
+
+| Input | Pixels | Input bytes | Method 4 bytes | Ratio | Decode (ms) | Encode, method 4 (ms) | Method 6 bytes | Encode, method 6 (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| logo, q75 | 0.3 MP | 17,816 | 19,988 | 1.122 | 1.6 | 18.7 | 19,840 | 34.6 |
+| wizard, q75 | 0.3 MP | 22,054 | 25,416 | 1.152 | 2.0 | 19.7 | 25,026 | 48.4 |
+| rose, q75 | 0.3 MP | 8,540 | 11,280 | 1.321 | 1.5 | 27.6 | 11,308 | 42.8 |
+| plasma, q75 | 6 MP | 131,984 | 165,044 | 1.250 | 40.1 | 362 | 164,370 | 470 |
+| logo, q90 | 0.3 MP | 27,652 | 24,056 | 0.870 | 2.1 | 19.4 | 23,386 | 36.1 |
+| wizard, q90 | 0.3 MP | 42,186 | 35,500 | 0.842 | 5.2 | 22.9 | 33,850 | 55.6 |
+| rose, q90 | 0.3 MP | 14,942 | 12,736 | 0.852 | 1.9 | 22.5 | 12,982 | 32.5 |
+| plasma, q90 | 6 MP | 352,850 | 253,422 | 0.718 | 33.1 | 374 | 250,478 | 662 |
+| plasma, q90 | 24 MP | 1,156,430 | 753,964 | 0.652 | 182 | 1,112 | 749,654 | 1,528 |
+| logo, q100 | 0.3 MP | 44,766 | 22,882 | 0.511 | 2.8 | 18.3 | 22,454 | 33.5 |
+| wizard, q100 | 0.3 MP | 78,174 | 32,650 | 0.418 | 4.8 | 21.1 | 31,250 | 50.2 |
+| rose, q100 | 0.3 MP | 33,026 | 12,230 | 0.370 | 2.6 | 22.4 | 12,360 | 35.1 |
+| plasma, q100 | 6 MP | 837,128 | 233,322 | 0.279 | 63.4 | 434 | 229,006 | 621 |
+
+The transparent path re-encodes the same `VP8 ` bitstream and keeps the
+`ALPH` chunk, so only the colour changes. SSIM is the keep rule's:
+
+| Input | Pixels | Input bytes | Stored bytes | Ratio | SSIM | Stored | Alpha |
+|---|---:|---:|---:|---:|---:|---|---|
+| corpus `lossy-metadata.webp` (opaque, q95) | 2,747 | 3,398 | 670 | 0.197 | 0.9904 | re-encode | — |
+| corpus `lossy-alpha-q95.webp` (60 % alpha, q95) | 2,747 | 688 | 514 | 0.747 | 0.9904 | re-encode | identical |
+| corpus `lossy-textured.webp` (grain, q95) | 2,747 | 3,180 | 3,180 | 1.000 | 0.9606 | stripped original | — |
+| synthetic pattern, opaque, q95 | 49 MP | 5,593,848 | 4,925,494 | 0.881 | 0.9904 | re-encode | — |
+| synthetic pattern, alpha gradient, q95 | 49 MP | 5,605,726 | 4,950,308 | 0.883 | 0.9910 | re-encode | identical |
+
+What this means:
+
+- A WebP saved at quality 75 to 80, the default of most tools, does not get
+  5 % smaller at quality 85, so it is stored stripped, as ADR 0015 §7 wants.
+  The re-encode pays off for WebP saved at quality 90 and above.
+- The SSIM floor costs little at quality 90, where 9 of 10 photographs keep
+  their saving, and half the saving at quality 95, where the textured half
+  keeps its stripped original: 0.786 of the input stored instead of 0.490.
+  Every stored re-encode reaches 0.98, as ADR 0033 §1 asks; the corpus
+  tests hold the corpus's two re-encoded files, one opaque and one
+  transparent, to it, check that the alpha channel does not change, and
+  check that `lossy-textured.webp` keeps its stripped original.
+- libwebp can fail to encode a picture that decodes: generating the 49 MP
+  inputs at quality 100 and method 0 failed with `Partition0Overflow`. The
+  shipped settings did not fail on any input, and a failure would store the
+  stripped original with the reason for the log
+  (`Optimised::re_encode_failure`, `Treatment::ReEncodeDiscarded`).
+
+### The SSIM pass
+
+A re-encode that passes the size test is decoded once more, to YUV, and its
+Y plane goes into the streaming SSIM row by row with the original's, which
+the re-encode kept from its own decode (1 byte per pixel; the chroma planes
+are freed after the encode). Measured at 49 MP on the synthetic inputs:
+
+| Input | Re-encode | SSIM | Luma decode, CPU s | SSIM arithmetic, CPU s |
+|---|---:|---:|---:|---:|
+| opaque pattern, q95 | 0.881 of the input | 0.9904 | 0.34 | 1.08 |
+| transparent pattern, q95 | 0.880 | 0.9910 | 0.35 | 1.07 |
+| grey gradient with grain of ±8 levels, q95 | 0.436 | 0.9218 | 0.40 | 1.07 |
+
+- **CPU.** The pass costs about 1.4 to 1.5 CPU seconds at 49 MP, as JPEG's
+  does: about 1.1 s of SSIM arithmetic, whatever the content, and the rest
+  for the decode of the re-encode.
+- **Memory.** While it runs, the optimiser holds the original's luma (1 byte
+  per pixel), the re-encode's YUV planes (1.5 bytes per pixel), the SSIM's
+  11 rows of sums (about 3.5 MiB at 7,000 columns), the stripped file and the
+  re-encode. For the opaque path that is the new peak, 214 MB at 49 MP
+  instead of the 182 MB of the encoder; for the transparent path the decode
+  check's alpha plane stays the peak (next table).
+
+### Memory and CPU time per path
+
+Peak resident memory and time of one optimisation at 49 MP, the most the
+default budget admits, release build. The peak includes the input file and
+the stripped copy that the optimiser writes (both a few MB here, except
+where the table says); a process that only reads the file peaks at 5 to
+30 MB, and at 133 MB for the crafted 128 MiB uploads. Measured on
+2026-10-25; the animation and GIF rows again on 2026-10-26, after the limits
+moved into the walk over the chunks and blocks.
+
+| Path | Input | Peak memory | Bytes per pixel | Wall time |
+|---|---|---:|---:|---:|
+| Lossless still: decode check | `VP8L`, 3.1 MB | 200 MB | 4.1 | 0.29 s |
+| Lossy opaque still: check, re-encode and SSIM, re-encode kept | `VP8 ` q95, 5.6 MB | 214 MB | 4.4 | 4.8 s |
+| Lossy transparent still: the same, re-encode kept | `ALPH` + `VP8 ` q95, 5.6 MB | 254 MB | 5.2 | 4.9 s |
+| Lossy still below the floor: the same, stripped original kept | `VP8 ` q95 with grain, 14.0 MB | 239 MB | 4.9 | 6.0 s |
+| Animation at the pixel limit: 5 frames of 49 MP | `VP8L` frames, 15 MB | 213 MB | 4.3 | 1.6 s |
+| Animation at both limits: 4096 frames of 256×256 | `VP8L` frames, 28 MB | 59 MB | — | 1.2 s |
+| Animation past the pixel limit: 6 frames of 49 MP | 18 MB, refused at the 6th frame, before decoding | 20 MB | — | 0.01 s |
+| Animation of 4096 frames of 1×1 on a 49 MP canvas | `VP8L` frames, 0.2 MB | 4 MB | — | 0.03 s |
+| Crafted animation: 3,532,044 frames of 1×1 in a 128 MiB upload | header-only `VP8L` frames, refused at frame 4097 | 134 MB | — | 0.12 s |
+| GIF at the pixel limit: 5 frames of 49 MP | 42.6 MB | 134 MB | — | 0.5 s |
+| GIF at both limits: 4096 frames of 256×256 | 52.6 MB | 105 MB | — | 0.5 s |
+| GIF past the pixel limit: 6 frames of 49 MP | 51.1 MB, refused at the 6th descriptor, before decoding | 94 MB | — | 0.05 s |
+| GIF past the frame limit: 4097 frames of 1×1 | 0.1 MB, refused before decoding | 3 MB | — | 0.00 s |
+| Crafted GIF: 8,947,847 frames of 1×1 in a 128 MiB upload | refused at frame 4097 | 134 MB | — | 0.14 s |
+
+- The lossless check holds libwebp's own copy of the pixels (4 bytes per
+  pixel); a lossy check holds only row buffers, plus 1 byte per pixel for an
+  alpha plane, and libwebp decodes a compressed alpha plane through a 4-byte
+  buffer, which is why the transparent path is the highest. The re-encode
+  holds the YUV planes, a copy of them in the encoder's picture, and the
+  encoder's own state; the SSIM pass after it is described above.
+- An animation peaks at its largest frame, never at the canvas times the
+  frame count. Composing every frame onto the canvas, as libwebp's animation
+  decoder does, held two RGBA canvases and a copy of each frame (about 12
+  bytes per pixel, 576 MB at 49 MP) and cost the canvas for every frame: an
+  animation of 1,000 frames of 1×1 on a 49 MP canvas took 188 s that way,
+  and takes 7 ms frame by frame.
+- On top of these, the caller holds the upload, and the optimiser writes a
+  stripped copy of at most the same size; a lossy re-encode adds a smaller
+  file. A 128 MiB upload therefore adds up to about 256 MiB to the peaks
+  above. backend3's memory limit in the deployment is sized from these
+  figures, not from a decoded RGBA image alone.
+- **A crafted animation** costs no more than its upload. The walk over a
+  WebP's chunks and a GIF's blocks counts the frames and their pixels as it
+  goes and stops at the frame that passes a limit, before the frame is kept
+  and before the stripped copy is written; the frames of a WebP animation
+  are decoded before it too. Before, the whole frame list and the stripped
+  copy were built first: the crafted WebP above peaked at 484 MB, 350 MB
+  above its input, and the crafted GIF at 264 MB.
+- **CPU.** Within the limits of ADR 0033 §4 the decode check of an
+  animation takes at most about 1.5 s here, and a GIF's about 0.5 s: its
+  check costs CPU time in proportion to the decoded pixels of all its
+  frames, about 2,000 megapixels per second here, and the limit holds those
+  to 256 Mi. Before the limit, a GIF was bounded only by the upload size: a
+  12-bit LZW code stands for at most about 4,096 pixels, so up to about
+  2,700 pixels per byte, and 200 frames of 49 MP in 6.7 MB took 4.9 s. A
+  still lossy WebP costs the most, about 5 to 6 s at 49 MP, a quarter of it
+  the SSIM pass.
+
+### Build cost
+
+| Build | Compiled crates | CPU seconds (user + sys) | Wall time (24 threads, shared) |
+|---|---:|---:|---:|
+| Base (the image header slice, before the JPEG slice) | 440 | 811.4 | 77 s |
+| With webpx and gif | 451 | 850.8 | 83 s |
+| Difference | +11 | **+39.4 (+4.9 %)** | +6 s |
+
+The 11 new crates are webpx, libwebp-sys, gif, weezl, rgb, imgref, bytemuck,
+bytemuck_derive, zenpixels, whereat and enough; the build-script crates that
+libwebp-sys uses (cc, glob, pkg-config) were already in the graph. Most of the
+cost is the libwebp-sys build script, which compiles libwebp's C sources with
+`cc`: 12.3 s of the new crates' 23.1 s of wall time per unit, spread over
+several cores. Each figure is one cold build under a shared load, so a few
+percent of noise is expected. The build was measured with webpx's
+`animation` feature on; only the tests use it now, with `icc`, both Rust
+code over the same libwebp, so the release build compiles slightly less of
+webpx and none less of libwebp. The JPEG slice came after this measurement;
+on its base, rgb and bytemuck are already built for mozjpeg, so these
+crates add slightly less than the table shows.
+
+The Containerfile needs no change: its rust stage already installs gcc as
+the linker and C compiler for build scripts (ADR 0022 §2), and libwebp-sys
+needs neither bindgen nor clang. Its build script passes
+`-march=<target arch>`, which gcc does not accept for `x86_64` and drops, and
+it enables no instruction set above SSE2 unless the target has it, so the
+image keeps the default `x86_64-unknown-linux-gnu` target that the hub's
+CPUs and the edge node run (ADR 0022 §2). libwebp is linked statically, so
+the `ubi-micro` runtime image needs no shared library for it: a local
+`podman build` of the Containerfile succeeded, and its binary links only
+`libgcc_s`, `libm` and `libc`. Until the upload code calls the optimisers,
+the linker leaves libwebp out of the binary; the compile cost above is paid
+from the start.
+
+On the hub, the first PAC BuildRun took 10m52s (Verseghy/website_backend3#196).
+A 4.9 % increase in CPU time is about half a minute there. These local
+figures stand, as the JPEG and PNG sections' and the OpenAPI spike's do
+([openapi-spike.md](openapi-spike.md) §4): Pipelines-as-Code builds
+`master` only
+([ADR 0022](adr/0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md)),
+so a branch has no BuildRun to compare, and no cold build is timed on a
+GitHub runner before the merge. The duration of the first `master` PAC
+BuildRun after this change, compared with the one before it, is added here
+in the next docs change.
+
+### Licences
+
+`cargo deny check bans licenses sources` passes with the new crates.
+cargo-deny reads only the licence each crate declares, and libwebp-sys
+declares `MIT` for its Rust bindings while it also compiles the libwebp
+sources it bundles, which are `BSD-3-Clause` (its `vendor/COPYING`) with
+Google's additional patent grant (`vendor/PATENTS`, which licenses the
+Google patent claims that the WebM implementations necessarily infringe and
+ends that licence for anyone who sues over them). `deny.toml` therefore
+clarifies libwebp-sys as `MIT AND BSD-3-Clause`, tied to the hash of
+`vendor/COPYING`; both licences are on the list. cargo-deny ignores the
+clarification without a warning when the file changes, so an update of
+libwebp-sys re-reads both files and renews the hash.
+
+### Security
+
+libwebp is C code that parses untrusted uploads. Before any of it runs,
+`inspect` refuses a file above the pixel budget from its header, the strip
+checks the chunk structure as libwebp reads it (next section), every
+bitstream header that it keeps and every frame's place on the canvas, and an
+animation is held to its frame and pixel limits while its frames are read,
+so a crafted file of millions of frames is refused at frame 4097 and costs
+no memory beyond the upload (the table above). libwebp's decoders then see
+only the stored file, or one frame's chunks at a time, never the upload's
+own layout. The decoders are held to the same budget. The
+libwebp version moves with libwebp-sys, which webpx requires as `^0.14.2`,
+so a webpx release that Dependabot proposes or a lock file update picks a
+new one up; the `cargo-deny check advisories` job watches the whole graph
+(ADR 0022 §3).
+
+### Reading the chunks as libwebp does
+
+ADR 0033 §3 follows the reference decoders where ADR 0015 §7 is silent, as
+the header check of Verseghy/website_backend3#211 does. libwebp 1.6.0 has two
+readers of the chunks after `VP8X`, and they disagree on some layouts:
+
+- **its decoder**, `WebPDecode` (`ParseHeadersInternal` and
+  `ParseOptionalChunks` in `src/dec/webp_dec.c`), which decodes a still
+  image, and which #211's header check and the strip's decode check follow.
+  It refuses every animation;
+- **its demuxer** (`ParseVP8XChunks`, `ParseAnimationFrame`, `StoreFrame`
+  and `IsValidExtendedFormat` in `src/demux/demux.c`), through which its
+  animation decoder reads an animation and `WebPDemuxGetChunk` reads the
+  profile and the EXIF. Browsers run it before they decode: Firefox refuses
+  what it refuses and then decodes a still image's whole file with the
+  decoder (`mozilla-central@19272f1f7a2c:image/decoders/nsWebPDecoder.cpp`).
+
+So that every WebP that libwebp decodes passes, the strip reads a still
+image as the decoder reads it, an animation as the demuxer reads it, and the
+profile and the EXIF as the demuxer reads them, as far as it reads the file.
+The tests compare each layout with both readers through webpx (`decode_rgba`
+for the decoder; `AnimationDecoder`, `get_icc_profile` and `get_exif` for the
+demuxer), and a proptest checks that a still image with random chunks around
+it, a second image among them, passes exactly when the decoder decodes it,
+with the decoder's pixels, in a file that the demuxer reads too.
+
+A still image, a `VP8X` file without the animation flag:
+
+| Layout | libwebp's decoder | libwebp's demuxer | The strip |
+|---|---|---|---|
+| an `ALPH` chunk before the bitstream, without the alpha flag | reads it: the image shows its alpha | drops it: the image is opaque | keeps it without the flag, so each reader shows the stored file as it showed the upload |
+| an `ALPH` chunk after the bitstream, without the flag | ignores it | ignores it | drops it |
+| an `ALPH` chunk after the bitstream, with the flag | ignores it: the image is opaque | refuses the file | drops it: the image is opaque |
+| two `ALPH` chunks before the bitstream | reads the last | refuses the file | keeps the last |
+| an `ALPH` chunk with a `VP8L` bitstream, which has its own alpha | ignores it | refuses the file | drops it |
+| a second image | reads the first | refuses the file | keeps the first |
+| a second `VP8X` chunk, an `ANIM` chunk or an `ANMF` chunk before the image | skips them | refuses the file | drops them |
+| an `ANIM` and an `ANMF` chunk after the image | ignores them | shows no frame of them, reads a profile or EXIF after the frame's image as the file's | drops them, keeps that metadata if it is the first flagged |
+| reserved `VP8X` flags | ignores them | refuses the file | accepts it and writes them clear |
+| fewer than 8 bytes, or a chunk cut short, after the image | ignores them | refuses the file | drops them |
+| a profile or EXIF after the point where the demuxer refuses the file | does not read metadata | reads no further | drops it |
+| a chunk cut short before the image, no image, a malformed bitstream header, or an image of another size than the canvas | refuses the file | refuses the file | refuses it |
+| a simple file whose bitstream ends the RIFF size without the pad byte its odd size needs | reads it | refuses the file | stores it as uploaded, without the byte, which would make the output larger than the upload (as a GIF without its trailer) |
+| the same after a `VP8X` chunk | refuses the file (it counts the pad byte) | refuses the file | refuses it |
+
+An animation, which libwebp's decoder refuses whatever its layout:
+
+| Layout | libwebp's demuxer | The strip |
+|---|---|---|
+| `ANIM` of 5 bytes and its pad byte | reads 6 bytes from the padded payload | accepts it; the pad byte is the high byte of the loop count, kept as libwebp reads it |
+| `ANIM` of a padded size below 6 | refuses the file | refuses it |
+| a profile or EXIF after a frame's image, inside its `ANMF` chunk | reads it as the file's, in file order | keeps it if it is the first flagged one |
+| an `ANMF` chunk after a frame's image, inside its `ANMF` chunk | reads it as the next frame | keeps it as the next frame |
+| an image chunk after a frame's image, or outside every frame | refuses the file | refuses it |
+| an `ANMF` chunk with no image chunk | no frame | no frame |
+| no frame that holds an image: only an `ANIM` chunk, or only `ANMF` chunks without an image chunk | refuses the file | refuses it (`WebpNoFrame`), as it refuses a GIF with no image (ADR 0033 §3, D104) |
+| an `ANMF` chunk with `ALPH` and no bitstream, `ALPH` after its bitstream, or `ALPH` with a `VP8L` bitstream | refuses the file | refuses it |
+| an `ANMF` header of 2³² pixels or more | refuses the file | refuses it |
+| a frame's image that runs past the end of its `ANMF` chunk | refuses the file | refuses it |
+| reserved `VP8X` flags | refuses the file | refuses it |
+| more than 4096 frames or 256 Mi pixels in all frames | reads it (webpx's animation decoder refuses it by its limits) | refuses it at the frame that passes a limit (ADR 0033 §4) |
+
+## GIF
+
+ADR 0015 §7: "Metadata is removed. Pixels and animation are not touched."
+GIF needs no encoder: the stored file is the parser-based strip of
+`src/domain/image_optimise/gif.rs`, which keeps the frames byte for byte.
+To refuse a GIF that does not decode, every frame of the stripped file is
+decoded with the [`gif`](https://crates.io/crates/gif/0.14.2) crate 0.14.2
+(`MIT OR Apache-2.0`, pure Rust, from the image-rs project), to one byte per
+pixel and with the pixel budget as its memory limit per frame. Its build cost
+is part of the table above (gif and its LZW decoder, weezl, about 3 s of wall
+time per unit together), and its memory and CPU time are in the table of
+paths.
+
+ADR 0033 amends the GIF row twice:
+
+- **The `gif` crate is the reference** (§3), checked in its 0.14.2 source
+  (`src/reader/decoder.rs` and `src/reader/mod.rs`), with a test per layout
+  that compares the strip with the `gif` crate, and a proptest that the
+  `gif` crate reads the same frames, delays and loop count from the upload
+  and the stored file:
+
+  | Layout | The `gif` crate | The strip |
+  |---|---|---|
+  | a GIF that ends after a whole block, without its trailer | decodes every frame, then reports the end of the input (`UnexpectedEof`) | accepts it and stores it without a trailer, as uploaded; the decode check reads it with one appended |
+  | a GIF that ends inside a block | refuses it | refuses it |
+  | a GIF with no image, with or without its trailer | accepts some, with a block before the trailer, and refuses others, by a look one byte past the logical screen | refuses every one as corrupt, ADR 0033 §3's one exception (decision D104): no viewer shows an image of it |
+  | a graphic control extension whose last data sub-block holds 4 bytes, after others | reads that last sub-block | stores it as that sub-block alone |
+  | a graphic control extension whose last sub-block holds another length, or none | refuses it | refuses it |
+  | a `NETSCAPE2.0` loop extension | reads the loop count from the first sub-block after the identifier, and only when it is 3 bytes of id 1 | keeps that first sub-block alone; drops an extension whose first sub-block is anything else, which it reads as no loop count |
+  | an `ANIMEXTS1.0` loop extension | skips it | the same rule as `NETSCAPE2.0`, since browsers read it |
+  | a plain text extension | skips it | drops it; a graphic control extension before it stays, so the timing does not change |
+  | an extension of an unknown label | refuses it by default | drops it and accepts the file, as browsers skip it |
+
+  Browsers read the loop count as the `gif` crate does, except for one
+  layout. Chromium's GIF decoder, Wuffs, reads only the first sub-block, of
+  3 bytes and id 1, of either identifier
+  (`wuffs@4be865da:std/gif/decode_gif.wuffs`). Firefox reads either
+  identifier too, but takes a loop sub-block wherever it is among the
+  sub-blocks (`mozilla-central@19272f1f7a2c:image/decoders/nsGIFDecoder2.cpp`),
+  so an upload whose loop sub-block follows Netscape's buffering one loops
+  in Firefox, and its stored file, like the upload in Chromium and the `gif`
+  crate, plays once.
+- **The same totals as WebP** (§4): at most 4096 frames and 256 Mi pixels,
+  counted from the image descriptors while the blocks are walked, and
+  refused with the error of WebP and APNG (`ImageError::AnimationTooLarge`)
+  at the descriptor that passes a limit, before anything is decoded and
+  before the rest of the stripped copy is written.
+  At the limits the check takes about 0.5 s at 49 MP (the table of paths).

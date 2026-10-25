@@ -72,7 +72,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<Dimensions, HeaderError> {
 /// The length of the colour table that a packed field announces: none when
 /// its top bit is clear, otherwise 2ⁿ⁺¹ entries of 3 bytes, where n is its
 /// low 3 bits (`GIF89a` §18 and §20).
-fn colour_table_len(packed: u8) -> usize {
+pub(in crate::domain::image_optimise) fn colour_table_len(packed: u8) -> usize {
     if packed & 0x80 == 0 {
         0
     } else {

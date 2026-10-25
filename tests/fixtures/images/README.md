@@ -51,10 +51,17 @@ One folder per format, plus `over-budget/`.
 | `gif/still.gif` | GIF89a, one frame |
 | `gif/gif87a.gif` | GIF87a |
 | `gif/animated.gif` | GIF89a, three frames and a loop extension |
+| `gif/metadata.gif` | The frames of `animated.gif` with a comment and an ICC profile extension before every frame and an XMP application extension before the trailer |
 | `webp/lossy.webp` | Simple lossy WebP (`VP8 `) |
 | `webp/lossless.webp` | Simple lossless WebP (`VP8L`) |
 | `webp/lossy-alpha.webp` | Extended WebP (`VP8X`) with an alpha channel |
 | `webp/animated.webp` | Extended WebP (`VP8X`) with three frames |
+| `webp/lossy-metadata.webp` | Lossy WebP at quality 95 with an ICC profile, EXIF (Orientation 6, an invented GPS position and serial number) and XMP; quality 95 makes the re-encode at 85 worth keeping |
+| `webp/lossless-metadata.webp` | `lossless.webp`'s picture with the same metadata |
+| `webp/animated-metadata.webp` | `animated.webp`'s frames with the same metadata |
+| `webp/lossless-noise.webp` | Simple lossless WebP of grey noise, which a lossy encoder at quality 85 would store 23 % smaller, so treating it as lossy would change its pixels |
+| `webp/lossy-alpha-q95.webp` | `lossy-alpha.webp`'s picture at quality 95, a transparent image whose re-encode at 85 is kept |
+| `webp/lossy-textured.webp` | The picture with Gaussian grain added, at quality 95, as a textured photograph is saved: the re-encode at quality 85 is much more than 5 % smaller but stays below the SSIM floor, so the stripped original is kept (below) |
 | `over-budget/camera-50mp.*` | The header, and nothing after it, of an 8688×5792 image (50,320,896 pixels, a common 50-megapixel camera size) in each format. For JPEG the header runs to the marker of the first scan; the GIF file holds no frame, so its logical screen is its canvas |
 
 Every image outside `over-budget/` is 67×41, which is not square, so a
@@ -86,13 +93,34 @@ discarded and the stripped original stored. The corpus covers each side:
   re-encode reaches 0.994 and is kept, so the chroma test still sees a
   4:4:4 original whose chroma the re-encode halves to 4:2:0 (ADR 0033 §2).
 
+## The re-encoded lossy WebPs and the SSIM floor
+
+The same floor holds for a still lossy WebP (ADR 0033 §1), measured on the
+luma planes that libwebp decodes:
+
+- `lossy-metadata.webp` and `lossy-alpha-q95.webp`, one opaque and one
+  transparent, were saved at quality 95 from the smooth picture. Their
+  re-encodes at quality 85 reach 0.990 and are kept; the transparent one
+  keeps its `ALPH` chunk byte for byte.
+- `lossy-textured.webp` is the same picture with grain, at quality 95. Its
+  re-encode is 0.39 of its size but reaches only 0.961, so it keeps its
+  stripped original, as the textured photographs measured in
+  [`docs/design/image-encoders.md`](../../../docs/design/image-encoders.md)
+  do.
+- `lossy.webp` and `lossy-alpha.webp`, at quality 80, gain less than 5 %
+  from a re-encode at quality 85, so the size test keeps their stripped
+  originals before any SSIM is measured.
+
 ## How the files were made
 
 All files were generated for backend3 on 2026-10-25, with ImageMagick
-7.1.2-34 (libjpeg-turbo 3.1.3, libpng 1.6.58, libwebp 1.6.0) and ffmpeg 8.1.3.
+7.1.2-34 (libjpeg-turbo 3.1.3, libpng 1.6.58, libwebp 1.6.0), ffmpeg 8.1.3
+and, for the metadata files, exiv2 0.28.9.
 The pictures are a two-colour gradient with a rectangle and a circle drawn on
-it. Other tool versions write other bytes, so the files are kept as they are
-rather than regenerated.
+it, except `webp/lossless-noise.webp`, which is ImageMagick's random noise
+from a fixed seed, and `webp/lossy-textured.webp`, which adds ImageMagick's
+Gaussian noise from a fixed seed to the picture. Other tool versions write
+other bytes, so the files are kept as they are rather than regenerated.
 
 ```sh
 draw() { magick -size 67x41 gradient:'#1f6f8b-#f2c14e' -fill '#c0392b' -draw 'rectangle 6,5 30,22' -fill '#2e7d32' -draw 'circle 48,28 56,34' "$@"; }
@@ -110,6 +138,9 @@ draw -strip GIF87:gif/gif87a.gif
 draw -strip -quality 80 webp/lossy.webp
 draw -strip -define webp:lossless=true webp/lossless.webp
 draw -strip -alpha set -channel A -evaluate set 60% +channel -quality 80 webp/lossy-alpha.webp
+draw -seed 7 -attenuate 0.6 +noise Gaussian -strip -quality 95 webp/lossy-textured.webp
+draw -strip -alpha set -channel A -evaluate set 60% +channel -quality 95 webp/lossy-alpha-q95.webp
+magick -seed 7 -size 67x41 xc:gray +noise Random -strip -define webp:lossless=true webp/lossless-noise.webp
 
 frames() { magick \( -size 67x41 gradient:'#1f6f8b-#f2c14e' \) \( -size 67x41 gradient:'#f2c14e-#1f6f8b' \) \( -size 67x41 xc:'#2e7d32' \) -strip -set delay 20 -loop 0 "$@"; }
 frames gif/animated.gif
@@ -237,4 +268,31 @@ big -pix_fmt yuvj420p -q:v 5 full.jpg && head -c 189 full.jpg > over-budget/came
 big -pix_fmt rgb24 full.png && head -c 33 full.png > over-budget/camera-50mp.png
 big full.gif && head -c 13 full.gif > over-budget/camera-50mp.gif
 big -c:v libwebp -quality 80 full.webp && head -c 30 full.webp > over-budget/camera-50mp.webp
+
+# The metadata files. corpus.icc is an invented ICC profile: a 132-byte v2
+# header for an RGB display profile with no tags, which no decoder applies.
+# The EXIF values are invented: a GPS position in the open sea off West
+# Africa and a serial number of zeros.
+icc() { printf '\0\0\0\x84\0\0\0\0\x02\x10\0\0mntrRGB XYZ \x07\xea\0\x0a\0\x19\0\0\0\0\0\0acsp'
+        head -c 28 /dev/zero; printf '\0\0\xf6\xd6\0\x01\0\0\0\0\xd3\x2d'; head -c 52 /dev/zero; }
+icc > corpus.icc
+meta() { exiv2 -M'set Exif.Image.Orientation Short 6' -M'set Exif.Photo.BodySerialNumber Ascii 0000000000' \
+  -M'set Exif.GPSInfo.GPSLatitudeRef Ascii N' -M'set Exif.GPSInfo.GPSLatitude Rational 1/1 2/1 3/1' \
+  -M'set Exif.GPSInfo.GPSLongitudeRef Ascii E' -M'set Exif.GPSInfo.GPSLongitude Rational 4/1 5/1 6/1' \
+  -M'set Xmp.xmp.CreatorTool backend3 test corpus' "$1" \
+  && cp corpus.icc "${1%.webp}.icc" && exiv2 -iC "$1" && rm "${1%.webp}.icc"; }
+draw -strip -quality 95 webp/lossy-metadata.webp && meta webp/lossy-metadata.webp
+draw -strip -define webp:lossless=true webp/lossless-metadata.webp && meta webp/lossless-metadata.webp
+frames -quality 80 webp/animated-metadata.webp && meta webp/animated-metadata.webp
+
+# gif/metadata.gif: ImageMagick writes the comment and the ICC profile before
+# every frame. The XMP application extension goes before the trailer: the
+# packet, then XMP's 258-byte "magic trailer" (01, FF down to 00, then the
+# terminator 00), which lets a GIF reader step over the packet as sub-blocks.
+frames -set comment 'backend3 test corpus' -profile corpus.icc metadata-plain.gif
+xmp='<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:CreatorTool="backend3 test corpus"/></rdf:RDF></x:xmpmeta>'
+{ head -c -1 metadata-plain.gif
+  printf '\x21\xff\x0bXMP DataXMP%s\x01' "$xmp"
+  for i in $(seq 255 -1 0); do printf "\\x$(printf %02x "$i")"; done
+  printf '\0\x3b'; } > gif/metadata.gif
 ```
