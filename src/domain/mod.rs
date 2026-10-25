@@ -26,5 +26,6 @@ pub mod budapest;
 pub mod cli_guard;
 pub mod clock;
 pub mod database_target;
+pub mod image_optimise;
 pub mod route_coverage;
 pub mod task_lock_key;

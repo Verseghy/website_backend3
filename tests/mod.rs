@@ -13,6 +13,7 @@
 
 mod boot;
 mod cli;
+mod domain;
 mod migration;
 mod models;
 mod requests;
