@@ -224,7 +224,10 @@ updates:
       # on ammonia internals, so every upgrade goes through the corpus job
       # (ADR 0013, "Consequences"). A new major of any of them comes with a
       # deliberate editor PR; the updates that remain still arrive as PRs and
-      # must pass that job. Not dependencies yet: the editor slice adds them.
+      # must pass that job. ammonia, html5ever and scraper are dependencies
+      # (src/domain/rich_text/; ammonia exactly "=4.2.4", whose behaviour the
+      # pinned-ammonia unit tests hold). cssparser is not a direct one yet:
+      # the CSS grammar slice adds it.
       - dependency-name: ammonia
         update-types: ["version-update:semver-major"]
       - dependency-name: html5ever
