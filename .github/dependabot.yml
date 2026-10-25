@@ -58,10 +58,20 @@ updates:
   # [dev-dependencies] (`workspace_root_manifest?` in
   # dependabot-core@77f70df:cargo/lib/dependabot/cargo/file_updater.rb,
   # which hands the root manifest to the workspace-only updater in
-  # file_updater/workspace_manifest_updater.rb). An update outside such a
-  # requirement therefore arrives as a Cargo.lock-only PR that fails every
-  # `--locked` job, as #188 and #190 did. Close such a PR and make the bump by
-  # hand: raise the requirement in Cargo.toml, then run `cargo update -p <crate>`.
+  # file_updater/workspace_manifest_updater.rb). A requirement in backend3's
+  # own tables got its update as a Cargo.lock-only PR that failed every
+  # `--locked` job, as #188 and #190 did. So every requirement of both crates
+  # is declared once in [workspace.dependencies], and the crates' tables only
+  # say `{ workspace = true }`, which the parser skips
+  # (cargo/lib/dependabot/cargo/file_parser.rb). migration/Cargo.toml
+  # inherits too, although Dependabot would rewrite its own requirements:
+  # one place per requirement keeps both crates on the same one. An update,
+  # version or security, to a release that the requirement does not allow
+  # then raises the requirement there, in the same PR as Cargo.lock. An
+  # update that the requirement allows changes only Cargo.lock, as before,
+  # and passes the `--locked` jobs. scripts/ci/check-workspace-deps.sh (the
+  # Toolchain job) fails on a requirement declared anywhere else, or written
+  # in a form the workspace updater does not find (a dotted or quoted key).
   #
   # Not listed, so all their updates flow: thiserror, serde_path_to_error,
   # proptest and futures-util. None of their types cross Loco's API, and no
@@ -81,7 +91,7 @@ updates:
       - dependency-name: loco-rs
       # Sea-ORM moves with Loco, in the same kind of dedicated PR (ADR 0024
       # section 3; loco-rs 1.2.0 requires sea-orm "2.0"). `sea-orm-*` covers
-      # sea-orm-migration in migration/Cargo.toml.
+      # sea-orm-migration, which migration/ uses.
       - dependency-name: sea-orm
       - dependency-name: sea-orm-*
 

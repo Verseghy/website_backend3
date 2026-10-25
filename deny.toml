@@ -25,9 +25,9 @@ version = 2
 # (ADR 0022 §4). Each entry is removed by the PR that removes its cause,
 # normally a Loco bump (ADR 0024 §3). All three below have no patched release
 # that loco-rs 1.2.0's dependency tree can use, and come in through
-# non-optional dependencies of loco-rs 1.2.0. The links are the upstream
-# issues and pull requests that track each cause; the backend3 tracking
-# issues are opened with the bootstrap PR, and their links are added here.
+# non-optional dependencies of loco-rs 1.2.0. Each entry links its backend3
+# tracking issue, which the PR that removes the entry closes, and the
+# upstream issues and pull requests that track its cause.
 ignore = [
   # rsa 0.9: Marvin attack, timing side channel in RSA private-key
   # operations. Pulled in by jsonwebtoken's `rust_crypto` backend, which
@@ -37,6 +37,7 @@ ignore = [
   # Upstream: https://github.com/RustCrypto/RSA/issues/626 (the fix) and
   # https://github.com/Keats/jsonwebtoken/issues/495 (jsonwebtoken moving to
   # rsa 0.10).
+  # Tracking issue: https://github.com/Verseghy/website_backend3/issues/192
   { id = "RUSTSEC-2023-0071", reason = "RSA is unused: backend3 uses HS512 JWTs only (ADR 0006); no patched rsa release" },
   # crypto-bigint 0.5: timing variability in constant-time operations, fixed
   # in 0.7.6. Pulled in through elliptic-curve 0.13 by jsonwebtoken's p256
@@ -44,12 +45,14 @@ ignore = [
   # operation, as above. No upstream issue tracks jsonwebtoken's move to the
   # 0.14 curves yet, so the backend3 tracking issue carries it.
   # Upstream fix: https://github.com/RustCrypto/crypto-bigint/pull/1365
+  # Tracking issue: https://github.com/Verseghy/website_backend3/issues/193
   { id = "RUSTSEC-2026-0387", reason = "ECDSA is unused: backend3 uses HS512 JWTs only (ADR 0006); no patched 0.5 release" },
   # unsafe-libyaml is unmaintained (informational, no known vulnerability).
   # Pulled in by serde_yaml_ng (Loco's config loader) and serde_yaml (loco-gen
   # via rrgen). It only parses the repository's own config/*.yaml and seed
   # fixtures, never request input.
   # Upstream: https://github.com/loco-rs/loco/issues/1859
+  # Tracking issue: https://github.com/Verseghy/website_backend3/issues/194
   { id = "RUSTSEC-2024-0449", reason = "unmaintained, no vulnerability; parses only committed config and fixtures; required by loco-rs 1.2.0" },
 ]
 

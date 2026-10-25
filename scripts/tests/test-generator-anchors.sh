@@ -15,10 +15,19 @@
 #       injected line separates it from its item, and `missing_docs` fails);
 #     - a name the injected line uses but the file does not import (the
 #       `BackgroundWorker` trait for `Worker::build`, the `tasks` module).
+#   The one generator that edits Cargo.toml, `cargo loco generate deployment
+#   lambda`, adds `lambda_http` after the first line matching
+#   `\[dependencies\]`. Prose that names that table above the real header
+#   (the comments of [workspace.dependencies], for example) would turn the
+#   line into a workspace entry that no crate uses. Where it lands correctly,
+#   it is still a requirement in a member table, which
+#   scripts/ci/check-workspace-deps.sh reports with the fix
+#   (.claude/skills/backend3/SKILL.md, "Add a Rust dependency").
 #   This test simulates each injection of the loco-gen 1.2.0 templates on a
 #   copy of the real file and checks where the line lands. The anchors are
 #   copied from those templates (`templates/controller/api/controller.t`,
-#   `worker/worker.t`, `task/task.t`, `migration/*.t`); a Loco bump re-reads
+#   `worker/worker.t`, `task/task.t`, `migration/*.t`,
+#   `deployment/lambda/lambda.t`); a Loco bump re-reads
 #   them (ADR 0024 section 3). Negative controls prove that each check fails
 #   on the shape it guards against.
 #
@@ -31,6 +40,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 APP_RS="$ROOT/src/app.rs"
 MIGRATION_LIB="$ROOT/migration/src/lib.rs"
+CARGO_TOML="$ROOT/Cargo.toml"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -170,6 +180,28 @@ check_migration_mod_anchor() {
   fi
 }
 
+# `cargo loco generate deployment lambda`: after "\[dependencies\]" in
+#   Cargo.toml, `lambda_http = { version = "1.3" }`. The first matching line
+#   must be the package's own [dependencies] table header. (The anchor is
+#   written as a bracket expression here because awk -v would turn `\[` into
+#   a plain `[`.)
+check_cargo_dependencies_anchor() {
+  local file=$1 line text
+  line=$(first_match "$file" '[[]dependencies[]]')
+  [[ -n $line ]] || { echo "no line matches '[dependencies]'"; return 1; }
+  text=$(line_at "$file" "$line")
+  if [[ $text != "[dependencies]" ]]; then
+    echo "the first line matching '[dependencies]' (line $line) is not the table header: $text"
+    return 1
+  fi
+}
+
+# Prints the nearest TOML table header at or above line N of FILE.
+#   $1 - the file; $2 - the line number.
+enclosing_table() {
+  awk -v n="$2" 'NR <= n && /^\[/ { last = $0 } NR == n { print last; exit }' "$1"
+}
+
 # Runs one check and records the expected outcome.
 #   $1 - "pass" or "fail"; $2 - the case name; $3 - the check; $4 - the file.
 expect_check() {
@@ -189,6 +221,7 @@ expect_check pass "src/app.rs: worker anchor and BackgroundWorker import" check_
 expect_check pass "src/app.rs: task anchor and tasks import" check_task_anchor "$APP_RS"
 expect_check pass "migration/src/lib.rs: migration list anchor" check_migration_list_anchor "$MIGRATION_LIB"
 expect_check pass "migration/src/lib.rs: mod anchor keeps the Migrator doc attached" check_migration_mod_anchor "$MIGRATION_LIB"
+expect_check pass "Cargo.toml: the first '[dependencies]' line is the package's table header" check_cargo_dependencies_anchor "$CARGO_TOML"
 
 # The injection itself, end to end on copies: each injected line lands next
 # to its anchor.
@@ -205,6 +238,14 @@ if [[ $(enclosing_fn "$WORK/lib-list.rs" "$list_line") =~ fn\ migrations\(\) ]];
   report ok "a generated migration lands in Migrator::migrations" ""
 else
   report fail "a generated migration lands in Migrator::migrations" "line $list_line"
+fi
+inject "$CARGO_TOML" after '[[]dependencies[]]' 'lambda_http = { version = "1.3" }' "$WORK/cargo-lambda.toml"
+lambda_line=$(first_match "$WORK/cargo-lambda.toml" '^lambda_http = ')
+if [[ $(enclosing_table "$WORK/cargo-lambda.toml" "$lambda_line") == "[dependencies]" ]]; then
+  report ok "the lambda generator's dependency lands in the package's [dependencies]" ""
+else
+  report fail "the lambda generator's dependency lands in the package's [dependencies]" \
+    "line $lambda_line is under $(enclosing_table "$WORK/cargo-lambda.toml" "$lambda_line")"
 fi
 
 # Files the generators append a `mod` line to must exist.
@@ -225,6 +266,10 @@ done
 expect_check fail "control: an 'inject-above' in the module docs is caught" check_migration_list_anchor "$WORK/prose-anchor.rs"
 { echo '// See fn connect_workers below.'; cat "$APP_RS"; } >"$WORK/prose-worker.rs"
 expect_check fail "control: a 'fn connect_workers' in a comment above is caught" check_worker_anchor "$WORK/prose-worker.rs"
+# shellcheck disable=SC2016 # the backticks are literal TOML comment text
+awk '{ print } !done && /^\[workspace\.dependencies\]$/ { print "# backend3 adds `net` in its [dependencies]."; done = 1 }' \
+  "$CARGO_TOML" >"$WORK/prose-cargo.toml"
+expect_check fail "control: a '[dependencies]' in a comment above the header is caught" check_cargo_dependencies_anchor "$WORK/prose-cargo.toml"
 
 # Loco's own template shape, a doc comment directly above the struct.
 grep -v 'pub struct Migrator`,$' "$MIGRATION_LIB" >"$WORK/doc-above.rs"

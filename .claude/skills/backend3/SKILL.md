@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, or a step of the legacy MySQL importer. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, or a Rust dependency. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its four repeated tasks. They sit on
+These recipes are backend3's way of doing its five repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -28,7 +28,8 @@ Before any recipe:
 
 ## 1. Add a vertical slice
 
-A slice carries one feature end to end in one PR (ADR 0012 section 1).
+A slice carries one feature end to end in one PR (ADR 0012 section 1). A slice
+that needs a new crate adds it with recipe 5.
 
 1. **Branch** from `master` (a PR may build on at most one other open PR) and
    open the PR as a **draft** right away.
@@ -211,3 +212,62 @@ is its specification; each slice adds the step for its own tables.
    databases, then check the report.
 9. **PR**: the `import` scope, for example `feat(import): import labels and post labels`,
    with the D-numbers it resolves and the parity IDs it finishes.
+
+---
+
+## 5. Add a Rust dependency
+
+Every requirement of the workspace lives once, in `[workspace.dependencies]`
+of the root `Cargo.toml`, and the crates inherit it. Dependabot rewrites only
+that table of the root manifest, so a requirement in the root package's own
+tables gets every update beyond it as a Cargo.lock-only PR that fails every
+`--locked` job. `migration/` inherits too, although Dependabot would rewrite
+its manifest: each requirement and its reason then live in one place, and the
+two crates cannot drift apart (the header of `Cargo.toml` and the cargo entry
+of `.github/dependabot.yml`).
+
+1. **Need**: check that Loco does not already do it (`AGENTS.md` rule 2) and
+   that the crate's licence is on the `deny.toml` list (ADR 0022 section 4).
+2. **Workspace entry** in the root `Cargo.toml`, `[workspace.dependencies]`:
+   the version requirement, with a comment that says why the crate and its
+   features are there. `default-features = false` and a rename
+   (`package = "..."`) go here, because a member cannot set them. So do the
+   features that every crate using it needs. Write it as
+   `<crate> = "<requirement>"` or `<crate> = { version = "<requirement>", ... }`,
+   with bare keys, never dotted (`<crate>.version = ...`) or quoted
+   (`"<crate>" = ...`) ones: Dependabot rewrites the requirement in place by
+   searching for those forms, does not find the others, and their updates
+   would be Cargo.lock-only PRs again (`check-workspace-deps.sh` rejects
+   them). Avoid a rename where you can: Dependabot's parser skips a renamed
+   entry, so it gets no version updates and is bumped by hand. Keep the
+   literal `[dependencies]` out of the comments above the package's own
+   table: `cargo loco generate deployment lambda` injects after the first
+   line that matches `\[dependencies\]` (`scripts/tests/test-generator-anchors.sh`
+   checks that).
+3. **Member entry** in the crate that uses it (`[dependencies]` or
+   `[dev-dependencies]` of the root package, or `migration/Cargo.toml`):
+   `<crate> = { workspace = true }`, plus `features = [...]` that only this
+   crate needs (features only add up) or `optional = true`. Nothing else goes
+   here. Once the workspace entry exists, `cargo add <crate> -p backend3`
+   (`--dev` for a test dependency, `-p migration` for the migrations) writes
+   the equivalent `<crate>.workspace = true`; before that, `cargo add` writes
+   a plain requirement into the member, which the check below rejects.
+4. **Lockfile**: build once without `--locked` (`cargo build`) so
+   `Cargo.lock` picks the crate up, and commit `Cargo.toml` and `Cargo.lock`
+   together.
+5. **Dependabot rule**: if the crate's types cross Loco's API or an ADR pins
+   its major, add an ignore rule with its reason to the cargo entry of
+   `.github/dependabot.yml`, following the rules in that file's header.
+6. **Check**: `bash scripts/ci/check-workspace-deps.sh` (the `Toolchain`
+   job runs it), `cargo deny --workspace --all-features check bans licenses
+   sources`, then the `AGENTS.md` gate.
+
+Generators: of the `cargo loco generate` templates in loco-gen 1.2.0, only
+`deployment lambda` edits `Cargo.toml`. It adds
+`lambda_http = { version = "1.3" }` to the package's `[dependencies]` (and
+`[package.metadata.lambda]` at the end). backend3 ships as a container image
+(ADR 0022) and never runs it, but if it or a future generator adds a
+requirement to a member table, move it as in steps 2 and 3:
+`check-workspace-deps.sh` names the entry and the fix. Bumps of `loco-rs` and
+the Sea-ORM crates stay dedicated PRs (ADR 0024 section 3); they change the
+same `[workspace.dependencies]` entries.
