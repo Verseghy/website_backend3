@@ -7,18 +7,30 @@
  * keys through props such as `label="ra.action.save"`, so this test scans
  * every source file for string literals shaped like a key of one of the
  * admin's namespaces and fails on each one `hu.ts` lacks.
+ *
+ * The scan sees only the namespaces in {@link NAMESPACES}, so a namespace that
+ * `hu.ts` has and the list lacks would be skipped without a failure. The file
+ * therefore also checks that the list holds every top-level key of `hu.ts`
+ * (ADR 0030 §4).
  */
 import { readdirSync, readFileSync } from "node:fs"
 import { join, relative, resolve } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
-import { hu } from "./hu"
+import { hu, type MessageTree } from "./hu"
 import { lookupMessage } from "./messages"
 
 const SRC = resolve(import.meta.dirname, "..")
 
-/** The top-level namespaces of `hu.ts` and of ADR 0021 §2's table. */
+/**
+ * The namespaces of ADR 0021 §2's table, as amended by ADR 0030 (which adds
+ * `app` and `kit`, and names the clipboard recorder's `recorder` among the
+ * screen namespaces). The scan below sees only keys of these namespaces, so a
+ * namespace added to that table is added here in the same PR (ADR 0030 §4).
+ * The list may name namespaces that `hu.ts` does not have yet: the vertical
+ * slices add them. A test below fails when `hu.ts` has one that the list lacks.
+ */
 const NAMESPACES = [
   "ra",
   "app",
@@ -97,6 +109,27 @@ export function keyLiterals(text: string): string[] {
     .filter((key) => !FILE_EXTENSION.test(key))
 }
 
+/**
+ * Lists the top-level keys of a message tree that a namespace list lacks.
+ *
+ * The scan matches only literals of {@link NAMESPACES}, so a namespace that
+ * `hu.ts` has and the list lacks would be skipped silently: a missing key in
+ * it would pass this file (ADR 0030 §4).
+ *
+ * @param messages - the message tree whose top-level keys are checked
+ *   (`hu.ts`; the tests of this helper pass small trees).
+ * @param namespaces - the namespaces the scan knows.
+ * @returns the top-level keys of `messages` that `namespaces` lacks, in the
+ *   tree's order; empty when every one is listed.
+ */
+export function unlistedNamespaces(
+  messages: MessageTree,
+  namespaces: readonly string[]
+): string[] {
+  const listed = new Set(namespaces)
+  return Object.keys(messages).filter((key) => !listed.has(key))
+}
+
 describe("keyLiterals", () => {
   it("finds keys in translate calls, i18nKey and label props", () => {
     expect(
@@ -119,6 +152,40 @@ describe("keyLiterals", () => {
       keyLiterals(
         "translate(`ra.sort.${order}`); import 'ra-core'; import './app.css'"
       )
+    ).toEqual([])
+  })
+})
+
+describe("unlistedNamespaces", () => {
+  it("returns the top-level keys that the list lacks, in the tree's order", () => {
+    expect(
+      unlistedNamespaces(
+        {
+          probe: { one: "egy" },
+          ra: { action: { save: "Mentés" } },
+          other: "x",
+        },
+        ["ra"]
+      )
+    ).toEqual(["probe", "other"])
+  })
+
+  it("returns nothing when every top-level key is listed, even if the list names more", () => {
+    expect(
+      unlistedNamespaces({ ra: { action: { save: "Mentés" } } }, [
+        "ra",
+        "resources",
+      ])
+    ).toEqual([])
+  })
+})
+
+describe("the namespace list of this scan", () => {
+  it("holds every top-level namespace of hu.ts (ADR 0030 §4)", () => {
+    const unlisted = unlistedNamespaces(hu, NAMESPACES)
+    expect(
+      unlisted,
+      `hu.ts has top-level keys that NAMESPACES in admin/src/i18n/key-usage.test.ts lacks: ${unlisted.join(", ")}. If a key is a namespace of ADR 0021 §2's table (as amended), add it to NAMESPACES, or this scan skips its keys. If it is not, a new namespace needs an amending ADR first.`
     ).toEqual([])
   })
 })

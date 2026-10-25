@@ -68,7 +68,7 @@ Standing rules: use `oc`, never `kubectl`; never force-delete pods; never delete
 
 ## Hungarian-only admin UI
 
-The admin UI is Hungarian only ([ADR 0021](docs/design/adr/0021-hungarian-only-admin-ui.md)). Every user-visible string comes from `admin/src/i18n/hu.ts` through `useTranslate` or `<Translate i18nKey>`; components contain no user-visible literals. Use the terminology of ADR 0021 section 6 (for example „bejegyzés”, „lomtár”, „étel”, never „menü” for a dish). The server sends stable error codes with `params`, and the admin shows the Hungarian `errors.<code>` message. Identifiers such as permission names stay in English (ADR 0021 section 6), and the server's English `description` is shown only for an unknown code (section 4).
+The admin UI is Hungarian only ([ADR 0021](docs/design/adr/0021-hungarian-only-admin-ui.md)). Every user-visible string comes from `admin/src/i18n/hu.ts` through `useTranslate` or `<Translate i18nKey>`; components contain no user-visible literals. The namespaces of `hu.ts` are listed in ADR 0021 section 2, as amended by [ADR 0030](docs/design/adr/0030-app-and-kit-namespaces-in-the-hungarian-message-file.md), which adds `kit.*` (the copied kit files' own strings) and `app.*` (backend3's shell). Use the terminology of ADR 0021 section 6 (for example „bejegyzés”, „lomtár”, „étel”, never „menü” for a dish). The server sends stable error codes with `params`, and the admin shows the Hungarian `errors.<code>` message. Identifiers such as permission names stay in English (ADR 0021 section 6), and the server's English `description` is shown only for an unknown code (section 4).
 
 ## Where to look
 
