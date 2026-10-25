@@ -27,15 +27,17 @@
  * - Variables: only those ra-core and the kit pass (`%{name}`, `%{smart_count}`
  *   …). A test rejects placeholders that the English string does not have.
  *
- * Namespaces (ADR 0021 §2): `ra.*` holds exactly the keys of
- * `ra-language-english` plus the three kit-only keys; `kit.*` holds the other
- * strings of the copied kit and shadcn/ui files, which upstream hard-codes in
- * English (ADR 0021 §3); `app.*` holds the application shell that no ADR
- * namespace covers (title, footer, about page, update prompt, client-side data
- * errors); `dashboard.*` holds the dashboard; `recorder.*` holds the
- * development-only clipboard recorder (editor.md §13.1). Vertical slices add
- * `resources.*`, `enums.*`, `errors.*` and their own screens' namespaces in the
- * same PR as the screen.
+ * Namespaces (ADR 0021 §2, amended by ADR 0030): `ra.*` holds exactly the
+ * keys of `ra-language-english` plus the three kit-only keys; `kit.*` holds the
+ * other strings of the copied kit and shadcn/ui files, which upstream
+ * hard-codes in English (ADR 0021 §3); `app.*` holds backend3's application
+ * shell (title, footer, about page, update prompt, data-provider notice);
+ * `dashboard.*` holds the dashboard; `recorder.*` holds the development-only
+ * clipboard recorder (editor.md §13.1). ADR 0030 §3 says which namespace a new
+ * key belongs to. Vertical slices add `resources.*`, `enums.*`, `errors.*`
+ * and their own screens' namespaces in the same PR as the screen. A top-level
+ * key that the namespace list of `key-usage.test.ts` (ADR 0030 §2's table)
+ * lacks fails that test.
  *
  * `errors.*` has one message per stable error code of the admin API, filled
  * from the envelope's `params` (ADR 0021 §4). It is declared
@@ -307,9 +309,10 @@ export const hu = {
     },
   },
   // Strings of the copied shadcn-admin-kit and shadcn/ui files that ra-core
-  // has no key for. The kit hard-codes them in English; ADR 0021 §3 routes
-  // them through this file (the edits are listed in
-  // src/components/admin/LOCAL_CHANGES.md and src/components/ui/LOCAL_CHANGES.md).
+  // has no key for (the `kit.*` row of ADR 0030 §2). The kit hard-codes them
+  // in English; ADR 0021 §3 routes them through this file (the edits are
+  // listed in src/components/admin/LOCAL_CHANGES.md and
+  // src/components/ui/LOCAL_CHANGES.md).
   kit: {
     autocomplete: {
       no_match: "Nincs találat.",

@@ -1,6 +1,6 @@
 # 0021. Hungarian-only admin UI
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0030](0030-app-and-kit-namespaces-in-the-hungarian-message-file.md) (2026-10-25)
 - Decision questions: Q40
 
 ## Context

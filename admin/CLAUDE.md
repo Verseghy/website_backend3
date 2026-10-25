@@ -41,6 +41,17 @@ ADR 0005 (bindings) before changing anything here.
   `local/no-ui-literals` lint rule fails them. Use ADR 0021 §6's terms
   („bejegyzés”, „lomtár”, „étel”, never „menü” alone). A slice adds its
   resources, enums, error codes and screen namespaces to `hu.ts` in the same PR.
+- **Namespaces (ADR 0021 §2, amended by ADR 0030).** `ra.*` is exactly
+  `ra-language-english` plus the three kit-only keys; a fourth needs an
+  amending ADR, so until one exists a kit update that calls one is edited to
+  use `kit.*`. In a copied kit file, reuse an `ra.*` key when ra-core has the
+  string, and otherwise add `kit.<component>.<name>` and list the edit in
+  `LOCAL_CHANGES.md`. In backend3's own code, a new key goes in its resource,
+  editor, screen, enum or error namespace; `app.*` is only the shell that no
+  screen owns (title, footer, about page, update prompt, data-provider
+  notice); ADR 0030 §3 has the details. A new top-level namespace needs an
+  amending ADR and an entry in `NAMESPACES` of `src/i18n/key-usage.test.ts`,
+  which a test there checks (ADR 0030 §4).
 - **Links to fixed admin paths** go through the basename:
   `` to={`${useBasename()}/about`} ``, never `to="/about"`. ra-core's
   `LinkBase` is a plain router link; `useCreatePath` and `useRedirect` add the
