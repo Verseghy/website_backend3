@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, or a Loco task. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, or code that needs the current time. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its six repeated tasks. They sit on
+These recipes are backend3's way of doing its seven repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -45,7 +45,9 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    edit `src/models/_entities/`. Both `db entities` and `generate model` shell
    out to `sea-orm-cli`, which is not part of the build: install the version
    that matches the locked `sea-orm` once, with
-   `cargo install sea-orm-cli@2.0.4 --locked` (the `AGENTS.md` commands).
+   `cargo install sea-orm-cli@2.0.4 --locked` (the `AGENTS.md` commands). The
+   first run for a table also writes `src/models/<name>.rs`, whose generated
+   `before_save` reads the system time: change it as recipe 7 step 5 says.
 4. **Pure logic** (validation rules, orderings, conversions) goes in
    `src/domain/<name>.rs` with unit tests and at least one proptest property
    per function with a non-trivial input space (ADR 0008 rule 1).
@@ -75,7 +77,8 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
     (`npm run e2e`). Tests that a generator writes use `boot_test` and
     `serial_test`, which backend3 does not depend on: rewrite them to
     `tests/support::with_app` or `with_server`, which give each test its own
-    database and always drop it.
+    database and always drop it. A test of a time-dependent rule starts at a
+    chosen instant with `with_app_at` or `with_server_at` (recipe 7).
 12. **Regenerate the contract**: run the test suite so ts-rs rewrites
     `admin/src/bindings/` and the OpenAPI snapshot updates, review both, and
     commit them (the `Contract` job fails on drift, ADR 0005 section 4).
@@ -173,7 +176,7 @@ public DTOs and operations that steps 2 and 5 follow.
    rule, named after the rule (for example
    `home_paging_visits_every_published_post_once`), asserting full order,
    parsed JSON field by field, the response against its schema, and the
-   headers of section 16.2. Time-dependent tests inject "now".
+   headers of section 16.2. Time-dependent tests inject "now" (recipe 7).
 8. **Contract**: review the `.snap.new` the tests write beside
    `tests/requests/snapshots/openapi_document.snap` and accept it (`cargo
    insta review`), bump `info.version`'s minor by hand for an addition, and
@@ -312,3 +315,58 @@ apart (ADR 0016 §4).
    work happened, as `tests/models/task_lock.rs` does for its probe task.
 5. **CronJob**: a recurring task needs its `CronJob` in website_k8s, with the
    settings of the ADR 0016 §4 table; that PR is left for human review.
+
+---
+
+## 7. Use the current time
+
+"Now" has one source, the app clock in the `AppContext` (ADR 0010 point 7),
+so every time-dependent rule can be tested at a chosen instant (public-api.md
+section 16.2). `App::after_context` registers the system clock; the
+interface is `Clock` in `src/domain/clock.rs`.
+
+1. **Read it once, at the edge.** A controller, worker or task takes
+   `crate::app::clock(&ctx)?.now()` (a `DateTime<Utc>`) once per request or
+   job run and passes the instant down. `src/domain/` takes "now" as an
+   argument (ADR 0008 rule 1) and computes "today" from it in Europe/Budapest
+   with `budapest::today(now)` (`src/domain/budapest.rs`, ADR 0010 points 5
+   and 7). Models and external-system code take the instant, or
+   `&dyn Clock` where one call needs several readings (the session extractor
+   of ADR 0006 section 1), never `&AppContext`.
+2. **Never read the system time yourself.** `tests/architecture.rs` fails on
+   every other read of it in `src/`, unit tests included (`Utc::now`,
+   `SystemTime::now`, Sea-ORM's `ChronoUtc::now` and the other forms the
+   test lists), on chrono's `Local` (it reads the process `TZ`, ADR 0010
+   point 4) and on `set_clock` outside `src/app.rs`. `Instant::now` stays
+   allowed outside `src/domain/`: it measures durations and never becomes an
+   instant.
+3. **Tests.** Unit tests inside `src/` pass an instant, or `FixedClock` where
+   the code takes a clock. Integration and request tests use
+   `tests/support::with_app_at(instant, |router, ctx, clock| ...)` or
+   `with_server_at(instant, |server, ctx, clock| ...)`; the `TestClock` stands
+   still until `clock.advance(TimeDelta)` or `clock.set(instant)` moves it.
+   It replaces the system clock after boot, so code that runs during boot
+   (hooks, initializers) still sees the system clock.
+4. **Limit: Loco's JWT reads the system time.** `JWT::generate_token` sets
+   `exp` to the system time plus its `expiration` (seconds), and
+   `JWT::validate` checks `exp` against the system time with a leeway of 0
+   (loco-rs 1.2.0 `src/auth/jwt.rs`). A handler that wants a token to end at
+   an instant `target` passes `target - clock(&ctx)?.now()` as the lifetime;
+   in production the app clock is the system clock, so `exp` is `target`, to
+   the second. Under a `TestClock` the lifetime is still exact, but `exp` is
+   the wall clock plus it, and moving the test clock neither ages nor
+   expires a token. Session tests (ADR 0006 section 1) assert exactly what
+   the handler derives from the app clock (the lifetime, and values computed
+   from it such as a cookie's `Max-Age`), and check `exp` only against that
+   lifetime added to wall-clock readings taken just before and after the
+   request. These readings and the boot test of the system clock are the
+   only reads of the wall clock in tests.
+5. **Generated code.** The first `cargo loco db entities` for a table with
+   `updated_at` writes `src/models/<name>.rs` with a `before_save` that sets
+   `updated_at` to `chrono::Utc::now()` on an update that left it unchanged
+   (loco-rs 1.2.0 `src/db/entities.rs`). The check rejects that line, and
+   ADR 0011 section 2 keeps some updates from changing `updated_at`, so
+   delete the fallback and let `before_save` return `Ok(self)`: the write
+   path sets the audit columns (ADR 0011 sections 2 and 7). The `Local::now()`
+   examples of the vendored Loco skill (`doctrine.md`,
+   `recipes/model-and-migration.md`) do not apply here.

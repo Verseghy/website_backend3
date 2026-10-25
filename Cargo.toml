@@ -129,7 +129,11 @@ ts-rs = { version = "12", features = ["chrono-impl", "serde-compat"] }
 # the snapshot does not depend on declaration order.
 utoipa = "6"
 # Dates, wall times and instants (ADR 0010): the chrono 0.4 types of Loco's
-# prelude, Sea-ORM 2.0 and ts-rs's `chrono-impl` (loco-rs 1.2.0 requires "0.4").
+# prelude, Sea-ORM 2.0 and ts-rs's `chrono-impl` (loco-rs 1.2.0 requires "0.4"),
+# and the UTC instant of the app clock. The default `clock` feature gives
+# `Utc::now` for the system clock in src/app.rs, and also chrono's `Local`
+# (Loco turns it on as well), so tests/architecture.rs keeps `Local` and every
+# other read of the system time out of src/.
 chrono = "0.4"
 # The compiled-in tz database of src/domain/budapest.rs, pinned exactly (ADR
 # 0010 point 5): new tz data can move the Budapest wall time of a stored

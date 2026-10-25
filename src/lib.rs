@@ -7,7 +7,8 @@
 //!
 //! Layout (ADR 0008):
 //!
-//! - [`app`]: the Loco hooks.
+//! - [`app`]: the Loco hooks, and the app clock that is the one source of
+//!   "now" ([`app::clock`], ADR 0010).
 //! - [`controllers`]: thin HTTP handlers; they touch `AppContext`.
 //! - [`domain`]: pure logic only, with unit tests and proptests.
 //! - [`dtos`]: wire types, the API contract (ADR 0005).
