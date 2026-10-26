@@ -1,11 +1,14 @@
 //! The OpenAPI document of `/api/v1` (ADR 0005 §4, public-api.md §7.18):
 //! the committed snapshot (a snapshot change is an API change), the served
-//! text and headers, the licence and source link (ADR 0012 §4), and route
-//! coverage in both directions against Loco's route table.
+//! text and headers, the licence and source link (ADR 0012 §4), the public
+//! `Error` schema (public-api.md §6.15) and route coverage in both
+//! directions against Loco's route table.
 //!
 //! The CI `Contract` job runs every test whose path contains `openapi` with
 //! `INSTA_UPDATE=no`, so a document that differs from the snapshot fails
 //! there as well as in the `Test` job.
+
+use std::collections::BTreeSet;
 
 use axum::http::{Method, StatusCode};
 use backend3::{
@@ -15,6 +18,7 @@ use backend3::{
         api_path::{ApiFamily, api_family},
         route_coverage::{Operation, coverage_gaps, documented_operations},
     },
+    dtos::v1::error::ErrorCode,
 };
 use loco_rs::app::Hooks;
 use serde_json::{Value, json};
@@ -48,6 +52,9 @@ async fn the_served_openapi_document_equals_the_snapshot() {
         assert_eq!(response.status_code(), StatusCode::OK);
         assert_eq!(response.header("content-type"), "application/json");
         assert_eq!(response.header("cache-control"), "no-cache");
+        // Through the /api/v1 layers (ADR 0014), so API explorers on other
+        // origins can read it.
+        assert_eq!(response.header("access-control-allow-origin"), "*");
         let document = response.text();
         assert_eq!(document, document_json().expect("the document serializes"));
         assert_document_snapshot(&document);
@@ -100,6 +107,47 @@ async fn the_openapi_document_names_the_licence_and_links_to_the_source() {
         assert!(description.contains(SOURCE_REPOSITORY), "{description}");
         // The paths carry /api/v1, so no `servers` entry differs per host.
         assert!(document.get("servers").is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_openapi_document_declares_the_public_error_body() {
+    with_server(|request, _ctx| async move {
+        let document: Value = request.get(DOCUMENT_ROUTE).await.json();
+        let schemas = &document["components"]["schemas"];
+        // public-api.md §6.15 and the codes of §8, in the order of the table.
+        let codes: Vec<Value> = ErrorCode::ALL
+            .iter()
+            .map(|code| json!(code.as_str()))
+            .collect();
+        assert_eq!(schemas["ErrorCode"]["type"], "string");
+        assert_eq!(schemas["ErrorCode"]["enum"], Value::Array(codes));
+        let error = &schemas["Error"];
+        assert_eq!(error["required"], json!(["error", "description"]));
+        assert_eq!(
+            error["properties"]["error"]["$ref"],
+            "#/components/schemas/ErrorCode"
+        );
+        assert_eq!(error["properties"]["description"]["type"], "string");
+
+        // A served error has exactly the declared fields and a declared code.
+        let body: Value = request.get("/api/v1/nope").await.json();
+        let declared: BTreeSet<&String> = error["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .collect();
+        let served: BTreeSet<&String> = body.as_object().expect("an object").keys().collect();
+        assert_eq!(served, declared);
+        assert!(
+            schemas["ErrorCode"]["enum"]
+                .as_array()
+                .expect("an enum")
+                .contains(&body["error"]),
+            "{body}"
+        );
+        assert!(body["description"].is_string(), "{body}");
     })
     .await;
 }

@@ -11,8 +11,43 @@ expression: document
       "name": "AGPL-3.0-only",
       "identifier": "AGPL-3.0-only"
     },
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "paths": {},
-  "components": {}
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "The body of every error response, except `405`, which has no body.",
+        "required": [
+          "error",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "English free text for humans. Clients match on `error` only."
+          },
+          "error": {
+            "$ref": "#/components/schemas/ErrorCode",
+            "description": "The error code."
+          }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "A stable, machine-readable error code. Clients match on this value; the\n`description` next to it is free text that may change.",
+        "enum": [
+          "invalid_limit",
+          "invalid_cursor",
+          "invalid_query",
+          "invalid_id",
+          "invalid_date",
+          "invalid_week",
+          "not_found",
+          "internal_server_error"
+        ]
+      }
+    }
+  }
 }

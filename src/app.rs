@@ -1,7 +1,7 @@
 //! The Loco hooks of backend3: how the application loads its configuration,
 //! builds its router and registers workers and tasks.
 //!
-//! Five hooks carry project decisions:
+//! Six hooks carry project decisions:
 //!
 //! - `after_context` registers the app clock, the one source of "now"
 //!   (ADR 0010 point 7). Handlers, workers and tasks read it with [`clock`]
@@ -20,6 +20,9 @@
 //!   fallback get the same request id, logging, compression and secure
 //!   headers as the API (`boot::setup_routes`). A router added in
 //!   `after_routes` would get none of them (ADR 0004 §3).
+//! - `routes` adds every `/api/v1` route through one builder,
+//!   `controllers::v1::routes`, which puts the CORS layer on those routes
+//!   only, so `/admin` and `/api/admin` never send CORS headers (ADR 0014).
 //! - `after_routes` wraps the finished router, middleware stack included, in
 //!   the HTTP request metrics layer.
 //! - `serve` puts [`trim_trailing_slash`] in front of the finished router,
@@ -471,7 +474,10 @@ impl Hooks for App {
         // after the next line; keep the route chain in this shape.
         AppRoutes::with_default_routes() // controller routes below
             .add_route(controllers::site::routes())
-            .add_route(controllers::v1::openapi::routes())
+            // Every /api/v1 route, with the public API's CORS and panic layers
+            // (src/controllers/v1/mod.rs). A public controller merges its routes
+            // there, never here: a route added here would miss those layers.
+            .add_route(controllers::v1::routes())
             .add_route(controllers::admin::routes())
     }
 

@@ -7,10 +7,11 @@
 //! - [`metrics`]: `/metrics` on its own port, and the HTTP request metrics
 //!   (ADR 0023 §9).
 //! - [`not_found`]: the fallback for unknown paths, with the JSON `404` of
-//!   `/api/admin` and `/api/v1`.
+//!   `/api/admin`, `/api/v1` and backend1's retired REST routes.
 //! - [`site`]: `/` and `/robots.txt` (ADR 0014).
-//! - [`v1`]: the public read API under `/api/v1`; so far its OpenAPI
-//!   document (ADR 0005 §4).
+//! - [`v1`]: the public read API under `/api/v1`: the one builder of its
+//!   routes, with CORS (ADR 0014), and so far its OpenAPI document
+//!   (ADR 0005 §4).
 //!
 //! The other admin endpoints and the public endpoints arrive with their
 //! slices.

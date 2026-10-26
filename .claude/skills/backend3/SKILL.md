@@ -219,7 +219,16 @@ public DTOs and operations that steps 2 and 5 follow.
    through Loco `Routes` (`Routes::get` records the method directly; the
    route-coverage test fails for a route whose method Loco cannot read) and
    listed in `paths(...)` of `PublicApi` in `src/controllers/v1/openapi.rs`.
-   Set `Cache-Control` and the weak `ETag` as section 9 says.
+   The module's `routes()` writes each path in full and sets no prefix, and
+   is merged in `controllers::v1::routes()` (`src/controllers/v1/mod.rs`)
+   before its `.layer(...)` call, never added in `App::routes`: that builder
+   adds the CORS layer of ADR 0014 and the panic handler, and
+   `Routes::merge` drops a prefix. If `cargo loco generate controller`
+   injected an `.add_route(...)` line into `App::routes`, move it there. A
+   client error is a `crate::dtos::v1::error::Error` answered with
+   `Ok(error.into_response())`, never turned into a `loco_rs::Error`, which
+   Loco logs at `ERROR` level; a database failure stays `?` and becomes
+   Loco's `500`. Set `Cache-Control` and the weak `ETag` as section 9 says.
 6. **Fixtures**: add every fixture that `public-api.md` section 17.1 lists for
    this endpoint, under the name used there, as invented data (never copied
    from production) loaded by the request tests. Check that each shape of the
@@ -230,7 +239,11 @@ public DTOs and operations that steps 2 and 5 follow.
    rule, named after the rule (for example
    `home_paging_visits_every_published_post_once`), asserting full order,
    parsed JSON field by field, the response against its schema, and the
-   headers of section 16.2. Time-dependent tests inject "now" (recipe 7).
+   headers of section 16.2, with the helpers of `tests/support`
+   (`public_get`, `assert_public_cors`, `assert_public_not_found`). Every
+   `/api/v1` route in Loco's route table gets the CORS and method checks of
+   `tests/requests/public_router.rs` without further work. Time-dependent
+   tests inject "now" (recipe 7).
 8. **Contract**: review the `.snap.new` the tests write beside
    `tests/requests/snapshots/openapi_document.snap` and accept it (`cargo
    insta review`), bump `info.version`'s minor by hand for an addition, and

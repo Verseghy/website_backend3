@@ -62,7 +62,12 @@ async fn admin_responses_carry_the_admin_headers() {
 #[tokio::test]
 async fn api_responses_carry_the_global_headers() {
     with_server(|request, _ctx| async move {
-        for path in ["/api/admin/nope", "/api/v1/nope", "/_ping"] {
+        for path in [
+            "/api/admin/nope",
+            "/api/v1/nope",
+            "/api/v1/openapi.json",
+            "/_ping",
+        ] {
             let response = request.get(path).await;
             assert_eq!(
                 response.header("content-security-policy"),

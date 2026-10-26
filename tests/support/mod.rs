@@ -11,8 +11,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::{ServiceExt, extract::Request};
-use axum_test::TestServer;
+use axum::{
+    ServiceExt,
+    extract::Request,
+    http::{
+        StatusCode,
+        header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName, ORIGIN, VARY},
+    },
+};
+use axum_test::{TestResponse, TestServer};
 use backend3::{
     app::{App, set_clock, trim_trailing_slash},
     domain::{clock::Clock, task_lock_key::task_lock_key},
@@ -25,6 +32,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
     TransactionTrait, prelude::Uuid,
 };
+use serde_json::{Value, json};
 
 /// The admin UI fixture of `config/test.yaml` (ADR 0004 §4).
 pub const FIXTURE_DIST: &str = "tests/fixtures/admin-dist";
@@ -416,4 +424,107 @@ impl QueueTableLock {
             .await
             .expect("close the second session");
     }
+}
+
+/// The origin of the public website, whose browser code calls `/api/v1`
+/// cross-origin (ADR 0014).
+pub const SITE_ORIGIN: &str = "https://verseghy-gimnazium.net";
+
+/// The header `name` of `response` as text, or `None` when it is absent.
+///
+/// Fails the test when the response carries the header more than once:
+/// `TestResponse::maybe_header` would show only the first value, and a
+/// browser rejects a CORS answer with two `Access-Control-Allow-Origin`
+/// values.
+pub fn header_text(response: &TestResponse, name: &HeaderName) -> Option<String> {
+    let values: Vec<String> = response
+        .iter_headers_by_name(name.clone())
+        .map(|value| value.to_str().expect("an ASCII header").to_owned())
+        .collect();
+    assert!(
+        values.len() <= 1,
+        "{name} is sent more than once: {values:?}"
+    );
+    values.into_iter().next()
+}
+
+/// Every `Access-Control-*` header of `response`, the response headers of
+/// the CORS protocol (Fetch standard, "HTTP responses"), in order and with
+/// repeated values kept, so that a duplicate or an unexpected one fails the
+/// comparison.
+///
+/// - `response`: the response to read.
+pub fn cors_headers(response: &TestResponse) -> Vec<(String, String)> {
+    response
+        .iter_headers()
+        .filter(|(name, _)| name.as_str().starts_with("access-control-"))
+        .map(|(name, value)| {
+            let value = value.to_str().expect("an ASCII header").to_owned();
+            (name.as_str().to_owned(), value)
+        })
+        .collect()
+}
+
+/// Sends `GET path` the way the public site's browser code does: a CORS
+/// simple request, with an `Origin` header and no custom header (ADR 0014).
+///
+/// - `server`: the test server.
+/// - `path`: the path and query to request.
+pub async fn public_get(server: &TestServer, path: &str) -> TestResponse {
+    server.get(path).add_header(ORIGIN, SITE_ORIGIN).await
+}
+
+/// Asserts the CORS headers of an `/api/v1` response other than a preflight
+/// answer (ADR 0014, DEC-18): exactly one `Access-Control-Allow-Origin: *`,
+/// no other CORS header (so never `Access-Control-Allow-Credentials`), and
+/// no `Vary` on the origin, because the answer is the same for every origin.
+///
+/// - `response`: the response to check.
+/// - `context`: what was requested, for the failure message.
+pub fn assert_public_cors(response: &TestResponse, context: &str) {
+    assert_eq!(
+        cors_headers(response),
+        [("access-control-allow-origin".to_owned(), "*".to_owned())],
+        "{context}: every /api/v1 response allows any origin, and nothing more"
+    );
+    for vary in response.iter_headers_by_name(VARY) {
+        let vary = vary.to_str().expect("an ASCII header").to_ascii_lowercase();
+        assert!(!vary.contains("origin"), "{context}: Vary: {vary}");
+    }
+}
+
+/// Asserts that a response carries no CORS header at all, as on `/admin`,
+/// `/api/admin`, the health routes and every other path outside `/api/v1`
+/// (ADR 0014).
+///
+/// - `response`: the response to check.
+/// - `context`: what was requested, for the failure message.
+pub fn assert_no_cors(response: &TestResponse, context: &str) {
+    assert_eq!(cors_headers(response), [], "{context}");
+}
+
+/// Asserts the JSON `404` of the public API and of backend1's retired REST
+/// routes (public-api.md §8): `application/json`, one `Cache-Control:
+/// no-store` and the `Error` body with `not_found`. The CORS header is
+/// checked separately, because only `/api/v1` sends it.
+///
+/// - `response`: the response to check.
+/// - `context`: what was requested, for the failure message.
+pub fn assert_public_not_found(response: &TestResponse, context: &str) {
+    assert_eq!(response.status_code(), StatusCode::NOT_FOUND, "{context}");
+    assert_eq!(
+        header_text(response, &CONTENT_TYPE).as_deref(),
+        Some("application/json"),
+        "{context}"
+    );
+    assert_eq!(
+        header_text(response, &CACHE_CONTROL).as_deref(),
+        Some("no-store"),
+        "{context}"
+    );
+    assert_eq!(
+        response.json::<Value>(),
+        json!({ "error": "not_found", "description": "Resource was not found" }),
+        "{context}"
+    );
 }

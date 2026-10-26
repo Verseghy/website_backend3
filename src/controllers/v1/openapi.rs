@@ -66,20 +66,31 @@ const DESCRIPTION: &str = concat!(
 /// `paths(crate::controllers::v1::<module>::<handler>, ...)`; utoipa collects
 /// the component schemas the operations use on its own.
 ///
+/// `components(schemas(...))` lists the error body of public-api.md §6.15
+/// and its code enum explicitly. Every error response of every operation
+/// refers to them (ADR 0005 §3), but the document has no operation yet, and
+/// the schemas are part of the contract from the first public route on.
+///
 /// `info(...)` sets every field the document carries, because utoipa fills
 /// the ones left out from Cargo's package metadata (`CARGO_PKG_*`), which
 /// describes the crate: the crate version is not the contract version.
 /// `license(...)` accepts string literals only, so it repeats [`LICENSE`],
 /// and the tests check that the two agree.
 #[derive(OpenApi)]
-#[openapi(info(
-    title = "backend3 public read API",
-    // The contract version (ADR 0005 §4): bump the minor by hand for an
-    // added operation or field, in the PR that updates the snapshot.
-    version = "1.0.0",
-    description = DESCRIPTION,
-    license(name = "AGPL-3.0-only", identifier = "AGPL-3.0-only"),
-))]
+#[openapi(
+    info(
+        title = "backend3 public read API",
+        // The contract version (ADR 0005 §4): bump the minor by hand for an
+        // added operation or field, in the PR that updates the snapshot.
+        version = "1.1.0",
+        description = DESCRIPTION,
+        license(name = "AGPL-3.0-only", identifier = "AGPL-3.0-only"),
+    ),
+    components(schemas(
+        crate::dtos::v1::error::Error,
+        crate::dtos::v1::error::ErrorCode
+    ))
+)]
 pub struct PublicApi;
 
 /// Builds the OpenAPI document of `/api/v1`.
@@ -100,7 +111,9 @@ pub fn document_json() -> serde_json::Result<String> {
     document().to_pretty_json()
 }
 
-/// The route of the document, for `App::routes`.
+/// The route of the document, written in full and without a prefix, for
+/// [`super::routes`], which adds the CORS and panic layers of every
+/// `/api/v1` route.
 #[must_use]
 pub fn routes() -> Routes {
     // `Routes::get` records the verb directly, so `AppRoutes::collect()` and
@@ -112,7 +125,9 @@ pub fn routes() -> Routes {
 /// `GET /api/v1/openapi.json`: the document as `application/json` with
 /// `Cache-Control: no-cache` (public-api.md §9). It is built per request,
 /// which needs no I/O; the weak `ETag` of §9 comes with the slice that adds
-/// it to every public response.
+/// it to every public response. The CORS header comes from the layers of
+/// [`super::routes`], so browser-based API explorers on other origins can
+/// read the document too.
 async fn serve_document() -> Result<Response> {
     let mut response = document_json()?.into_response();
     let headers = response.headers_mut();
