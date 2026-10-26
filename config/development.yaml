@@ -70,6 +70,23 @@ database:
   dangerously_truncate: false
   dangerously_recreate: false
 
+# The admin session (ADR 0006 §1). The secret is a throwaway local value,
+# public like the compose password and allowed by ADR 0034 §2: the base64 of
+# the sentence
+# "backend3 development JWT secret: public and throwaway, never valid on any
+# deployment." Production reads its own from JWT_SECRET
+# and must refuse this value (ADR 0034 §3).
+auth:
+  jwt:
+    secret: "YmFja2VuZDMgZGV2ZWxvcG1lbnQgSldUIHNlY3JldDogcHVibGljIGFuZCB0aHJvd2F3YXksIG5ldmVyIHZhbGlkIG9uIGFueSBkZXBsb3ltZW50Lg=="
+    # Two hours (ADR 0006 §1); the session cookie's Max-Age is this value.
+    expiration: 7200
+    # The session cookie first, then the Bearer header of scripts.
+    location:
+      - from: Cookie
+        name: __Host-admin_session
+      - from: Bearer
+
 settings:
   admin_ui:
     dist_dir: admin/dist

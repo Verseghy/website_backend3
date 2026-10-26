@@ -112,8 +112,15 @@ describe("hu.ts", () => {
 
   it("has a message for the admin API's error codes (ADR 0021 §4)", () => {
     // The compiler enforces completeness (`satisfies Record<ErrorCode, string>`);
-    // this pins the one code the bootstrap API returns.
+    // this pins the wording of each code.
     expect(hu.errors.not_found).toBe("A keresett elem nem található.")
+    // One generic message for every failed sign-in (ADR 0006 §4).
+    expect(hu.errors.invalid_credentials).toBe("Hibás e-mail-cím vagy jelszó.")
+    // A body that is not the endpoint's JSON, and one above the size limit.
+    expect(hu.errors.invalid_body).toBe(
+      "A kérés formátuma hibás. Frissítsd az oldalt, és próbáld újra!",
+    )
+    expect(hu.errors.body_too_large).toBe("Az elküldött adat túl nagy.")
   })
 
   it("keeps the ADR 0004 §5 update prompt verbatim", () => {

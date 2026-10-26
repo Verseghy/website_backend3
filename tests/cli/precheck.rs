@@ -4,17 +4,18 @@
 
 use std::time::Duration;
 
-use crate::support::{ConnectionProbe, run_cli};
+use crate::support::{CLI_JWT_SECRET, ConnectionProbe, run_cli};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The environment of a production pod, with the database pointed at
-/// `probe`. `HOST` is required by config/production.yaml.
+/// `probe`. `HOST` and `JWT_SECRET` are required by config/production.yaml.
 fn production_env(database_url: &str) -> Vec<(&'static str, String)> {
     vec![
         ("LOCO_ENV", "production".to_owned()),
         ("DATABASE_URL", database_url.to_owned()),
         ("HOST", "http://localhost".to_owned()),
+        ("JWT_SECRET", CLI_JWT_SECRET.to_owned()),
         // Keep the positive control fast: the probe never answers the
         // PostgreSQL handshake, so the driver gives up after this.
         ("DB_CONNECT_TIMEOUT", "300".to_owned()),

@@ -8,4 +8,4 @@
  * resource uses a dotted `<resource>.<reason>` code, such as
  * `search.term_too_long`.
  */
-export type ErrorCode = "not_found";
+export type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large";

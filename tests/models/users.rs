@@ -1,7 +1,8 @@
 //! The `users` model (ADR 0006, ADR 0011): password hashing and the cost of
 //! every failed check, then, against PostgreSQL, the two finders, the `pid`
-//! hook, a hash that round-trips through the table, and `App::truncate`,
-//! which leaves the accounts alone. Every account and password is invented.
+//! hook, a hash that round-trips through the table, `App::truncate`, which
+//! leaves the accounts alone, sign-in and its cost, the session token, and
+//! the `Authenticable` impl. Every account and password is invented.
 
 use std::time::{Duration, Instant};
 
@@ -10,12 +11,17 @@ use backend3::{
     domain::password_hash::DUMMY_PASSWORD_HASH,
     models::users::{self, ActiveModel, Model},
 };
+use chrono::DateTime;
 use loco_rs::{
     app::Hooks,
+    auth::jwt::JWT,
     model::ModelError,
-    prelude::{ActiveModelTrait, ActiveValue, DateTimeWithTimeZone, IntoActiveModel, Uuid},
+    prelude::{
+        ActiveModelTrait, ActiveValue, Authenticable, DateTimeWithTimeZone, IntoActiveModel, Uuid,
+    },
 };
 use sea_orm::DatabaseConnection;
+use serde_json::json;
 
 use crate::support::with_app;
 
@@ -24,8 +30,9 @@ const PASSWORD: &str = "any password";
 
 /// Genuine Argon2i and Argon2d hashes of [`PASSWORD`], made once with the
 /// argon2 crate 0.5.3 and its default parameters; test values, not
-/// credentials. The verifier takes the algorithm from the PHC string and
-/// accepts both, so only the classifier keeps them from matching.
+/// credentials (allowed by ADR 0034 §2). The verifier takes the algorithm
+/// from the PHC string and accepts both, so only the classifier keeps them
+/// from matching.
 const ARGON2I_OF_PASSWORD: &str = "$argon2i$v=19$m=19456,t=2,p=1$x+/NldSXjMwQE9EthLeHXw$mnorUHztCGA0DDlOKS5ClMQdsYGHgsrkdquPYNmOpgY";
 const ARGON2D_OF_PASSWORD: &str = "$argon2d$v=19$m=19456,t=2,p=1$ZZwW4B4Ccdcy+C+keoL6xw$LkwEIQ0Fj07ob4VcTnFYtIrKfJSGZH6x6FROTACjMro";
 
@@ -237,6 +244,8 @@ async fn find_live_by_email_ignores_case_and_finds_inactive_accounts() {
             "kis.anna@example.test ",
             "k%@example.test",
             "nincs@example.test",
+            // PostgreSQL text cannot hold U+0000; the finder never sends it.
+            "kis.anna\0@example.test",
         ] {
             assert_not_found(&Model::find_live_by_email(&ctx.db, typed).await, typed);
         }
@@ -328,6 +337,118 @@ async fn truncate_never_empties_the_accounts() {
         App::truncate(&ctx).await.expect("truncate");
         let found = Model::find_by_pid(&ctx.db, &user.pid.to_string()).await;
         assert_eq!(found.map(|found| found.id).ok(), Some(user.id));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn every_failed_sign_in_costs_what_a_wrong_password_costs() {
+    with_app(|_router, ctx| async move {
+        /// How an account below differs from a live, active one.
+        type Change = fn(&mut ActiveModel);
+        let hashed = users::hash_password(PASSWORD).expect("hash");
+        let accounts: [(&str, Change); 4] = [
+            ("ido@example.test", |_| {}),
+            // The accounts that may not sign in: their state is checked only
+            // after their password, so they cost a verification too.
+            ("inaktiv@example.test", |new| {
+                new.active = ActiveValue::Set(false);
+            }),
+            ("ketlepcsos@example.test", |new| {
+                new.totp_enabled_at = ActiveValue::Set(Some(instant()));
+            }),
+            ("csere@example.test", |new| {
+                new.must_change_password = ActiveValue::Set(true);
+            }),
+        ];
+        for (email, change) in accounts {
+            insert(&ctx.db, email, |new| {
+                new.password_hash = ActiveValue::Set(Some(hashed.clone()));
+                change(new);
+            })
+            .await;
+        }
+        let cost = |email: &'static str| {
+            let db = ctx.db.clone();
+            async move {
+                let start = Instant::now();
+                let outcome = Model::authenticate(&db, email, "wrong password").await;
+                assert_eq!(outcome.expect("query"), None);
+                start.elapsed()
+            }
+        };
+        // The faster of two runs each, as in the hashing test above: load
+        // only slows a run down, and a skipped verification is three orders
+        // of magnitude faster.
+        let wrong = cost("ido@example.test")
+            .await
+            .min(cost("ido@example.test").await);
+        for email in [
+            "nincs@example.test",
+            "ido\0@example.test",
+            "inaktiv@example.test",
+            "ketlepcsos@example.test",
+            "csere@example.test",
+        ] {
+            let failed = cost(email).await.min(cost(email).await);
+            assert!(
+                failed >= wrong / 10,
+                "{email:?}: {failed:?}, wrong password {wrong:?}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_session_token_carries_the_adr_claims() {
+    with_app(|_router, ctx| async move {
+        let user = insert(&ctx.db, "token@example.test", |new| {
+            new.token_version = ActiveValue::Set(3);
+        })
+        .await;
+        let secret = ctx
+            .config
+            .get_jwt_config()
+            .expect("auth.jwt")
+            .secret
+            .clone();
+        // Sub-second parts are dropped: `auth_time` is a NumericDate.
+        let auth_time = DateTime::from_timestamp(1_790_000_000, 999_000_000).expect("in range");
+        let token = user
+            .generate_session_token(&secret, 7200, auth_time)
+            .expect("signed");
+        let claims = JWT::new(&secret).validate(&token).expect("valid").claims;
+        assert_eq!(claims.pid, user.pid.to_string());
+        assert_eq!(
+            serde_json::Value::Object(claims.claims),
+            json!({ "tv": 3, "scope": "admin", "auth_time": 1_790_000_000 })
+        );
+        assert!(matches!(
+            user.generate_session_token("not base64!", 7200, auth_time),
+            Err(ModelError::Jwt(_))
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn loco_s_extractor_finds_accounts_by_pid_and_never_by_api_key() {
+    with_app(|_router, ctx| async move {
+        let user = insert(&ctx.db, "kulcs@example.test", |_| {}).await;
+        let found =
+            <Model as Authenticable>::find_by_claims_key(&ctx.db, &user.pid.to_string()).await;
+        assert_eq!(found.map(|found| found.id).ok(), Some(user.id));
+        assert_not_found(
+            &<Model as Authenticable>::find_by_claims_key(&ctx.db, "not-a-uuid").await,
+            "pid",
+        );
+        for key in ["", "kulcs@example.test", &user.pid.to_string()] {
+            assert_not_found(
+                &<Model as Authenticable>::find_by_api_key(&ctx.db, key).await,
+                key,
+            );
+        }
     })
     .await;
 }

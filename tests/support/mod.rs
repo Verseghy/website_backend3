@@ -30,6 +30,13 @@ pub const FIXTURE_DIST: &str = "tests/fixtures/admin-dist";
 /// The one hashed asset in the fixture.
 pub const FIXTURE_ASSET: &str = "assets/index-B7xKq2Lm.js";
 
+/// `JWT_SECRET` for the child processes that load config/production.yaml: a
+/// throwaway test value, the base64 of the sentence "backend3 CLI test JWT
+/// secret: public and throwaway, only for child processes.", which ADR 0034
+/// §2 allows. Production must refuse every published key (ADR 0034 §3), so
+/// the `secret-guards` slice replaces it with a key made at run time.
+pub const CLI_JWT_SECRET: &str = "YmFja2VuZDMgQ0xJIHRlc3QgSldUIHNlY3JldDogcHVibGljIGFuZCB0aHJvd2F3YXksIG9ubHkgZm9yIGNoaWxkIHByb2Nlc3Nlcy4=";
+
 /// The bytes of a file in the admin UI fixture.
 pub fn fixture(relative: &str) -> Vec<u8> {
     std::fs::read(repository_root().join(FIXTURE_DIST).join(relative))

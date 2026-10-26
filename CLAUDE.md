@@ -43,9 +43,9 @@ The test for where logic goes: if it needs the database or another external syst
 
 ## Public-safety rules
 
-This repository is public. Every file, commit, PR, issue and comment follows these rules ([ADR 0024](docs/design/adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) section 1, [ADR 0001](docs/design/adr/0001-record-architecture-decisions.md) section 8); a violation is a defect:
+This repository is public. Every file, commit, PR, issue and comment follows these rules ([ADR 0024](docs/design/adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) section 1, [ADR 0001](docs/design/adr/0001-record-architecture-decisions.md) section 8, both amended by [ADR 0034](docs/design/adr/0034-test-hashes-and-throwaway-keys-refused-in-production.md)); a violation is a defect:
 
-1. No credentials, password hashes, tokens, keys, or values from any secret. The compose database's `loco`/`loco` are throwaway local values.
+1. No credentials, password hashes, tokens, keys, or values from any secret. Only throwaway values that protect nothing are allowed ([ADR 0034](docs/design/adr/0034-test-hashes-and-throwaway-keys-refused-in-production.md) section 2): the compose database's `loco`/`loco`; hashes of invented test passwords and of discarded random values (such as the sign-in's dummy hash), each with a comment that says so; and fixed development, test and e2e keys whose text says they are public and throwaway. Production must refuse every published key: a slice that publishes a throwaway key makes production refuse it in the same PR, and the `secret-guards` slice adds the sign-in's JWT secrets to that refusal (ADR 0034 section 3).
 2. No description of live, unfixed weaknesses of a running system. Describe the target design instead ("backend3 enforces X").
 3. No personal data: no names or e-mail addresses of editors or users, and no per-person facts. Aggregate counts are fine, and so are the public contact details the school site itself shows. Test fixtures are invented, never copied from production.
 4. No claude.ai session links (above).

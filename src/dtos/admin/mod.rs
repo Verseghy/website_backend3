@@ -5,4 +5,5 @@
 //! a compile-checked TypeScript copy. 64-bit integer fields carry
 //! `#[ts(type = "number")]` (ADR 0005 §3).
 
+pub mod auth;
 pub mod error;

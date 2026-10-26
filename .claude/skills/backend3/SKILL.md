@@ -70,11 +70,28 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
 6. **DTOs**: request, response and error types in `src/dtos/admin/` with
    `serde` and `ts_rs::TS` exported to `admin/src/bindings/`, and in
    `src/dtos/v1/` with `utoipa` for public types (ADR 0005 sections 1-3; every
-   `i64` field carries `#[ts(type = "number")]`).
+   `i64` field carries `#[ts(type = "number")]`). serde's derived
+   `Deserialize` also reads a struct from a JSON array of its field values in
+   order. A request DTO that must be a JSON object implements `Deserialize`
+   with a visitor that has only `visit_map` and hands the map to the derived
+   fields (`deny_unknown_fields`) through
+   `serde::de::value::MapAccessDeserializer`, as
+   `dtos::admin::auth::LoginRequest` does. Never read a `serde_json::Map` or
+   `Value` first: that builds the whole body in memory before any member is
+   checked, and keeps the last of two members with the same name.
 7. **Admin API**: thin handlers in `src/controllers/admin/<name>.rs`. Every
    route is declared with its permission in the admin route table (deny by
    default, ADR 0007 sections 4-5); errors use the envelope and `ErrorCode`
-   of ADR 0021 section 4.
+   of ADR 0021 section 4 (`controllers::admin::error_response`). Until the
+   route table exists, mount the route in `controllers::admin::routes()`,
+   above its last line: that layer gives every admin response
+   `Cache-Control: no-store` (ADR 0023 §6), and loco-rs 1.2.0 applies a
+   group's layer only to the routes added before it.
+   `tests/requests/auth_login.rs` fails for an admin route without it.
+   A handler that reads a JSON body takes `Result<Json<T>, JsonRejection>`
+   and answers a refused body with `controllers::admin::json_rejection_response`:
+   `422 invalid_body`, or `413 body_too_large` above the request body limit
+   (research: DECISIONS R15 (D74)).
 8. **Public endpoint**, if the feature has one: recipe 3.
 9. **Admin screen** under `admin/src/`: resources through backend3's own data
    provider in `admin/src/data-provider/` (never `ra-data-json-server` or

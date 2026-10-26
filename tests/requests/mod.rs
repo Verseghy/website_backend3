@@ -2,6 +2,7 @@
 //! whole middleware stack exactly as in production.
 
 mod admin_ui;
+mod auth_login;
 mod metrics;
 mod not_found;
 mod openapi;
