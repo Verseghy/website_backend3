@@ -330,3 +330,90 @@ where
     })
     .await
 }
+
+/// Creates Loco's job queue table, `pg_loco_queue`, in the test's database
+/// with Loco's own set-up function, as a process with `queue.kind: Postgres`
+/// does at startup. `config/test.yaml` configures no queue (jobs run
+/// inline), so a per-test database has no queue table until this runs.
+///
+/// - `ctx`: the test's context; the table goes into its database.
+pub async fn create_queue_table(ctx: &AppContext) {
+    loco_rs::bgworker::pg::initialize_database(ctx.db.get_postgres_connection_pool())
+        .await
+        .expect("create pg_loco_queue");
+}
+
+/// Enqueues one job through Loco's Postgres queue, due `due_in_seconds`
+/// from now (negative: overdue), and returns its id. No worker runs in the
+/// tests, so it stays queued like a job in a process that runs no worker.
+///
+/// - `ctx`: the test's context; the job goes into its database.
+/// - `due_in_seconds`: when the job becomes due, relative to "now".
+///
+/// "Now" is PostgreSQL's `now()`, not the wall clock of the test process:
+/// the queue query measures the age of a due job with the database's clock
+/// (`src/models/job_queue.rs`), and recipe 7 of the project skill keeps
+/// wall-clock reads out of the tests.
+pub async fn enqueue_job(ctx: &AppContext, due_in_seconds: i64) -> String {
+    let sql = "SELECT now()";
+    let row = ctx
+        .db
+        .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
+        .await
+        .expect("read the database clock");
+    let now = row
+        .expect("one row")
+        .try_get_by_index::<DateTime<Utc>>(0)
+        .expect(sql);
+    let run_at = now + TimeDelta::seconds(due_in_seconds);
+    loco_rs::bgworker::pg::enqueue(
+        ctx.db.get_postgres_connection_pool(),
+        "TestWorker",
+        serde_json::json!({ "id": 1 }),
+        run_at,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("enqueue a job")
+}
+
+/// A second session on the test's database that holds an `ACCESS EXCLUSIVE`
+/// lock on `pg_loco_queue`, as a migration's `ALTER TABLE` would, so every
+/// query of the table waits for it. The session has a connection of its
+/// own, outside the application's pool.
+pub struct QueueTableLock {
+    session: DatabaseConnection,
+    transaction: DatabaseTransaction,
+}
+
+impl QueueTableLock {
+    /// Takes the lock; the table must exist ([`create_queue_table`]).
+    ///
+    /// - `ctx`: the test's context; the lock is on its database.
+    pub async fn take(ctx: &AppContext) -> Self {
+        let session = sea_orm::Database::connect(ctx.config.database.uri.as_str())
+            .await
+            .expect("open a second session");
+        let transaction = session.begin().await.expect("begin");
+        transaction
+            .execute_unprepared("LOCK TABLE pg_loco_queue IN ACCESS EXCLUSIVE MODE")
+            .await
+            .expect("lock pg_loco_queue");
+        Self {
+            session,
+            transaction,
+        }
+    }
+
+    /// Releases the lock and closes the session, which `with_app` needs
+    /// before it can drop the database.
+    pub async fn release(self) {
+        self.transaction.rollback().await.expect("release the lock");
+        self.session
+            .close()
+            .await
+            .expect("close the second session");
+    }
+}

@@ -79,9 +79,9 @@ loco-rs = { version = "=1.2.0", default-features = false, features = [
 migration = { path = "migration" }
 
 # Async runtime for the CLI entry point (`#[tokio::main]`), and `net` for the
-# listeners of `App::serve`. backend3 adds `net` and `sync` in its own
-# dependency table, and its test dependencies add `net`, `sync`, `io-util`
-# and `time`.
+# listeners of `App::serve`. backend3 adds `net`, `sync` and `time` in its
+# own dependency table, and its test dependencies add `net`, `sync`,
+# `io-util` and `time`.
 tokio = { version = "1.45", default-features = false, features = [
   "rt-multi-thread",
   "macros",
@@ -262,8 +262,9 @@ pedantic = { level = "warn", priority = -1 }
 loco-rs = { workspace = true }
 migration = { workspace = true }
 # `net` for the two listeners of `App::serve`, `sync` for the watch channel
-# that stops the /metrics listener together with the HTTP server.
-tokio = { workspace = true, features = ["net", "sync"] }
+# that stops the /metrics listener together with the HTTP server, `time` for
+# the timeout of the scrape's job-queue query (controllers::metrics::runtime).
+tokio = { workspace = true, features = ["net", "sync", "time"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

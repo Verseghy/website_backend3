@@ -14,6 +14,12 @@
 //! [`with_http_metrics`] records every request in one histogram,
 //! `http_server_request_duration_seconds{method, route, status}`; its
 //! `_count` series is the request counter, so there is no separate counter.
+//!
+//! [`runtime`] adds the families that are read at scrape time instead: the
+//! database pool, the job queue and the process. Each scrape refreshes them
+//! first ([`Metrics::scrape`]).
+
+pub mod runtime;
 
 use std::{
     fmt,
@@ -35,6 +41,7 @@ use prometheus_client::{
     registry::{Registry, Unit},
 };
 
+use self::runtime::RuntimeMetrics;
 use crate::domain::http_metrics::{
     CLIENT_CLOSED_STATUS, LATENCY_BUCKETS_SECONDS, method_label, route_label,
 };
@@ -59,6 +66,7 @@ const HTTP_REQUEST_DURATION: &str = "http_server_request_duration";
 pub struct Metrics {
     registry: Arc<Registry>,
     http: HttpMetrics,
+    runtime: RuntimeMetrics,
 }
 
 impl Metrics {
@@ -67,11 +75,14 @@ impl Metrics {
     ///
     /// - `registry`: the registry every family below was registered on.
     /// - `http`: the HTTP request families, from [`HttpMetrics::register`].
+    /// - `runtime`: the scrape-time families, from
+    ///   [`RuntimeMetrics::register`].
     #[must_use]
-    pub fn new(registry: Registry, http: HttpMetrics) -> Self {
+    pub fn new(registry: Registry, http: HttpMetrics, runtime: RuntimeMetrics) -> Self {
         Self {
             registry: Arc::new(registry),
             http,
+            runtime,
         }
     }
 
@@ -82,7 +93,9 @@ impl Metrics {
     }
 
     /// Writes every family in the `OpenMetrics` text format, ending with the
-    /// `# EOF` line. Families that have no series yet are left out.
+    /// `# EOF` line. Families that have no series yet are left out, and the
+    /// runtime families show their last refresh ([`Metrics::scrape`]), or
+    /// nothing before the first.
     ///
     /// # Errors
     ///
@@ -92,6 +105,19 @@ impl Metrics {
         let mut body = String::new();
         encode(&mut body, &self.registry)?;
         Ok(body)
+    }
+
+    /// Refreshes the runtime families ([`RuntimeMetrics::refresh`]), then
+    /// writes every family like [`Metrics::render`]. This is what
+    /// `GET /metrics` serves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`fmt::Error`] as [`Metrics::render`] does. A runtime source
+    /// that cannot be read is no error: its families are left out.
+    pub async fn scrape(&self) -> Result<String, fmt::Error> {
+        self.runtime.refresh().await;
+        self.render()
     }
 }
 
@@ -242,7 +268,7 @@ pub fn router(metrics: Metrics) -> AxumRouter {
 
 /// `GET /metrics` on the metrics port.
 async fn scrape(State(metrics): State<Metrics>) -> Response {
-    match metrics.render() {
+    match metrics.scrape().await {
         Ok(body) => ([(CONTENT_TYPE, OPENMETRICS_CONTENT_TYPE)], body).into_response(),
         Err(error) => {
             tracing::error!(%error, "cannot encode the metrics registry");
@@ -269,8 +295,12 @@ mod tests {
     fn metrics_with(extra: impl FnOnce(&mut Registry)) -> Metrics {
         let mut registry = Registry::default();
         let http = HttpMetrics::register(&mut registry);
+        // A disconnected database: the runtime families read nothing from
+        // it, and these tests need no PostgreSQL.
+        let runtime =
+            RuntimeMetrics::register(&mut registry, sea_orm::DatabaseConnection::default());
         extra(&mut registry);
-        Metrics::new(registry, http)
+        Metrics::new(registry, http, runtime)
     }
 
     #[test]
@@ -301,19 +331,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_registry_that_cannot_be_encoded_is_a_500() {
+    // A runtime, not `now_or_never`: the scrape refreshes the runtime
+    // families first, and the queue query's timeout needs tokio's timer.
+    #[tokio::test]
+    async fn a_registry_that_cannot_be_encoded_is_a_500() {
         let metrics = metrics_with(|registry| registry.register("broken", "Never", Unencodable));
         let request = Request::get(METRICS_PATH)
             .body(Body::empty())
             .expect("request");
-        let response = router(metrics)
-            .oneshot(request)
-            .now_or_never()
-            .expect("ready");
+        let response = router(metrics).oneshot(request).await;
         assert_eq!(
             response.expect("infallible").status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[tokio::test]
+    async fn a_scrape_without_a_database_still_serves_the_other_families() {
+        let metrics = metrics_with(|_| {});
+        let request = Request::get(METRICS_PATH)
+            .body(Body::empty())
+            .expect("request");
+        let response = router(metrics).oneshot(request).await.expect("infallible");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8");
+        assert!(body.contains("\nprocess_cpu_seconds_total "), "{body}");
+        assert!(!body.contains("db_client_connections"), "{body}");
+        assert!(!body.contains("loco_queue"), "{body}");
     }
 }
