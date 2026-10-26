@@ -34,3 +34,5 @@ pub mod rich_text;
 pub mod route_coverage;
 pub mod session_cookie;
 pub mod task_lock_key;
+pub mod totp;
+pub mod totp_secret;

@@ -386,11 +386,18 @@ impl Hooks for App {
         Ok(ctx)
     }
 
+    /// Loads the configuration and refuses it before anything connects: the
+    /// database guard, the typed settings, the metrics port, and in
+    /// production the public throwaway TOTP key of the local environments
+    /// (ADR 0034 §3). Every entry point loads its configuration here.
     async fn load_config(env: &Environment) -> Result<Config> {
         let config = env.load()?;
         enforce_database_guard(env, &config)?;
         Settings::from_section(config.settings.as_ref())
-            .and_then(|settings| settings.check_server_port(config.server.port))
+            .and_then(|settings| {
+                settings.check_server_port(config.server.port)?;
+                settings.refuse_published_keys(env)
+            })
             .map_err(Error::msg)?;
         Ok(config)
     }

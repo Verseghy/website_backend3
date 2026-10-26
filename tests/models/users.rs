@@ -1,15 +1,22 @@
 //! The `users` model (ADR 0006, ADR 0011): password hashing and the cost of
 //! every failed check, then, against PostgreSQL, the two finders, the `pid`
 //! hook, a hash that round-trips through the table, `App::truncate`, which
-//! leaves the accounts alone, sign-in and its cost, the session token, and
-//! the `Authenticable` impl. Every account and password is invented.
+//! leaves the accounts alone, sign-in and its cost, the session token, the
+//! `Authenticable` impl, and the stored TOTP secret, which decrypts only for
+//! its own row (ADR 0006 §6). Every account, password and secret is
+//! invented.
 
 use std::time::{Duration, Instant};
 
 use backend3::{
     app::App,
-    domain::password_hash::DUMMY_PASSWORD_HASH,
+    domain::{
+        password_hash::DUMMY_PASSWORD_HASH,
+        totp::TotpSecret,
+        totp_secret::{self, DecryptError},
+    },
     models::users::{self, ActiveModel, Model},
+    settings::Settings,
 };
 use chrono::DateTime;
 use loco_rs::{
@@ -20,7 +27,7 @@ use loco_rs::{
         ActiveModelTrait, ActiveValue, Authenticable, DateTimeWithTimeZone, IntoActiveModel, Uuid,
     },
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde_json::json;
 
 use crate::support::with_app;
@@ -449,6 +456,58 @@ async fn loco_s_extractor_finds_accounts_by_pid_and_never_by_api_key() {
                 key,
             );
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_stored_totp_secret_decrypts_for_its_own_row_only() {
+    // ADR 0006, "Follow-up work": an encrypted TOTP secret decrypts for its
+    // own row, and the same bytes copied into another user's row fail to.
+    with_app(|_router, ctx| async move {
+        // The derived key of config/test.yaml, as a handler takes it.
+        let key = Settings::from_section(ctx.config.settings.as_ref())
+            .expect("settings")
+            .admin_auth
+            .totp_encryption_key;
+        let secret = TotpSecret::from_bytes(*b"invented-totp-secret");
+        let owner = insert(&ctx.db, "ketlepcso@example.test", |_| {}).await;
+        let other = insert(&ctx.db, "masik@example.test", |_| {}).await;
+        assert_eq!(
+            other.totp_secret(&key).map(|found| found.is_some()),
+            Ok(false)
+        );
+
+        // A fixed nonce; an enrolment reads 12 random bytes instead.
+        let stored = totp_secret::encrypt(&key, owner.id, [7; 12], &secret);
+        let owner = update(&ctx.db, owner, |active| {
+            active.totp_secret_encrypted = ActiveValue::Set(Some(stored.to_vec()));
+        })
+        .await;
+        let owner = Model::find_by_pid(&ctx.db, &owner.pid.to_string())
+            .await
+            .expect("owner");
+        let decrypted = owner.totp_secret(&key).expect("own row").expect("stored");
+        assert_eq!(decrypted.as_bytes(), secret.as_bytes());
+
+        // Copied by a database write, not through the model.
+        ctx.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE users SET totp_secret_encrypted = \
+                 (SELECT totp_secret_encrypted FROM users WHERE id = $1) WHERE id = $2",
+                [owner.id.into(), other.id.into()],
+            ))
+            .await
+            .expect("copy the ciphertext");
+        let other = Model::find_by_pid(&ctx.db, &other.pid.to_string())
+            .await
+            .expect("other");
+        assert_eq!(other.totp_secret_encrypted.as_deref(), Some(&stored[..]));
+        assert_eq!(
+            other.totp_secret(&key).map(|found| found.is_some()),
+            Err(DecryptError::Authentication)
+        );
     })
     .await;
 }

@@ -13,6 +13,17 @@
 #   JWT_SECRET    the admin session secret: base64 of at least 64 random
 #                 bytes, from the backend-secrets key backend3-jwt-secret
 #                 (ADR 0006 §1, ADR 0023 §11)
+#   TOTP_ENCRYPTION_KEY
+#                 base64 (standard alphabet, `=` padding) of at least 64
+#                 random bytes, on one line with no trailing newline: the
+#                 backend-secrets key backend3-totp-key, separate from the
+#                 JWT secret (ADR 0006 §6, ADR 0023 §11). Every command
+#                 refuses to start when it is unset, not base64 or shorter,
+#                 or the public throwaway key of the local configuration
+#                 files (ADR 0034 §3; D75, research: DECISIONS R15).
+#
+# Operators do not run `backend3-cli doctor --config` here: it prints the
+# whole rendered configuration, these secrets included.
 #
 # Optional: LOG_LEVEL, DB_AUTO_MIGRATE (default false: boot runs no
 # migration, so backend3 also boots against a read-only database, ADR 0003),
@@ -117,3 +128,17 @@ settings:
   metrics:
     binding: 0.0.0.0
     port: 9464
+  admin_auth:
+    # Encrypts the stored TOTP secrets (ADR 0006 §6). No default: an unset
+    # variable stops every command with an error naming it.
+    #
+    # The value is rendered into a double-quoted YAML string, so it stays a
+    # string whatever it looks like, and the two `replace` filters escape
+    # its backslashes and double quotes for that string. Any value then
+    # reaches the typed check, which names this key when the value is not
+    # base64; YAML first folds a line break into a space, which the check
+    # refuses. Only a control character other than tab, CR or LF fails
+    # earlier, as a YAML error naming this file. Before rendering the line
+    # is valid YAML too: the Tera strings are single-quoted, and the YAML
+    # escapes in them read the same to Tera.
+    totp_encryption_key: "<%= get_env(name='TOTP_ENCRYPTION_KEY') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>"

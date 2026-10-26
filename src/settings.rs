@@ -12,14 +12,23 @@
 //! needs, never the whole `Settings` and never `AppContext` (ADR 0008,
 //! rule 2). The admin UI router, for example, takes [`AdminUiSettings`].
 //!
-//! Validation here is structural only. Whether the configured admin UI
-//! directory exists is checked where the router is built, because tasks and
-//! the Kubernetes `CronJob`s never serve it (ADR 0004 §4). Likewise, whether
-//! the `/metrics` port is free is only known when `App::serve` binds it.
+//! Validation here is structural, plus the parts of a value that need no
+//! external system. Whether the configured admin UI directory exists is
+//! checked where the router is built, because tasks and the Kubernetes
+//! `CronJob`s never serve it (ADR 0004 §4). Likewise, whether the `/metrics`
+//! port is free is only known when `App::serve` binds it. The TOTP
+//! encryption key is decoded and checked here, so every command refuses a bad
+//! key at boot instead of the first sign-in failing (ADR 0006 §6); the
+//! settings keep only the derived cipher key, never the configured value.
+//! Production also refuses the public throwaway key of the local
+//! environments ([`Settings::refuse_published_keys`], ADR 0034 §3).
 
 use std::{net::IpAddr, path::PathBuf};
 
-use serde::Deserialize;
+use loco_rs::environment::Environment;
+use serde::{Deserialize, Deserializer, de::Error as _};
+
+use crate::domain::totp_secret::TotpEncryptionKey;
 
 /// The root key of the section in `config/<env>.yaml`.
 pub const SETTINGS_KEY: &str = "settings";
@@ -32,6 +41,65 @@ pub struct Settings {
     pub admin_ui: AdminUiSettings,
     /// Where the `/metrics` listener listens (ADR 0023 §9).
     pub metrics: MetricsSettings,
+    /// Admin sign-in (ADR 0006 §6, §8).
+    pub admin_auth: AdminAuthSettings,
+}
+
+/// Settings of admin sign-in (ADR 0006).
+///
+/// `Debug` never shows the key: [`TotpEncryptionKey`] prints as redacted.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminAuthSettings {
+    /// The cipher key of the stored TOTP secrets, derived at boot from the
+    /// configured value: base64 of at least 64 random bytes (ADR 0006 §6).
+    /// Production reads it from `TOTP_ENCRYPTION_KEY`, which has no default,
+    /// and refuses the local environments' value; those use a public
+    /// throwaway key that is not a secret.
+    #[serde(deserialize_with = "totp_encryption_key")]
+    pub totp_encryption_key: TotpEncryptionKey,
+}
+
+/// The full key of [`AdminAuthSettings::totp_encryption_key`], for error
+/// messages.
+pub const TOTP_ENCRYPTION_KEY_KEY: &str = "settings.admin_auth.totp_encryption_key";
+
+/// The environment variable that `config/production.yaml` reads
+/// [`AdminAuthSettings::totp_encryption_key`] from, named in error messages
+/// so the operator knows which secret to fix.
+pub const TOTP_ENCRYPTION_KEY_ENV: &str = "TOTP_ENCRYPTION_KEY";
+
+/// Deserializes [`AdminAuthSettings::totp_encryption_key`] from its base64
+/// string and derives the cipher key.
+///
+/// - `deserializer`: the deserializer positioned at the value.
+///
+/// The error message says what is wrong and which environment variable
+/// production reads, but never contains the value. `serde_path_to_error`
+/// adds the key path, so [`Settings::from_section`] reports it as
+/// `settings.admin_auth.totp_encryption_key`.
+///
+/// The value is read as any JSON value first, not as a `String`: serde's
+/// own type error would quote a value that YAML typed as a number or a
+/// boolean, and that value is the secret.
+fn totp_encryption_key<'de, D>(deserializer: D) -> Result<TotpEncryptionKey, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let refuse = |problem: &dyn std::fmt::Display| {
+        D::Error::custom(format!(
+            "the TOTP encryption key ({TOTP_ENCRYPTION_KEY_ENV} in production) {problem}"
+        ))
+    };
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(configured) => {
+            TotpEncryptionKey::from_base64(&configured).map_err(|error| refuse(&error))
+        }
+        serde_json::Value::Null => Err(refuse(&"is empty")),
+        _ => Err(refuse(
+            &"is not a string; write it in quotes, as config/production.yaml does",
+        )),
+    }
 }
 
 /// Settings of the `/admin` static router (ADR 0004 §3-§4).
@@ -75,8 +143,8 @@ pub enum SettingsError {
     /// The configuration has no `settings:` section at all.
     #[error(
         "the configuration has no `settings:` section; backend3 needs at least \
-         {ADMIN_UI_DIST_DIR_KEY}, {METRICS_BINDING_KEY} and {METRICS_PORT_KEY} \
-         (see config/test.yaml for an example)"
+         {ADMIN_UI_DIST_DIR_KEY}, {METRICS_BINDING_KEY}, {METRICS_PORT_KEY} and \
+         {TOTP_ENCRYPTION_KEY_KEY} (see config/test.yaml for an example)"
     )]
     Missing,
     /// A key is missing, unknown or has the wrong type.
@@ -106,6 +174,18 @@ pub enum SettingsError {
         /// The port both keys name.
         port: u16,
     },
+    /// Production was given the public throwaway TOTP key of the local
+    /// environments, which protects nothing (ADR 0034 §3). The message says
+    /// where the real key comes from, as ADR 0034 §3 asks; the name of the
+    /// `backend-secrets` key is the one ADR 0023 §11 gives, not a value.
+    #[error(
+        "refusing to start: {TOTP_ENCRYPTION_KEY_KEY} ({TOTP_ENCRYPTION_KEY_ENV}) is the public \
+         throwaway key of config/development.yaml, config/test.yaml and config/e2e.yaml, which \
+         production refuses; set {TOTP_ENCRYPTION_KEY_ENV} to the key from the secret store \
+         (the backend-secrets key backend3-totp-key): base64 of at least 64 random bytes \
+         (ADR 0006 §6, ADR 0034 §3)"
+    )]
+    PublishedTotpKey,
 }
 
 impl Settings {
@@ -119,7 +199,8 @@ impl Settings {
     /// Returns a [`SettingsError`] naming the offending key when the section
     /// is missing, has an unknown or missing key, a value of the wrong type
     /// (a metrics binding that is not an IP address and a metrics port above
-    /// 65535 included), an empty `dist_dir`, or metrics port 0.
+    /// 65535 included), an empty `dist_dir`, metrics port 0, or a TOTP
+    /// encryption key that is not base64 of at least 64 bytes.
     pub fn from_section(section: Option<&serde_json::Value>) -> Result<Self, SettingsError> {
         let section = section.ok_or(SettingsError::Missing)?;
         let settings: Self =
@@ -159,23 +240,96 @@ impl Settings {
         }
         Ok(())
     }
+
+    /// Refuses, in production, the TOTP key that this public repository
+    /// commits for development, test and e2e (ADR 0034 §2 item 3 allows it
+    /// there, §3 refuses it in production). `Hooks::load_config` runs it, so
+    /// every command stops before it connects anywhere.
+    ///
+    /// This is the one refusal of published keys that ADR 0034 §3 asks for.
+    /// The `secret-guards` slice adds the published JWT secrets to it rather
+    /// than adding a second check (ADR 0034 §3, "Who"), and a later slice
+    /// that publishes a throwaway key adds that key here in the same PR.
+    ///
+    /// - `environment`: the Loco environment the configuration was loaded
+    ///   for. Only [`Environment::Production`] refuses the key; staging runs
+    ///   that environment too. The local environments keep it, because a
+    ///   fixed value keeps their runs reproducible and protects nothing.
+    ///
+    /// The configuration cannot bring the key into production by itself:
+    /// `config/production.yaml` reads `TOTP_ENCRYPTION_KEY` with no default.
+    /// This check stops the one remaining way, the public value copied into
+    /// that variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingsError::PublishedTotpKey`] in production when the
+    /// configured key is the published one. The message names the key and
+    /// the variable, not the value.
+    pub fn refuse_published_keys(&self, environment: &Environment) -> Result<(), SettingsError> {
+        if *environment == Environment::Production
+            && self.admin_auth.totp_encryption_key.is_published_local_key()
+        {
+            return Err(SettingsError::PublishedTotpKey);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use proptest::prelude::*;
     use serde_json::{Value, json};
     use std::net::Ipv4Addr;
 
-    /// A section with the given admin UI directory and metrics sub-section.
-    fn section(dist_dir: &str, metrics: &Value) -> Value {
-        json!({ "admin_ui": { "dist_dir": dist_dir }, "metrics": metrics })
-    }
-
     /// A valid metrics sub-section.
     fn metrics() -> Value {
         json!({ "binding": "127.0.0.1", "port": 9464 })
+    }
+
+    /// A valid `admin_auth` value, with the local environments' key.
+    fn admin_auth() -> Value {
+        json!({ "totp_encryption_key": PUBLISHED_LOCAL_KEY })
+    }
+
+    /// A complete section with the given admin UI directory and metrics
+    /// sub-section.
+    fn section(dist_dir: &str, metrics: &Value) -> Value {
+        json!({
+            "admin_ui": { "dist_dir": dist_dir },
+            "metrics": metrics,
+            "admin_auth": admin_auth(),
+        })
+    }
+
+    /// A complete section whose `admin_ui` value is `admin_ui`.
+    fn with_admin_ui(admin_ui: &Value) -> Value {
+        json!({ "admin_ui": admin_ui, "metrics": metrics(), "admin_auth": admin_auth() })
+    }
+
+    /// A complete section with the TOTP key replaced by `key`.
+    fn with_totp_key(key: &Value) -> Value {
+        json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": metrics(),
+            "admin_auth": { "totp_encryption_key": key },
+        })
+    }
+
+    /// The `Invalid` error of `section`, as (path, message).
+    fn invalid(section: &Value) -> (String, String) {
+        match Settings::from_section(Some(section)) {
+            Err(SettingsError::Invalid { path, message }) => (path, message),
+            other => panic!("{section}: expected Invalid, got {other:?}"),
+        }
+    }
+
+    /// The settings of a complete section with the TOTP key `key`.
+    fn settings_with_totp_key(key: &str) -> Settings {
+        Settings::from_section(Some(&with_totp_key(&json!(key)))).expect("valid")
     }
 
     #[test]
@@ -191,6 +345,10 @@ mod tests {
                     binding: Ipv4Addr::LOCALHOST.into(),
                     port: 9464,
                 },
+                admin_auth: AdminAuthSettings {
+                    totp_encryption_key: TotpEncryptionKey::from_base64(PUBLISHED_LOCAL_KEY)
+                        .expect("valid"),
+                },
             }
         );
     }
@@ -200,7 +358,12 @@ mod tests {
         let error = Settings::from_section(None).expect_err("missing");
         assert!(matches!(error, SettingsError::Missing));
         let message = error.to_string();
-        for key in [ADMIN_UI_DIST_DIR_KEY, METRICS_BINDING_KEY, METRICS_PORT_KEY] {
+        for key in [
+            ADMIN_UI_DIST_DIR_KEY,
+            METRICS_BINDING_KEY,
+            METRICS_PORT_KEY,
+            TOTP_ENCRYPTION_KEY_KEY,
+        ] {
             assert!(message.contains(key), "{message}");
         }
     }
@@ -209,21 +372,29 @@ mod tests {
     fn errors_name_the_full_key_path() {
         let cases = [
             (json!({}), "settings"),
-            (json!({ "admin_ui": {} }), "settings.admin_ui"),
+            (with_admin_ui(&json!({})), "settings.admin_ui"),
             (
-                json!({ "admin_ui": { "dist_dir": 5 } }),
+                with_admin_ui(&json!({ "dist_dir": 5 })),
                 "settings.admin_ui.dist_dir",
             ),
             (
-                json!({ "admin_ui": { "dist_dir": "x", "extra": 1 } }),
+                with_admin_ui(&json!({ "dist_dir": "x", "extra": 1 })),
                 "settings.admin_ui.extra",
             ),
             (
-                json!({ "admin_ui": { "dist_dir": "x" }, "admin_uii": {} }),
+                json!({
+                    "admin_ui": { "dist_dir": "x" },
+                    "metrics": metrics(),
+                    "admin_auth": admin_auth(),
+                    "admin_uii": {},
+                }),
                 "settings.admin_uii",
             ),
             (json!("text"), "settings"),
-            (json!({ "admin_ui": { "dist_dir": "x" } }), "settings"),
+            (
+                json!({ "admin_ui": { "dist_dir": "x" }, "admin_auth": admin_auth() }),
+                "settings",
+            ),
             (section("x", &json!({ "port": 9464 })), "settings.metrics"),
             // A host name is refused: it can resolve to several addresses.
             (
@@ -242,20 +413,151 @@ mod tests {
                 section("x", &json!({ "binding": "::1", "port": 1, "path": "/" })),
                 "settings.metrics.path",
             ),
+            (
+                json!({ "admin_ui": { "dist_dir": "x" }, "metrics": metrics() }),
+                "settings",
+            ),
+            (
+                json!({ "admin_ui": { "dist_dir": "x" }, "metrics": metrics(), "admin_auth": {} }),
+                "settings.admin_auth",
+            ),
+            (
+                json!({
+                    "admin_ui": { "dist_dir": "x" },
+                    "metrics": metrics(),
+                    "admin_auth": { "totp_encryption_key": PUBLISHED_LOCAL_KEY, "extra": 1 },
+                }),
+                "settings.admin_auth.extra",
+            ),
+            (with_totp_key(&json!("")), TOTP_ENCRYPTION_KEY_KEY),
         ];
         for (section, expected_path) in cases {
-            match Settings::from_section(Some(&section)) {
-                Err(SettingsError::Invalid { path, message }) => {
-                    assert_eq!(path, expected_path, "{section}: {message}");
-                }
-                other => panic!("{section}: expected Invalid, got {other:?}"),
+            let (path, message) = invalid(&section);
+            assert_eq!(path, expected_path, "{section}: {message}");
+        }
+    }
+
+    #[test]
+    fn bad_totp_keys_name_the_key_and_the_problem_but_not_the_value() {
+        let short = STANDARD.encode([0x5a_u8; 40]);
+        let cases = [
+            (json!(""), "is empty"),
+            (Value::Null, "is empty"),
+            (
+                json!("not base64, but a pasted password"),
+                "is not valid base64",
+            ),
+            (
+                json!(format!("{PUBLISHED_LOCAL_KEY}\n")),
+                "is not valid base64",
+            ),
+            (json!(short), "decodes to 40 bytes"),
+            (json!(1_234_567_890_123_u64), "is not a string"),
+            (json!(true), "is not a string"),
+            (json!(["a"]), "is not a string"),
+        ];
+        for (key, problem) in cases {
+            let section = with_totp_key(&key);
+            let (path, message) = invalid(&section);
+            assert_eq!(path, TOTP_ENCRYPTION_KEY_KEY, "{key}: {message}");
+            assert!(message.contains(problem), "{key}: {message}");
+            assert!(
+                message.contains(TOTP_ENCRYPTION_KEY_ENV),
+                "{key}: {message}"
+            );
+            for fragment in ["pasted password", "1234567890123", short.as_str()] {
+                assert!(!message.contains(fragment), "{key}: {message}");
             }
+            let shown = SettingsError::Invalid { path, message }.to_string();
+            assert!(
+                shown.starts_with(&format!(
+                    "invalid configuration at `{TOTP_ENCRYPTION_KEY_KEY}`"
+                )),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_never_shows_the_totp_key() {
+        let section = with_admin_ui(&json!({ "dist_dir": "x" }));
+        let printed = format!("{:?}", Settings::from_section(Some(&section)));
+        assert!(
+            printed.contains("TotpEncryptionKey(<redacted>)")
+                && !printed.contains(PUBLISHED_LOCAL_KEY)
+        );
+    }
+
+    #[test]
+    fn production_refuses_the_published_totp_key() {
+        let settings = settings_with_totp_key(PUBLISHED_LOCAL_KEY);
+        let error = settings
+            .refuse_published_keys(&Environment::Production)
+            .expect_err("the published key in production");
+        assert!(matches!(error, SettingsError::PublishedTotpKey));
+        let message = error.to_string();
+        assert!(
+            message.contains(TOTP_ENCRYPTION_KEY_KEY) && message.contains(TOTP_ENCRYPTION_KEY_ENV),
+            "{message}"
+        );
+        assert!(message.contains("public throwaway key"), "{message}");
+        // ADR 0034 §3: the message says to set a key from the secret store.
+        assert!(
+            message.contains("from the secret store (the backend-secrets key backend3-totp-key)"),
+            "{message}"
+        );
+        assert!(!message.contains(PUBLISHED_LOCAL_KEY), "{message}");
+    }
+
+    #[test]
+    fn the_local_environments_keep_the_published_totp_key() {
+        let settings = settings_with_totp_key(PUBLISHED_LOCAL_KEY);
+        for environment in [
+            Environment::Development,
+            Environment::Test,
+            Environment::Any("e2e".to_owned()),
+        ] {
+            assert!(
+                settings.refuse_published_keys(&environment).is_ok(),
+                "{environment}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_accepts_a_key_of_its_own() {
+        // The published text with one byte changed is another key: the
+        // refusal compares the whole derived key, not a prefix. These are
+        // fixed inputs of the comparison alone; a test that starts the
+        // production configuration uses a key made when it runs
+        // (tests/support `cli_totp_key`, ADR 0034 §3).
+        let mut near = PUBLISHED_LOCAL_KEY_TEXT.to_vec();
+        if let Some(last) = near.last_mut() {
+            *last ^= 1;
+        }
+        for key in [
+            STANDARD.encode([0x42_u8; 64]),
+            STANDARD.encode(&near),
+            STANDARD.encode(&PUBLISHED_LOCAL_KEY_TEXT[..64]),
+        ] {
+            let settings = settings_with_totp_key(&key);
+            assert!(
+                settings
+                    .refuse_published_keys(&Environment::Production)
+                    .is_ok(),
+                "{key}"
+            );
         }
     }
 
     #[test]
     fn unknown_keys_are_reported_by_name() {
-        let section = json!({ "admin_ui": { "dist_dir": "x" }, "admin_uii": {} });
+        let section = json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": metrics(),
+            "admin_auth": admin_auth(),
+            "admin_uii": {},
+        });
         let message = Settings::from_section(Some(&section))
             .expect_err("unknown key")
             .to_string();
@@ -315,6 +617,21 @@ mod tests {
             let section = section(&dir, &metrics());
             let settings = Settings::from_section(Some(&section)).expect("valid");
             prop_assert_eq!(settings.admin_ui.dist_dir, PathBuf::from(&dir));
+        }
+
+        #[test]
+        fn any_key_of_64_bytes_or_more_is_accepted_and_derived(
+            bytes in proptest::collection::vec(any::<u8>(), 64..=160),
+        ) {
+            let section = with_totp_key(&json!(STANDARD.encode(&bytes)));
+            let settings = Settings::from_section(Some(&section)).expect("valid");
+            prop_assert_eq!(
+                &settings.admin_auth.totp_encryption_key,
+                &TotpEncryptionKey::derive(&bytes).expect("valid")
+            );
+            // Any key but the published one starts in production too.
+            prop_assume!(bytes != PUBLISHED_LOCAL_KEY_TEXT);
+            prop_assert!(settings.refuse_published_keys(&Environment::Production).is_ok());
         }
 
         #[test]

@@ -10,14 +10,20 @@ use crate::support::with_app;
 
 /// Boots the test app, then calls `before_routes` again with the given
 /// environment and admin UI directory, as the boot of that environment would.
+///
+/// Only `settings.admin_ui.dist_dir` is replaced; the other settings of
+/// config/test.yaml stay, because `before_routes` validates the whole
+/// section.
 async fn build_router(environment: Environment, dist_dir: &str) -> Result<(), String> {
     let dist_dir = dist_dir.to_owned();
     with_app(|_router, mut ctx| async move {
         ctx.environment = environment;
-        ctx.config.settings = Some(json!({
-            "admin_ui": { "dist_dir": dist_dir },
-            "metrics": { "binding": "127.0.0.1", "port": 9464 }
-        }));
+        let settings = ctx
+            .config
+            .settings
+            .as_mut()
+            .expect("config/test.yaml has a settings section");
+        settings["admin_ui"]["dist_dir"] = json!(dist_dir);
         App::before_routes(&ctx)
             .await
             .map(|_| ())
