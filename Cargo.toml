@@ -164,7 +164,7 @@ sha2 = { version = "0.11", default-features = false }
 # Decodes the TOTP_ENCRYPTION_KEY secret (ADR 0006 §6) with the line and
 # engine that jsonwebtoken, under Loco's JWT, decodes JWT_SECRET with
 # (STANDARD, canonical padding).
-base64 = "0.22"
+base64 = "0.23"
 # DTO-to-TypeScript bindings for the admin API (ADR 0005 §2): major 12 with
 # chrono-impl and serde-compat, as in Loco's own template.
 ts-rs = { version = "12", features = ["chrono-impl", "serde-compat"] }
