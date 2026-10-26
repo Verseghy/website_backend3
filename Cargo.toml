@@ -210,9 +210,12 @@ axum-test = "17"
 # `catch_unwind` on futures, so the per-test database is dropped even when a
 # test panics (tests/support).
 futures-util = "0.3"
-# The committed snapshot of the /api/v1 OpenAPI document (ADR 0005 §4): "a
-# snapshot change is an API change". CI sets CI=true and INSTA_UPDATE=no, so
-# a mismatch fails and no .snap.new is written. No extra features.
+# The committed snapshots of the /api/v1 OpenAPI document (ADR 0005 §4): "a
+# snapshot change is an API change", and of the schema that the migrations
+# create (tests/schema, ADR 0009), and the inline snapshot of the session
+# cookie's attributes (tests/requests/auth_login.rs). CI sets CI=true and
+# INSTA_UPDATE=no, so a mismatch fails and no .snap.new (or, for the inline
+# snapshot, .pending-snap) draft is written. No extra features.
 insta = "1"
 # The HTTP client of the media contract suite (tests/media_contract/, ADR 0015
 # §1): hyper's connection-pooling client over plain HTTP/1.1, which sends the

@@ -66,7 +66,7 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 | `src/workers/`, `src/tasks/` | background workers and tasks (ADR 0016) |
 | `migration/` | Sea-ORM migrations (ADR 0009) |
 | `config/` | `development`, `test`, `e2e` and `production` configuration; typed settings under `settings:` |
-| `tests/` | integration, request and architecture tests, and the `/storage` media contract suite (`tests/media_contract/`) |
+| `tests/` | integration, request and architecture tests, the `/storage` media contract suite (`tests/media_contract/`), and the schema snapshot (`tests/schema/`, ADR 0009) |
 | `examples/media_contract.rs` | runs that suite from the command line against a running server (ADR 0015 §3, the co-mount test) |
 | `deploy/media/` | the media server: its nginx configuration, which website_k8s copies byte for byte, and its pinned image (`deploy/media/README.md`, ADR 0015 §1) |
 | `admin/` | the admin UI: an npm project (ADR 0004, ADR 0021) |
@@ -238,7 +238,15 @@ bash scripts/sync-loco-skill.sh --check   # the vendored Loco skill is unchanged
 
 A change to `admin/` or to the user flows also runs `npm run e2e` as described
 above. A change to a DTO regenerates `admin/src/bindings/` and the OpenAPI
-snapshot, and commits them (ADR 0005).
+snapshot, and commits them (ADR 0005). A migration updates the schema
+snapshot, `tests/schema/snapshots/schema.snap`, in the same PR (ADR 0009):
+the test writes a `.snap.new` beside it; read the diff, accept it with
+`cargo insta review` (or rename the file), and commit it with the migration.
+Before it compares, the test runs the guard of `tests/schema/guard.rs`, which
+fails on anything in the schema that the snapshot does not show (a view, a
+grant, a policy, a storage parameter, a disabled foreign-key trigger, ...),
+within the limits that its module documentation lists, and names it; recipe 1
+of the project skill says what to do then.
 
 ## More
 
