@@ -39,39 +39,53 @@
 //!
 //! After the check comes the optimisation itself, one module per format:
 //! [`optimise_jpeg`] strips the metadata of a JPEG and re-encodes it
-//! ([`strip_jpeg`] runs the strip alone, for the corpus tests), and
+//! ([`strip_jpeg`] runs the strip alone, for the corpus tests);
 //! [`optimise_png`] recompresses a PNG losslessly, keeping its colour, HDR
 //! and animation chunks and its EXIF Orientation, with an encoder effort
-//! that depends on the image's size ([`PngEffort`], ADR 0033 §5). The
-//! rules they share are here too: the EXIF block reduced to its Orientation
-//! tag ([`Orientation`]), the keep-or-discard rule of a lossy re-encode
-//! (ADR 0033 §1), whose size half is [`reencode_is_kept`] and whose
-//! similarity half is [`reencode_meets_ssim_floor`] over the streaming luma
-//! SSIM of [`LumaSsim`], which the lossy WebP re-encode uses too, and the
-//! [`DecodeDefect`] that says why a body does not decode.
+//! that depends on the image's size ([`PngEffort`], ADR 0033 §5);
+//! [`optimise_webp`] strips a WebP and re-encodes a lossy still one; and
+//! [`optimise_gif`] strips a GIF. The WebP and GIF optimisers return an
+//! [`Optimised`] value whose [`Treatment`] says what was done; their parsers
+//! follow libwebp and the `gif` crate (ADR 0033 §3). Every optimiser refuses
+//! with an [`ImageError`], and an animation of any of the three animated
+//! formats is held to [`MAX_ANIMATION_FRAMES`] and [`MAX_ANIMATION_PIXELS`]
+//! before any frame is decoded ([`ImageError::AnimationTooLarge`], ADR 0033
+//! §4). The rules the formats share are here too: the EXIF block reduced to
+//! its Orientation tag ([`Orientation`]), the keep-or-discard rule of a
+//! lossy re-encode (ADR 0033 §1), whose size half is [`reencode_is_kept`]
+//! and whose similarity half is [`reencode_meets_ssim_floor`] over the
+//! streaming luma SSIM of [`LumaSsim`], for JPEG and lossy WebP alike, and
+//! the [`DecodeDefect`] that says why a body does not decode.
 //!
 //! Everything here is pure (ADR 0008): bytes in, a typed result out. The
-//! caller reads the upload, passes the budget and the PNG effort from its
-//! settings, and maps each [`ImageError`] to the Hungarian message the
-//! editor sees.
+//! encoders and decoders are libraries that compute over bytes in memory.
+//! The caller reads the upload, passes the budget and the PNG effort from
+//! its settings, runs the optimiser on a blocking thread (ADR 0015 §7), and
+//! maps each [`ImageError`] to the Hungarian message the editor sees.
 
 mod budget;
 mod exif;
 mod format;
+mod gif;
 mod header;
 mod jpeg;
 mod keep;
+mod outcome;
 mod png;
 mod ssim;
+mod webp;
 
 pub use budget::{Dimensions, PixelBudget, PixelBudgetError};
 pub use exif::{ORIENTATION_TIFF_LEN, ORIENTATION_TIFF_MIN_LEN, Orientation};
 pub use format::{ImageFormat, sniff};
+pub use gif::optimise_gif;
 pub use header::HeaderDefect;
 pub use jpeg::{JpegKept, MAX_JPEG_SCANS, NotReencoded, OptimisedJpeg, optimise_jpeg, strip_jpeg};
 pub use keep::{SSIM_FLOOR, reencode_is_kept, reencode_meets_ssim_floor};
+pub use outcome::{Optimised, Treatment};
 pub use png::{LARGE_PNG_PRESET_MAX, PNG_PRESET, PngEffort, PngEffortError, optimise_png};
 pub use ssim::{LumaSsim, SSIM_WINDOW, SsimError, mean_ssim};
+pub use webp::optimise_webp;
 
 /// The most frames an animation may have for its frames to be decoded and
 /// recompressed: 4096, the WebP limit of ADR 0033 §4 that decision D79 also
@@ -79,6 +93,12 @@ pub use ssim::{LumaSsim, SSIM_WINDOW, SsimError, mean_ssim};
 /// optimisation grows with every frame, all of it inside one request that
 /// holds the one-at-a-time semaphore (ADR 0015 §7). The animated PNGs that
 /// ADR 0033 §6 keeps are held to the same totals.
+///
+/// The value is webpx's default `max_frames` for untrusted input
+/// (`webpx@0.4.1:src/limits.rs`), which the maintainer accepted for WebP as
+/// built (decision D79). The WebP and GIF optimisers count the frames while
+/// they walk the file and stop at the one that passes a limit, so a file
+/// that declares millions of frames costs no memory for them.
 pub const MAX_ANIMATION_FRAMES: u64 = 4096;
 
 /// The most pixels an animation may hold in all its frames, each at its own
@@ -155,9 +175,12 @@ pub enum ImageError {
     /// refused from its frame headers, before anything is decoded. Nothing
     /// says it is corrupt; the editor is asked for a shorter or smaller
     /// animation.
+    // "Reaches", not "has": the WebP and GIF walks stop at the frame that
+    // passes a limit, so their counts end there, while an APNG's are its
+    // totals.
     #[error(
-        "the {format} animation has {frames} frames and {pixels} pixels in all; the optimiser \
-         takes at most {max_frames} frames and {max_pixels} pixels",
+        "the {format} animation reaches {frames} frames and {pixels} pixels; the optimiser \
+         takes at most {max_frames} frames and {max_pixels} pixels in all",
         max_frames = MAX_ANIMATION_FRAMES,
         max_pixels = MAX_ANIMATION_PIXELS
     )]
@@ -165,10 +188,14 @@ pub enum ImageError {
         /// The sniffed format.
         format: ImageFormat,
         /// The number of frames counted toward the totals: for an APNG, the
-        /// frames that its chunks keep (ADR 0033 §4 and §6).
+        /// frames that its chunks keep (ADR 0033 §4 and §6). A WebP or GIF is
+        /// refused at the frame that passes a limit, so for them it counts
+        /// the frames up to that one: the `ANMF` frames with an image, or
+        /// the image descriptors.
         frames: u64,
         /// The pixels of every image counted, each at its own size: for an
-        /// APNG, the default image and those frames.
+        /// APNG, the default image and those frames; for a WebP or GIF, the
+        /// frames counted.
         pixels: u64,
     },
     /// The header is accepted, but the image data does not decode as its
@@ -244,6 +271,114 @@ pub enum DecodeDefect {
     /// warns about it: the extra bytes are data no viewer shows.
     #[error("the PNG image data does not decode to the declared image")]
     PngImageData,
+    /// A WebP chunk, its pad byte included, does not fit inside the RIFF
+    /// size, or fewer bytes than a chunk header are left where libwebp reads
+    /// the next chunk.
+    #[error("a WebP chunk runs past the end of the file")]
+    WebpCutShort,
+    /// The WebP file ends before the end that its RIFF size gives.
+    #[error("the WebP file is shorter than its RIFF size")]
+    WebpRiffSize,
+    /// The first WebP chunk is not `VP8 `, `VP8L` or `VP8X`. The header
+    /// check refuses such an upload first; the strip, which also reads
+    /// libwebp's own output, checks it again.
+    #[error("the first WebP chunk is not VP8, VP8L or VP8X")]
+    WebpFirstChunk,
+    /// The `VP8X` chunk is not 10 bytes long, which the header check refuses
+    /// first. (It stores each canvas side minus one, so the canvas it
+    /// declares is never empty.)
+    #[error("the WebP VP8X chunk is malformed")]
+    WebpVp8x,
+    /// A WebP animation sets a `VP8X` flag that libwebp does not define;
+    /// libwebp's demuxer, which reads every animation, refuses it.
+    #[error("a WebP animation sets reserved VP8X flags")]
+    WebpReservedFlags,
+    /// A WebP with the animation flag holds no frame with an image.
+    #[error("the WebP animation has no frame")]
+    WebpNoFrame,
+    /// A WebP file has a second `VP8X` chunk, which libwebp's demuxer
+    /// refuses. The animation is refused; in a still image, which libwebp's
+    /// decoder reads, it only ends the metadata that the strip keeps.
+    #[error("the WebP file has a second VP8X chunk")]
+    WebpSecondVp8x,
+    /// An `ALPH`, `VP8 ` or `VP8L` chunk of a WebP animation lies outside its
+    /// `ANMF` frames.
+    #[error("a WebP image chunk is outside the frames of an animation")]
+    WebpImageOutsideFrames,
+    /// A still WebP holds a second image after its first, which libwebp's
+    /// demuxer refuses. Its decoder shows the first, so the second only ends
+    /// the metadata that the strip keeps.
+    #[error("the WebP file has a second image")]
+    WebpSecondImage,
+    /// A WebP `ALPH` chunk comes after its bitstream, which libwebp's
+    /// demuxer refuses in a frame, where the animation is refused, and in a
+    /// still image with the alpha flag, where it only ends the metadata that
+    /// the strip keeps.
+    #[error("a WebP ALPH chunk follows its bitstream")]
+    WebpAlphaAfterBitstream,
+    /// A WebP `ANIM` chunk is shorter than its 6 bytes, its pad byte
+    /// included.
+    #[error("a WebP ANIM chunk is shorter than 6 bytes")]
+    WebpAnimSize,
+    /// A WebP `ANMF` frame comes before the `ANIM` chunk.
+    #[error("a WebP ANMF frame comes before the ANIM chunk")]
+    WebpFrameBeforeAnim,
+    /// A WebP `ANMF` chunk is shorter than its 16-byte frame header, its pad
+    /// byte included.
+    #[error("a WebP ANMF chunk is shorter than its 16-byte header")]
+    WebpFrameHeaderSize,
+    /// A WebP `ANMF` header declares 2³² pixels or more, which libwebp
+    /// refuses before it reads the frame's bitstream.
+    #[error("a WebP ANMF header declares 2^32 pixels or more")]
+    WebpFrameArea,
+    /// The image chunks of a WebP `ANMF` frame run past the end of its chunk.
+    #[error("a WebP ANMF frame's image runs past the end of its chunk")]
+    WebpFrameOverrun,
+    /// A WebP animation frame does not fit the canvas at its position.
+    #[error("a WebP frame does not fit the canvas")]
+    WebpFrameOutsideCanvas,
+    /// A WebP still image is not the size of the `VP8X` canvas.
+    #[error("the WebP image is not the size of its canvas")]
+    WebpCanvasSize,
+    /// A WebP after its `VP8X` chunk has no `VP8 ` or `VP8L` chunk.
+    #[error("the WebP file has no image chunk")]
+    WebpNoImage,
+    /// A WebP frame has an `ALPH` chunk but no `VP8 ` or `VP8L` bitstream.
+    #[error("a WebP image has no VP8 or VP8L bitstream")]
+    WebpNoBitstream,
+    /// A WebP `VP8L` bitstream, which holds its own alpha, comes with an
+    /// `ALPH` chunk in a frame.
+    #[error("a WebP VP8L bitstream has an ALPH chunk")]
+    WebpLosslessAlpha,
+    /// The header of a WebP `VP8 ` or `VP8L` bitstream after the `VP8X`
+    /// chunk is malformed, as the header check reads a first chunk.
+    #[error("a WebP bitstream header is malformed")]
+    WebpBitstreamHeader,
+    /// libwebp does not decode the WebP image data of a still image or of a
+    /// frame.
+    #[error("libwebp does not decode the WebP image data")]
+    WebpData,
+    /// The GIF ends inside a block, or inside its logical screen descriptor
+    /// or global colour table. A GIF that ends where its first block would
+    /// start holds no image: [`DecodeDefect::GifNoImage`].
+    #[error("the GIF ends inside a block")]
+    GifCutShort,
+    /// The GIF holds no image descriptor, with or without its trailer. The
+    /// `gif` crate decodes some such files, with no frame, but no viewer
+    /// shows a picture of any of them (ADR 0033 §3, decision D104).
+    #[error("the GIF has no image")]
+    GifNoImage,
+    /// The last data sub-block of a GIF graphic control extension does not
+    /// hold exactly 4 bytes, or there is none; the `gif` crate refuses both.
+    #[error("the last sub-block of a GIF graphic control extension does not hold 4 bytes")]
+    GifGraphicControl,
+    /// A GIF block starts with a byte that is not an image descriptor, an
+    /// extension or the trailer.
+    #[error("a GIF block starts with an unknown byte")]
+    GifBlock,
+    /// The `gif` crate does not decode the GIF image data of a frame.
+    #[error("the gif crate does not decode the GIF image data")]
+    GifData,
 }
 
 /// Reads the header of an upload and checks it against the pixel budget,
@@ -411,6 +546,62 @@ mod tests {
     }
 
     #[test]
+    fn every_webp_and_gif_defect_has_its_own_message() {
+        // The log tells the refusals apart only by their messages, which
+        // name the format, as the PNG ones do.
+        let webp = [
+            DecodeDefect::WebpCutShort,
+            DecodeDefect::WebpRiffSize,
+            DecodeDefect::WebpFirstChunk,
+            DecodeDefect::WebpVp8x,
+            DecodeDefect::WebpReservedFlags,
+            DecodeDefect::WebpNoFrame,
+            DecodeDefect::WebpSecondVp8x,
+            DecodeDefect::WebpImageOutsideFrames,
+            DecodeDefect::WebpSecondImage,
+            DecodeDefect::WebpAlphaAfterBitstream,
+            DecodeDefect::WebpAnimSize,
+            DecodeDefect::WebpFrameBeforeAnim,
+            DecodeDefect::WebpFrameHeaderSize,
+            DecodeDefect::WebpFrameArea,
+            DecodeDefect::WebpFrameOverrun,
+            DecodeDefect::WebpFrameOutsideCanvas,
+            DecodeDefect::WebpCanvasSize,
+            DecodeDefect::WebpNoImage,
+            DecodeDefect::WebpNoBitstream,
+            DecodeDefect::WebpLosslessAlpha,
+            DecodeDefect::WebpBitstreamHeader,
+            DecodeDefect::WebpData,
+        ];
+        let gif = [
+            DecodeDefect::GifCutShort,
+            DecodeDefect::GifNoImage,
+            DecodeDefect::GifGraphicControl,
+            DecodeDefect::GifBlock,
+            DecodeDefect::GifData,
+        ];
+        let mut messages = Vec::new();
+        for (defects, name) in [(&webp[..], "WebP"), (&gif[..], "GIF")] {
+            for defect in defects {
+                let message = defect.to_string();
+                assert!(message.contains(name), "{message}");
+                messages.push(message);
+            }
+        }
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), webp.len() + gif.len());
+        assert_eq!(
+            ImageError::Undecodable {
+                format: ImageFormat::Gif,
+                defect: DecodeDefect::GifNoImage,
+            }
+            .to_string(),
+            "the GIF image does not decode: the GIF has no image"
+        );
+    }
+
+    #[test]
     fn an_animation_refusal_names_its_totals_and_the_limits() {
         let error = ImageError::AnimationTooLarge {
             format: ImageFormat::Png,
@@ -419,8 +610,8 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "the PNG animation has 4097 frames and 12 pixels in all; the optimiser takes at most \
-             4096 frames and 268435456 pixels"
+            "the PNG animation reaches 4097 frames and 12 pixels; the optimiser takes at most \
+             4096 frames and 268435456 pixels in all"
         );
     }
 

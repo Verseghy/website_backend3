@@ -14,6 +14,12 @@ pub(super) mod jpeg;
 mod png;
 mod webp;
 
+/// The GIF strip steps over colour tables exactly as the reader does.
+pub(super) use gif::colour_table_len;
+/// The WebP optimiser reads the bitstreams after a `VP8X` chunk with the
+/// checks the reader makes on a first chunk.
+pub(super) use webp::bitstream_dimensions;
+
 use super::{Dimensions, ImageFormat};
 
 /// What is wrong with a malformed header. The messages are English, for logs.

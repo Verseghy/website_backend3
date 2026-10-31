@@ -139,6 +139,20 @@ exceptions = [
   { allow = ["IJG"], crate = "mozjpeg-sys" },
 ]
 
+# libwebp-sys declares MIT, which covers its Rust bindings, but it also
+# compiles and links the libwebp sources it bundles, which are BSD-3-Clause
+# (vendor/COPYING) with Google's additional patent grant (vendor/PATENTS).
+# cargo-deny reads only the declared licence, so this entry states the whole
+# expression and checks it against the allow-list above. The hash is
+# cargo-deny's XxHash32 of that file. When a release changes the file,
+# cargo-deny silently ignores this entry and falls back to the declared MIT,
+# so an update of libwebp-sys re-reads vendor/COPYING and vendor/PATENTS and
+# renews the hash (docs/design/image-encoders.md, "Licences").
+[[licenses.clarify]]
+crate = "libwebp-sys"
+expression = "MIT AND BSD-3-Clause"
+license-files = [{ path = "vendor/COPYING", hash = 0x7272837f }]
+
 [licenses.private]
 # backend3's own crates (backend3, migration) are unpublished and
 # AGPL-3.0-only; they are not checked against the allow-list.

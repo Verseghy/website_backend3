@@ -7,9 +7,10 @@
 //! reader makes the RIFF, VP8, VP8L and VP8X header checks that libwebp makes
 //! before it decodes (`ParseHeadersInternal` and `VP8GetInfo` in
 //! `libwebp@1844042:src/dec/`). It stops at the `VP8X` chunk, so two of
-//! libwebp's later checks are left to the decoder: that a still image inside
-//! a `VP8X` file has the canvas size, and that every animation frame fits the
-//! canvas (`CheckFrameBounds` in `src/demux/demux.c`).
+//! libwebp's later checks are left to the WebP optimiser, which reads the
+//! bitstreams after that chunk with [`bitstream_dimensions`]: that a still
+//! image inside a `VP8X` file has the canvas size, and that every animation
+//! frame fits the canvas (`CheckFrameBounds` in `src/demux/demux.c`).
 
 use super::{Dimensions, HeaderDefect, HeaderError, bytes_at, dimensions};
 
@@ -33,10 +34,48 @@ pub(super) fn read(bytes: &[u8]) -> Result<Dimensions, HeaderError> {
     if !(12..=MAX_RIFF_SIZE).contains(&riff_size) || chunk_size > riff_size - 12 {
         return Err(HeaderDefect::WebpChunkSize.into());
     }
-    match &[f0, f1, f2, f3] {
-        b"VP8 " => lossy(bytes, chunk_size),
-        b"VP8L" => lossless(bytes, chunk_size),
-        b"VP8X" => extended(bytes, chunk_size),
+    // An input that ends inside the payload reads as truncated below.
+    let payload = bytes.get(PAYLOAD..).unwrap_or_default();
+    match [f0, f1, f2, f3] {
+        fourcc @ (VP8 | VP8L) => bitstream(fourcc, payload, chunk_size),
+        VP8X => extended(payload, chunk_size),
+        _ => Err(HeaderDefect::WebpFirstChunk.into()),
+    }
+}
+
+/// The `FourCC` of a lossy bitstream chunk.
+const VP8: [u8; 4] = *b"VP8 ";
+/// The `FourCC` of a lossless bitstream chunk.
+const VP8L: [u8; 4] = *b"VP8L";
+/// The `FourCC` of the extended-format chunk.
+const VP8X: [u8; 4] = *b"VP8X";
+
+/// The dimensions that a `VP8 ` or `VP8L` chunk declares, checked as [`read`]
+/// checks the first chunk of a simple file. The WebP optimiser compares them
+/// with the canvas of a `VP8X` file and places animation frames on that
+/// canvas with them, as libwebp does when it decodes.
+///
+/// - `fourcc`: the chunk's `FourCC`; any other than `VP8 ` and `VP8L` is
+///   [`HeaderDefect::WebpFirstChunk`].
+/// - `payload`: the chunk's payload, without its pad byte.
+pub(in crate::domain::image_optimise) fn bitstream_dimensions(
+    fourcc: [u8; 4],
+    payload: &[u8],
+) -> Result<Dimensions, HeaderError> {
+    // A payload that was read from a chunk had a 32-bit size, so it fits.
+    let chunk_size = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    bitstream(fourcc, payload, chunk_size)
+}
+
+/// The dimensions of a `VP8 ` or `VP8L` bitstream.
+///
+/// - `fourcc`: the chunk's `FourCC`.
+/// - `payload`: the input from the start of the chunk's payload on.
+/// - `chunk_size`: the payload size that the chunk header declares.
+fn bitstream(fourcc: [u8; 4], payload: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
+    match fourcc {
+        VP8 => lossy(payload, chunk_size),
+        VP8L => lossless(payload, chunk_size),
         _ => Err(HeaderDefect::WebpFirstChunk.into()),
     }
 }
@@ -44,11 +83,11 @@ pub(super) fn read(bytes: &[u8]) -> Result<Dimensions, HeaderError> {
 /// A VP8 key frame header (RFC 6386 §9.1): a 3-byte frame tag, the start
 /// code, then the 14-bit width and height. The top 2 bits of each are a
 /// scaling hint that decoders do not apply, so they are ignored.
-fn lossy(bytes: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
+fn lossy(payload: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
     if chunk_size < 10 {
         return Err(HeaderDefect::WebpChunkSize.into());
     }
-    let [t0, t1, t2, c0, c1, c2, w0, w1, h0, h1] = bytes_at(bytes, PAYLOAD)?;
+    let [t0, t1, t2, c0, c1, c2, w0, w1, h0, h1] = bytes_at(payload, 0)?;
     // The tag: key frame flag (0 for a key frame), 3 bits of profile, the
     // show flag, then 19 bits of first-partition size.
     let tag = u32::from_le_bytes([t0, t1, t2, 0]);
@@ -66,11 +105,11 @@ fn lossy(bytes: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
 
 /// A VP8L header: the signature byte `2F`, then 14 bits of width − 1,
 /// 14 bits of height − 1, an alpha hint and a 3-bit version that must be 0.
-fn lossless(bytes: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
+fn lossless(payload: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
     if chunk_size < 5 {
         return Err(HeaderDefect::WebpChunkSize.into());
     }
-    let [signature, b0, b1, b2, b3] = bytes_at(bytes, PAYLOAD)?;
+    let [signature, b0, b1, b2, b3] = bytes_at(payload, 0)?;
     let bits = u32::from_le_bytes([b0, b1, b2, b3]);
     if signature != 0x2F || bits >> 29 != 0 {
         return Err(HeaderDefect::Vp8lHeader.into());
@@ -80,11 +119,11 @@ fn lossless(bytes: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
 
 /// A VP8X chunk: flags (1 byte), reserved (3), then the canvas width − 1 and
 /// height − 1 in 24 bits each. libwebp refuses a canvas of 2³² pixels or more.
-fn extended(bytes: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
+fn extended(payload: &[u8], chunk_size: u32) -> Result<Dimensions, HeaderError> {
     if chunk_size != 10 {
         return Err(HeaderDefect::WebpChunkSize.into());
     }
-    let [_flags, _, _, _, w0, w1, w2, h0, h1, h2] = bytes_at(bytes, PAYLOAD)?;
+    let [_flags, _, _, _, w0, w1, w2, h0, h1, h2] = bytes_at(payload, 0)?;
     let width = u32::from_le_bytes([w0, w1, w2, 0]) + 1;
     let height = u32::from_le_bytes([h0, h1, h2, 0]) + 1;
     if u64::from(width) * u64::from(height) >= 1 << 32 {
@@ -228,6 +267,25 @@ mod tests {
     }
 
     #[test]
+    fn bitstream_dimensions_read_a_chunk_payload() {
+        let payload = |file: Vec<u8>| file[PAYLOAD..].to_vec();
+        let side = |d: Result<Dimensions, HeaderError>| d.map(|d| (d.width(), d.height()));
+        let lossy = payload(samples::webp_lossy(67, 41));
+        assert_eq!(side(bitstream_dimensions(VP8, &lossy)), Ok((67, 41)));
+        let lossless = payload(samples::webp_lossless(4000, 3));
+        assert_eq!(side(bitstream_dimensions(VP8L, &lossless)), Ok((4000, 3)));
+        // A VP8X chunk, or any other, is not a bitstream; a short one is refused.
+        assert_eq!(
+            bitstream_dimensions(VP8X, &[0; 10]),
+            Err(HeaderDefect::WebpFirstChunk.into())
+        );
+        assert_eq!(
+            bitstream_dimensions(VP8L, &lossless[..4]),
+            Err(HeaderDefect::WebpChunkSize.into())
+        );
+    }
+
+    #[test]
     fn other_first_chunks_are_refused() {
         for fourcc in [*b"ALPH", *b"ANIM", *b"VP8l", *b"EXIF"] {
             assert_eq!(
@@ -259,6 +317,18 @@ mod tests {
             } else {
                 prop_assert_eq!(result, Ok(expected));
             }
+        }
+
+        #[test]
+        fn a_bitstream_reads_as_the_first_chunk_of_a_simple_file(
+            lossless in any::<bool>(),
+            payload in proptest::collection::vec(any::<u8>(), 0..16),
+        ) {
+            let fourcc = if lossless { VP8L } else { VP8 };
+            prop_assert_eq!(
+                bitstream_dimensions(fourcc, &payload),
+                read(&samples::webp(fourcc, &payload))
+            );
         }
 
         #[test]

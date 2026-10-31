@@ -243,6 +243,27 @@ miniz_oxide = "0.9"
 # (the IHDR reader's bit-by-bit one is only fast enough for 17 bytes).
 # Already in the graph through flate2.
 crc32fast = "1"
+# WebP decoding and the lossy WebP re-encode of uploads (ADR 0015 §7), chosen
+# by measurement in docs/design/image-encoders.md. webpx is a safe binding to
+# libwebp through libwebp-sys 0.14, which compiles the libwebp it bundles
+# (1.6.0, BSD-3-Clause) with the `cc` crate: the Containerfile's gcc is
+# enough, with no bindgen, no clang and no system library. The `webp` crate
+# (0.3, libwebp-sys 0.9) was not chosen: its decoder has no limits and no
+# error reasons, its encoder takes no YUV input, and its libwebp is a
+# snapshot from the 1.3.1 era rather than a release. Default features are
+# off; `decode`, `encode` and `std` are the still-image codec, which also
+# decodes each animation frame. The tests add `animation` (below). The
+# metadata layer (`icc`) is not used: src/domain/image_optimise/webp/ writes
+# the container.
+webpx = { version = "0.4.1", default-features = false, features = [
+  "decode",
+  "encode",
+  "std",
+] }
+# GIF decoding, which checks that a GIF upload decodes before its stripped
+# copy is stored (ADR 0015 §7). Pure Rust (image-rs); the default
+# `color_quant` feature serves only its encoder and is left out.
+gif = { version = "0.14.2", default-features = false, features = ["std"] }
 
 # Test-only crates (backend3's [dev-dependencies]).
 proptest = "1"
@@ -343,6 +364,8 @@ mozjpeg = { workspace = true }
 oxipng = { workspace = true }
 miniz_oxide = { workspace = true }
 crc32fast = { workspace = true }
+webpx = { workspace = true }
+gif = { workspace = true }
 
 [[bin]]
 name = "backend3-cli"
@@ -363,3 +386,12 @@ futures-util = { workspace = true }
 insta = { workspace = true }
 hyper-util = { workspace = true }
 png = { workspace = true }
+# libwebp's animation encoder builds test animations, and its animation
+# decoder plays stored ones back frame by frame to compare them with the
+# upload. `icc` reads the profile and the EXIF chunk through libwebp's own
+# demuxer, so the tests compare the strip's reading of each chunk layout
+# with libwebp's (ADR 0033 §3). Both are Rust code over the libwebp that
+# libwebp-sys always builds (src/domain/image_optimise/webp/,
+# tests/domain/image_optimise_webp_gif.rs). The optimiser itself decodes
+# each frame as a still image and writes the container itself.
+webpx = { workspace = true, features = ["animation", "icc"] }
