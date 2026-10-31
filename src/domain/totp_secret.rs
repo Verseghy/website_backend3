@@ -119,8 +119,9 @@ impl TotpEncryptionKey {
     ///
     /// - `encoded`: the configured value, which production reads from
     ///   `TOTP_ENCRYPTION_KEY`. It is decoded with the engine that Loco's
-    ///   JWT uses for `JWT_SECRET` (base64 0.22, `STANDARD`, canonical
-    ///   padding). Nothing is trimmed: a trailing newline is refused.
+    ///   JWT uses for `JWT_SECRET` (`STANDARD`, canonical padding; base64
+    ///   0.23 here and 0.22 under jsonwebtoken, which decode alike). Nothing
+    ///   is trimmed: a trailing newline is refused.
     ///
     /// # Errors
     ///
@@ -297,7 +298,7 @@ fn hkdf_sha256(input_key: &[u8], info: &[u8]) -> [u8; 32] {
 /// - `error`: the decoder's error.
 fn decode_error_reason(error: &DecodeError) -> String {
     match error {
-        DecodeError::InvalidByte(offset, _) | DecodeError::InvalidLastSymbol(offset, _) => {
+        DecodeError::InvalidByte(offset, _) | DecodeError::InvalidLastSymbol { offset, .. } => {
             format!("an unexpected character at position {offset}")
         }
         DecodeError::InvalidLength(len) => format!("{len} characters is not a base64 length"),
