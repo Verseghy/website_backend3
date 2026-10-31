@@ -10,17 +10,20 @@
 //!
 //! - **The allow-list equals editor output.** `S(e) == e` for every body the
 //!   editor emits, so saving an unchanged body changes no byte.
-//! - **Idempotence.** `S(S(x)) == S(x)`, byte for byte.
-//! - **Determinism.** Two sanitiser instances produce the same bytes.
+//! - **Idempotence.** `S(S(x)) == S(x)`, byte for byte: the fixed-point loop
+//!   returns only an output that one more pass leaves unchanged.
+//! - **Determinism.** Two sanitiser instances produce the same bytes: the
+//!   structural pass writes every attribute in canonical order, whatever
+//!   order ammonia's hash maps left.
 //! - **No forgery.** The content write service takes only
 //!   [`SanitizedHtml`], which only [`Sanitizer::sanitize`] constructs.
+//! - **Bounded work.** Input size and nesting depth are checked before any
+//!   parse, and each pass's output size after it.
 //!
 //! This module holds the policy tables, the URL rules, the attribute filter,
-//! the ammonia builder and the removal report. The CSS grammar (editor.md
-//! §3.3) and the structural pass with its fixed-point loop (§7.5), which
-//! restores the canonical attribute order and completes the invariants
-//! above, follow in their own modules; until then every `style` attribute
-//! is dropped and [`Sanitizer::sanitize`] is a single ammonia pass.
+//! the ammonia builder, the structural pass, the depth scan and the removal
+//! report. The CSS grammar (editor.md §3.3) follows in its own module; until
+//! then every `style` attribute is dropped.
 //!
 //! Like everything under `src/domain/`, the module is pure (ADR 0008): the
 //! policy comes in as an argument, built once at boot from the settings.
@@ -32,17 +35,21 @@
 //! let result = sanitizer
 //!     .sanitize(r#"<p onclick="x">Hello <img src="data:image/png;base64,AA" alt="kép"></p>"#)
 //!     .expect("a small input");
-//! assert_eq!(result.html.as_str(), r#"<p>Hello <img alt="kép"></p>"#);
+//! assert_eq!(result.html.as_str(), "<p>Hello </p>");
 //! assert_eq!(result.report.count(RemovalRule::ImageSrcRejected), 1);
+//! assert_eq!(result.report.count(RemovalRule::ImageWithoutSrcRemoved), 1);
 //! assert_eq!(result.report.count(RemovalRule::AttributeNotAllowed), 1);
 //! ```
 
 pub mod attrs;
+pub mod depth;
 pub mod policy;
 pub mod report;
 pub mod sanitize;
+pub mod structure;
 pub mod url_rules;
 
 pub use policy::{POLICY_VERSION, PolicyError, SanitizePolicy};
 pub use report::{Removal, RemovalReport, RemovalRule};
-pub use sanitize::{SanitizeError, Sanitized, SanitizedHtml, Sanitizer};
+pub use sanitize::{MAX_PASSES, SanitizeError, Sanitized, SanitizedHtml, Sanitizer};
+pub use structure::Violation;

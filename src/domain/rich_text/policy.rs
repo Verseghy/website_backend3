@@ -10,14 +10,23 @@
 //! (editor.md §3).
 //!
 //! [`SanitizePolicy`] holds what differs between deployments: the embed
-//! providers, the image path prefix, backend3's own hosts and the input size
-//! limit. It is built once at boot from the typed settings and passed in
-//! explicitly (ADR 0008); [`SanitizePolicy::validate`] names the bad key.
+//! providers, the image path prefix, backend3's own hosts, and the bounds on
+//! the work one body may cost (input size, nesting depth, output size). It
+//! is built once at boot from the typed settings and passed in explicitly
+//! (ADR 0008); [`SanitizePolicy::validate`] names the bad key, and
+//! `Sanitizer::new` refuses a policy that fails it, so a bad value stops the
+//! process at startup.
 
 use url::{Host, Url};
 
 /// The stored HTML dialect this policy defines. Rows record it in
 /// `content_policy` (ADR 0013 §1, §6).
+///
+/// The hardening of research: DECISIONS R11 (the stricter `img[src]` rule
+/// and the §3.5 wording) changed content-v1 in place, without a bump, because
+/// no body was stored yet; the maintainer confirmed that on 2026-10-25
+/// ("Confirm all four as built", item D87, research: DECISIONS R15). Every
+/// later change bumps this version (editor.md §3).
 pub const POLICY_VERSION: &str = "content-v1";
 
 /// How the value of one allowed attribute is checked (editor.md §3.2, §7.3).
@@ -287,6 +296,30 @@ pub const DEFAULT_MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 /// The accepted range of [`SanitizePolicy::max_input_bytes`].
 pub const MAX_INPUT_BYTES_RANGE: core::ops::RangeInclusive<usize> = 1024..=16 * 1024 * 1024;
 
+/// The default nesting-depth limit (editor.md §7.2; research: DECISIONS R11).
+pub const DEFAULT_MAX_NESTING_DEPTH: usize = 256;
+
+/// The accepted range of [`SanitizePolicy::max_nesting_depth`]. The lower
+/// bound is well above the deepest shape the editor writes (the marks inside
+/// a table cell are about a dozen levels down, plus any list nesting). The
+/// upper bound keeps the HTML tree builder, whose cost grows with the depth
+/// of its stack of open elements, inside one request: in one release-build
+/// run (best of five), a 2 MiB body of `div`s nested 1024 deep took about
+/// 1 s to sanitise, one nested 256 deep about 0.4 s, and a flat 2 MiB body
+/// of short paragraphs about 0.1 s. The maintainer
+/// confirmed this range as built (item D87, research: DECISIONS R15).
+pub const MAX_NESTING_DEPTH_RANGE: core::ops::RangeInclusive<usize> = 32..=1024;
+
+/// The default output limit (editor.md §7.2; research: DECISIONS R11).
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+
+/// The upper end of the accepted range of [`SanitizePolicy::max_output_bytes`];
+/// the lower end is the policy's own `max_input_bytes`, because a lower
+/// output limit would refuse an unchanged canonical body of the largest
+/// accepted size. The maintainer confirmed this range as built (item D87,
+/// research: DECISIONS R15).
+pub const MAX_OUTPUT_BYTES_CEILING: usize = 64 * 1024 * 1024;
+
 /// The content-v1 rule for `name`, or `None` when `name` is not a content-v1
 /// element (it is then unwrapped or removed).
 ///
@@ -329,6 +362,14 @@ pub struct SanitizePolicy {
     pub own_hosts: Vec<String>,
     /// The largest input the sanitiser accepts, in bytes.
     pub max_input_bytes: usize,
+    /// The deepest element nesting the sanitiser accepts. It is checked by a
+    /// linear scan before anything is parsed into a tree, because the HTML
+    /// tree builder's cost grows with the nesting depth (editor.md §7.2).
+    pub max_nesting_depth: usize,
+    /// The largest output of one sanitiser pass, in bytes. The output can be
+    /// many times the input (every link gains `target` and `rel`), so it is
+    /// bounded on its own (editor.md §7.2).
+    pub max_output_bytes: usize,
 }
 
 /// A [`SanitizePolicy`] value that cannot be used, naming the key to fix.
@@ -362,6 +403,8 @@ impl SanitizePolicy {
             image_path_prefix: IMAGE_PATH_PREFIX.to_owned(),
             own_hosts: OWN_HOSTS.iter().map(|&host| host.to_owned()).collect(),
             max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
+            max_nesting_depth: DEFAULT_MAX_NESTING_DEPTH,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
     }
 
@@ -370,7 +413,11 @@ impl SanitizePolicy {
     /// Prefixes must start and end with `/`, contain no `//` or `..`, and be
     /// written as the `url` crate serialises a path (otherwise no parsed URL
     /// could ever match them). Hosts must be lower-case domain names without
-    /// a trailing dot. The byte limit must lie in [`MAX_INPUT_BYTES_RANGE`].
+    /// a trailing dot. The input limit must lie in [`MAX_INPUT_BYTES_RANGE`]
+    /// and the depth limit in [`MAX_NESTING_DEPTH_RANGE`]. The output limit
+    /// must be at least the input limit, so that a canonical body of the
+    /// largest accepted size, which comes out unchanged, is never refused for
+    /// its output, and at most [`MAX_OUTPUT_BYTES_CEILING`].
     ///
     /// # Errors
     ///
@@ -401,6 +448,26 @@ impl SanitizePolicy {
                     MAX_INPUT_BYTES_RANGE.start(),
                     MAX_INPUT_BYTES_RANGE.end(),
                     self.max_input_bytes
+                ),
+            ));
+        }
+        if !MAX_NESTING_DEPTH_RANGE.contains(&self.max_nesting_depth) {
+            return Err(error(
+                "max_nesting_depth",
+                &format!(
+                    "must be from {} to {} levels, got {}",
+                    MAX_NESTING_DEPTH_RANGE.start(),
+                    MAX_NESTING_DEPTH_RANGE.end(),
+                    self.max_nesting_depth
+                ),
+            ));
+        }
+        if !(self.max_input_bytes..=MAX_OUTPUT_BYTES_CEILING).contains(&self.max_output_bytes) {
+            return Err(error(
+                "max_output_bytes",
+                &format!(
+                    "must be from max_input_bytes ({}) to {MAX_OUTPUT_BYTES_CEILING} bytes, got {}",
+                    self.max_input_bytes, self.max_output_bytes
                 ),
             ));
         }
@@ -648,6 +715,54 @@ mod tests {
             check(|p| p.max_input_bytes = 16 * 1024 * 1024 + 1),
             "max_input_bytes"
         );
+        assert_eq!(check(|p| p.max_nesting_depth = 31), "max_nesting_depth");
+        assert_eq!(check(|p| p.max_nesting_depth = 1025), "max_nesting_depth");
+        assert_eq!(check(|p| p.max_nesting_depth = 0), "max_nesting_depth");
+        assert_eq!(
+            check(|p| p.max_output_bytes = p.max_input_bytes - 1),
+            "max_output_bytes"
+        );
+        assert_eq!(
+            check(|p| p.max_output_bytes = 64 * 1024 * 1024 + 1),
+            "max_output_bytes"
+        );
+    }
+
+    #[test]
+    fn the_limits_default_to_the_maintainer_answers() {
+        // research: DECISIONS R11: depth 256, output 8 MiB.
+        let policy = SanitizePolicy::content_v1();
+        assert_eq!(policy.max_nesting_depth, 256);
+        assert_eq!(policy.max_output_bytes, 8 * 1024 * 1024);
+        assert_eq!(policy.max_input_bytes, 2 * 1024 * 1024);
+        // The output bound may equal the input bound, the smallest value
+        // that never refuses an unchanged canonical body.
+        let tight = SanitizePolicy {
+            max_output_bytes: policy.max_input_bytes,
+            ..policy
+        };
+        assert_eq!(tight.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_limit_messages_say_what_to_fix() {
+        let depth = SanitizePolicy {
+            max_nesting_depth: 2048,
+            ..SanitizePolicy::content_v1()
+        };
+        assert_eq!(
+            depth.validate().unwrap_err().to_string(),
+            "rich-text policy `max_nesting_depth`: must be from 32 to 1024 levels, got 2048"
+        );
+        let output = SanitizePolicy {
+            max_output_bytes: 1024,
+            ..SanitizePolicy::content_v1()
+        };
+        assert_eq!(
+            output.validate().unwrap_err().to_string(),
+            "rich-text policy `max_output_bytes`: must be from max_input_bytes (2097152) to \
+             67108864 bytes, got 1024"
+        );
     }
 
     #[test]
@@ -664,8 +779,29 @@ mod tests {
     proptest! {
         #[test]
         fn the_byte_limit_is_valid_exactly_inside_its_range(limit in 0usize..20 * 1024 * 1024) {
-            let policy = SanitizePolicy { max_input_bytes: limit, ..SanitizePolicy::content_v1() };
+            // The output bound follows the input bound, so it cannot be the
+            // key that fails.
+            let policy = SanitizePolicy { max_input_bytes: limit, max_output_bytes: limit.max(1024), ..SanitizePolicy::content_v1() };
             prop_assert_eq!(policy.validate().is_ok(), MAX_INPUT_BYTES_RANGE.contains(&limit));
+        }
+
+        #[test]
+        fn the_depth_limit_is_valid_exactly_inside_its_range(limit in 0usize..4096) {
+            let policy = SanitizePolicy { max_nesting_depth: limit, ..SanitizePolicy::content_v1() };
+            prop_assert_eq!(policy.validate().is_ok(), MAX_NESTING_DEPTH_RANGE.contains(&limit));
+        }
+
+        #[test]
+        fn the_output_limit_is_valid_from_the_input_limit_to_the_ceiling(
+            input in MAX_INPUT_BYTES_RANGE,
+            output in 0usize..=2 * MAX_OUTPUT_BYTES_CEILING,
+        ) {
+            let policy = SanitizePolicy { max_input_bytes: input, max_output_bytes: output, ..SanitizePolicy::content_v1() };
+            let valid = input <= output && output <= MAX_OUTPUT_BYTES_CEILING;
+            prop_assert_eq!(policy.validate().is_ok(), valid);
+            if !valid {
+                prop_assert_eq!(policy.validate().unwrap_err().key, "max_output_bytes");
+            }
         }
 
         #[test]

@@ -17,6 +17,14 @@
 //! and, over nested trees with table cells, the removed and unwrapped
 //! elements, the comments and the rejected image sources. An ammonia upgrade
 //! that changes the order or the namespace lists fails them.
+//!
+//! [`explain`] covers the ammonia step only. The structural pass (editor.md
+//! §7.5) runs on a tree this crate builds, so it records its own removals
+//! while it runs ([`RemovalRule::IframeContentRemoved`],
+//! [`RemovalRule::ImageWithoutSrcRemoved`],
+//! [`RemovalRule::NestedSubSupUnwrapped`],
+//! [`RemovalRule::NestedLinkUnwrapped`]), and the fixed-point loop merges the
+//! reports of every pass into one.
 
 use std::collections::BTreeMap;
 
@@ -60,6 +68,20 @@ pub enum RemovalRule {
     EmbedSrcRejected,
     /// A link's `href` was removed (editor.md §3.6).
     LinkHrefRejected,
+    /// The child nodes of an `iframe` were removed; counted once per
+    /// `iframe` (the structural pass, editor.md §7.5).
+    IframeContentRemoved,
+    /// An `img` without `src` was removed (the structural pass, editor.md
+    /// §7.5). An `img` whose `src` the filter dropped counts here as well as
+    /// under [`Self::ImageSrcRejected`].
+    ImageWithoutSrcRemoved,
+    /// A `sub` or `sup` inside another `sub` or `sup` was unwrapped (the
+    /// structural pass, editor.md §7.5).
+    NestedSubSupUnwrapped,
+    /// An `a` inside another `a`, with no table cell between them, was
+    /// unwrapped: its content stays in the outer link (the structural pass,
+    /// editor.md §7.5, ADR 0037).
+    NestedLinkUnwrapped,
 }
 
 impl RemovalRule {
@@ -78,6 +100,10 @@ impl RemovalRule {
             Self::ImageSrcRejected => "image_src_rejected",
             Self::EmbedSrcRejected => "embed_src_rejected",
             Self::LinkHrefRejected => "link_href_rejected",
+            Self::IframeContentRemoved => "iframe_content_removed",
+            Self::ImageWithoutSrcRemoved => "image_without_src_removed",
+            Self::NestedSubSupUnwrapped => "nested_sub_sup_unwrapped",
+            Self::NestedLinkUnwrapped => "nested_link_unwrapped",
         }
     }
 }
@@ -147,6 +173,16 @@ impl RemovalReport {
             attribute: attribute.map(str::to_owned),
         };
         *self.entries.entry(removal).or_insert(0) += 1;
+    }
+
+    /// Adds every count of `other` to this report: one report covers all
+    /// passes of a sanitiser run.
+    ///
+    /// - `other`: the removals of one more pass.
+    pub(super) fn merge(&mut self, other: Self) {
+        for (removal, count) in other.entries {
+            *self.entries.entry(removal).or_insert(0) += count;
+        }
     }
 }
 
@@ -339,6 +375,10 @@ mod tests {
             (ImageSrcRejected, "image_src_rejected"),
             (EmbedSrcRejected, "embed_src_rejected"),
             (LinkHrefRejected, "link_href_rejected"),
+            (IframeContentRemoved, "iframe_content_removed"),
+            (ImageWithoutSrcRemoved, "image_without_src_removed"),
+            (NestedSubSupUnwrapped, "nested_sub_sup_unwrapped"),
+            (NestedLinkUnwrapped, "nested_link_unwrapped"),
         ];
         for (rule, name) in names {
             assert_eq!(rule.as_str(), name);
@@ -517,6 +557,30 @@ mod tests {
     }
 
     #[test]
+    fn merge_adds_the_counts_of_another_pass() {
+        let mut first = RemovalReport::default();
+        first.record(RemovalRule::CommentRemoved, "#comment", None);
+        first.record(RemovalRule::ImageSrcRejected, "img", Some("src"));
+        let mut second = RemovalReport::default();
+        second.record(RemovalRule::ImageSrcRejected, "img", Some("src"));
+        second.record(RemovalRule::ImageWithoutSrcRemoved, "img", None);
+        first.merge(second);
+        assert_eq!(
+            first
+                .entries()
+                .map(|(r, n)| (r.clone(), n))
+                .collect::<Vec<_>>(),
+            [
+                (entry(RemovalRule::CommentRemoved, "#comment", None), 1),
+                (entry(RemovalRule::ImageSrcRejected, "img", Some("src")), 2),
+                (entry(RemovalRule::ImageWithoutSrcRemoved, "img", None), 1),
+            ]
+        );
+        first.merge(RemovalReport::default());
+        assert_eq!(first.per_rule().values().sum::<usize>(), 4);
+    }
+
+    #[test]
     fn the_walk_survives_deep_nesting() {
         let deep = "<div>".repeat(5_000);
         assert_eq!(report(&deep).count(RemovalRule::ElementUnwrapped), 5_000);
@@ -537,6 +601,22 @@ mod tests {
             prop_assert_eq!(children.len(), 1);
             let parsed = match children[0].value() { Node::Text(t) => t.to_string(), other => format!("{other:?}") };
             prop_assert_eq!(parsed, text);
+        }
+
+        #[test]
+        fn merging_reports_adds_every_count(
+            first in prop::collection::vec(prop::sample::select(&["div", "b", "script", "p", "font"][..]), 0..10),
+            second in prop::collection::vec(prop::sample::select(&["div", "b", "script", "p", "font"][..]), 0..10),
+        ) {
+            let render = |tags: &[&str]| tags.iter().map(|tag| format!("<{tag}>x</{tag}>")).collect::<Vec<_>>().concat();
+            let (a, b) = (report(&render(&first)), report(&render(&second)));
+            let mut merged = a.clone();
+            merged.merge(b.clone());
+            for rule in [RemovalRule::ElementRemoved, RemovalRule::ElementUnwrapped] {
+                prop_assert_eq!(merged.count(rule), a.count(rule) + b.count(rule));
+            }
+            let both = [first, second].concat();
+            prop_assert_eq!(merged, report(&render(&both)));
         }
 
         #[test]
