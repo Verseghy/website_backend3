@@ -11,5 +11,6 @@
 
 mod database_guard;
 mod metrics_port;
+mod png_effort;
 mod precheck;
 mod session_secret;

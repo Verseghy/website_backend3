@@ -39,16 +39,21 @@
 //!
 //! After the check comes the optimisation itself, one module per format:
 //! [`optimise_jpeg`] strips the metadata of a JPEG and re-encodes it
-//! ([`strip_jpeg`] runs the strip alone, for the corpus tests). The
+//! ([`strip_jpeg`] runs the strip alone, for the corpus tests), and
+//! [`optimise_png`] recompresses a PNG losslessly, keeping its colour, HDR
+//! and animation chunks and its EXIF Orientation, with an encoder effort
+//! that depends on the image's size ([`PngEffort`], ADR 0033 §5). The
 //! rules they share are here too: the EXIF block reduced to its Orientation
-//! tag ([`Orientation`]), and the keep-or-discard rule of a lossy re-encode
+//! tag ([`Orientation`]), the keep-or-discard rule of a lossy re-encode
 //! (ADR 0033 §1), whose size half is [`reencode_is_kept`] and whose
 //! similarity half is [`reencode_meets_ssim_floor`] over the streaming luma
-//! SSIM of [`LumaSsim`], which the lossy WebP re-encode uses too.
+//! SSIM of [`LumaSsim`], which the lossy WebP re-encode uses too, and the
+//! [`DecodeDefect`] that says why a body does not decode.
 //!
 //! Everything here is pure (ADR 0008): bytes in, a typed result out. The
-//! caller reads the upload, passes the budget from its settings, and maps each
-//! [`ImageError`] to the Hungarian message the editor sees.
+//! caller reads the upload, passes the budget and the PNG effort from its
+//! settings, and maps each [`ImageError`] to the Hungarian message the
+//! editor sees.
 
 mod budget;
 mod exif;
@@ -56,6 +61,7 @@ mod format;
 mod header;
 mod jpeg;
 mod keep;
+mod png;
 mod ssim;
 
 pub use budget::{Dimensions, PixelBudget, PixelBudgetError};
@@ -64,7 +70,22 @@ pub use format::{ImageFormat, sniff};
 pub use header::HeaderDefect;
 pub use jpeg::{JpegKept, MAX_JPEG_SCANS, NotReencoded, OptimisedJpeg, optimise_jpeg, strip_jpeg};
 pub use keep::{SSIM_FLOOR, reencode_is_kept, reencode_meets_ssim_floor};
+pub use png::{LARGE_PNG_PRESET_MAX, PNG_PRESET, PngEffort, PngEffortError, optimise_png};
 pub use ssim::{LumaSsim, SSIM_WINDOW, SsimError, mean_ssim};
+
+/// The most frames an animation may have for its frames to be decoded and
+/// recompressed: 4096, the WebP limit of ADR 0033 §4 that decision D79 also
+/// gave GIF. The pixel budget bounds one canvas only, while the work of an
+/// optimisation grows with every frame, all of it inside one request that
+/// holds the one-at-a-time semaphore (ADR 0015 §7). The animated PNGs that
+/// ADR 0033 §6 keeps are held to the same totals.
+pub const MAX_ANIMATION_FRAMES: u64 = 4096;
+
+/// The most pixels an animation may hold in all its frames, each at its own
+/// size, together with a still default image: 256 Mi (268,435,456), the
+/// WebP limit of ADR 0033 §4, which is five frames at the default pixel
+/// budget or about 870 frames of 640 × 480. See [`MAX_ANIMATION_FRAMES`].
+pub const MAX_ANIMATION_PIXELS: u64 = 256 * 1024 * 1024;
 
 /// What the header of an accepted image says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,6 +150,27 @@ pub enum ImageError {
         /// The cap that was passed: [`MAX_JPEG_SCANS`].
         limit: usize,
     },
+    /// The animation has more frames than [`MAX_ANIMATION_FRAMES`], or more
+    /// pixels in all its images than [`MAX_ANIMATION_PIXELS`], so it is
+    /// refused from its frame headers, before anything is decoded. Nothing
+    /// says it is corrupt; the editor is asked for a shorter or smaller
+    /// animation.
+    #[error(
+        "the {format} animation has {frames} frames and {pixels} pixels in all; the optimiser \
+         takes at most {max_frames} frames and {max_pixels} pixels",
+        max_frames = MAX_ANIMATION_FRAMES,
+        max_pixels = MAX_ANIMATION_PIXELS
+    )]
+    AnimationTooLarge {
+        /// The sniffed format.
+        format: ImageFormat,
+        /// The number of frames counted toward the totals: for an APNG, the
+        /// frames that its chunks keep (ADR 0033 §4 and §6).
+        frames: u64,
+        /// The pixels of every image counted, each at its own size: for an
+        /// APNG, the default image and those frames.
+        pixels: u64,
+    },
     /// The header is accepted, but the image data does not decode as its
     /// sniffed format, so ADR 0015 §7 refuses it as corrupt.
     #[error("the {format} image does not decode: {defect}")]
@@ -141,7 +183,15 @@ pub enum ImageError {
 }
 
 /// What is wrong with the data of an image whose header was accepted. The
-/// messages are English, for logs.
+/// messages are English, for logs; the editor sees the Hungarian message of
+/// the upload error.
+///
+/// The header readers see only the header; the optimisers read the whole
+/// file, and each names here what it found wrong, with the format as the
+/// prefix of the variant, as [`HeaderDefect`] does. Each refusal follows what
+/// the reference decoder refuses, so a file that browsers show is not turned
+/// away for a fault they ignore. Where an optimiser is stricter, its module
+/// says where and why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum DecodeDefect {
     /// The JPEG data ends inside a segment or the scan data, or before its
@@ -160,6 +210,40 @@ pub enum DecodeDefect {
     /// The JPEG decoder refused the compressed image data.
     #[error("the JPEG image data is corrupt")]
     JpegData,
+    /// A PNG chunk runs past the end of the file, or the file ends without
+    /// the `IEND` chunk.
+    #[error("a PNG chunk is cut short or the IEND chunk is missing")]
+    PngTruncated,
+    /// A PNG chunk declares a length above 2³¹ − 1, or a type that is not
+    /// four ASCII letters; libpng refuses both.
+    #[error("a PNG chunk has an invalid length or type")]
+    PngChunk,
+    /// The CRC of a critical PNG chunk does not match its content. (An
+    /// ancillary chunk with a bad CRC is dropped, as libpng drops it, and
+    /// libpng only warns about a bad CRC on `IEND` or on the `PLTE` of an
+    /// image that is not indexed, so those are taken.)
+    #[error("the checksum of a critical PNG chunk does not match")]
+    PngChecksum,
+    /// A critical chunk (upper-case first letter) that PNG does not define,
+    /// which a decoder must refuse.
+    #[error("the PNG data has an unknown critical chunk")]
+    PngUnknownCriticalChunk,
+    /// The critical chunks are out of order: a second `IHDR`, or a second
+    /// `PLTE` in an indexed image.
+    #[error("the PNG critical chunks are out of order")]
+    PngChunkOrder,
+    /// An indexed-colour PNG has no `PLTE` chunk before its image data, or
+    /// one whose length is not 1 to 256 entries of 3 bytes; or a truecolour
+    /// PNG has an empty `PLTE` where libpng takes a suggested palette.
+    #[error("the PNG palette is missing or invalid")]
+    PngPalette,
+    /// The first run of image data is missing, is not one valid zlib stream
+    /// (its Adler-32 included), does not decode to exactly the size that
+    /// `IHDR` declares, or has a row whose filter type is not one of PNG's
+    /// five. More data than declared is refused too, although libpng only
+    /// warns about it: the extra bytes are data no viewer shows.
+    #[error("the PNG image data does not decode to the declared image")]
+    PngImageData,
 }
 
 /// Reads the header of an upload and checks it against the pixel budget,
@@ -305,6 +389,38 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "the JPEG header is malformed: the width or the height is zero"
+        );
+    }
+
+    #[test]
+    fn every_png_defect_has_its_own_message() {
+        let all = [
+            DecodeDefect::PngTruncated,
+            DecodeDefect::PngChunk,
+            DecodeDefect::PngChecksum,
+            DecodeDefect::PngUnknownCriticalChunk,
+            DecodeDefect::PngChunkOrder,
+            DecodeDefect::PngPalette,
+            DecodeDefect::PngImageData,
+        ];
+        let mut messages: Vec<String> = all.iter().map(ToString::to_string).collect();
+        assert!(messages.iter().all(|message| message.contains("PNG")));
+        messages.sort();
+        messages.dedup();
+        assert_eq!(messages.len(), all.len());
+    }
+
+    #[test]
+    fn an_animation_refusal_names_its_totals_and_the_limits() {
+        let error = ImageError::AnimationTooLarge {
+            format: ImageFormat::Png,
+            frames: 4097,
+            pixels: 12,
+        };
+        assert_eq!(
+            error.to_string(),
+            "the PNG animation has 4097 frames and 12 pixels in all; the optimiser takes at most \
+             4096 frames and 268435456 pixels"
         );
     }
 

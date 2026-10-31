@@ -11,7 +11,10 @@ use std::net::Ipv4Addr;
 
 use backend3::{
     app::enforce_database_guard,
-    domain::totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT, TotpEncryptionKey},
+    domain::{
+        image_optimise::PngEffort,
+        totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT, TotpEncryptionKey},
+    },
     settings::{Settings, SettingsError},
 };
 use loco_rs::{
@@ -51,6 +54,12 @@ fn local_configs_pass_the_guard_and_have_typed_settings() {
         assert_eq!(
             settings.metrics.binding,
             Ipv4Addr::LOCALHOST,
+            "{environment}"
+        );
+        // The committed effort is the documented default of ADR 0033 §5.
+        assert_eq!(
+            settings.image_optimisation.png,
+            PngEffort::DEFAULT,
             "{environment}"
         );
         assert!(!config.database.dangerously_truncate, "{environment}");

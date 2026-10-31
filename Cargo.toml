@@ -222,8 +222,33 @@ prometheus-client = { version = "0.25.1", default-features = false }
 # compile then). The licence is IJG (deny.toml has the scoped exception).
 mozjpeg = { version = "0.10", default-features = false }
 
+# The PNG encoder of the upload image pipeline (ADR 0015 §7), chosen by
+# measurement in docs/design/image-encoders.md: lossless recompression with
+# libdeflate, at oxipng's preset 2 up to a pixel-count threshold and a
+# cheaper preset above it (ADR 0033 §5). Default features off: `binary` is
+# the command-line tool, `parallel` would spread one optimisation over every
+# core through rayon (ADR 0015 §7 runs one at a time, on one blocking
+# thread), and `zopfli` was measured at 40-100x the CPU of libdeflate inside
+# an upload request.
+# oxipng always depends on libdeflater, which compiles the bundled C
+# libdeflate (MIT) with the gcc that the Containerfile's rust stage installs.
+oxipng = { version = "10.2", default-features = false }
+# Streaming inflate check of the zlib streams a PNG keeps (IDAT, fdAT,
+# iCCP): where each stream ends, how much it decodes to and the filter type
+# of every row, in a 32 KiB window, and the decoded ICC profile, whose
+# header and tag table the walk checks.
+# Already in the graph through tower-http's compression (flate2).
+miniz_oxide = "0.9"
+# Table-driven CRC-32 for every PNG chunk the optimiser reads or writes
+# (the IHDR reader's bit-by-bit one is only fast enough for 17 bytes).
+# Already in the graph through flate2.
+crc32fast = "1"
+
 # Test-only crates (backend3's [dev-dependencies]).
 proptest = "1"
+# A reference PNG decoder, independent of oxipng and libdeflate, for the
+# "decoded pixels identical" tests of the PNG optimiser.
+png = "0.18"
 # The response type of Loco's test server, named in test helpers. Same major
 # as loco-rs 1.2.0 uses, so one copy is built.
 axum-test = "17"
@@ -315,6 +340,9 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 mozjpeg = { workspace = true }
+oxipng = { workspace = true }
+miniz_oxide = { workspace = true }
+crc32fast = { workspace = true }
 
 [[bin]]
 name = "backend3-cli"
@@ -334,3 +362,4 @@ axum-test = { workspace = true }
 futures-util = { workspace = true }
 insta = { workspace = true }
 hyper-util = { workspace = true }
+png = { workspace = true }
