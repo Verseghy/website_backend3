@@ -60,8 +60,12 @@ pub enum RemovalRule {
     DefaultValueOmitted,
     /// An attribute's value was rewritten into its canonical spelling.
     ValueCanonicalised,
-    /// A `style` attribute was removed.
+    /// A `style` attribute was removed: none of its declarations is allowed
+    /// on its element (editor.md §3.3, §3.4).
     StyleRejected,
+    /// A `style` attribute was kept, but some of its declarations were
+    /// removed.
+    StyleDeclarationRejected,
     /// An image's `src` was removed (editor.md §3.6).
     ImageSrcRejected,
     /// An embed's `src` was removed (editor.md §3.6).
@@ -97,6 +101,7 @@ impl RemovalRule {
             Self::DefaultValueOmitted => "default_value_omitted",
             Self::ValueCanonicalised => "value_canonicalised",
             Self::StyleRejected => "style_rejected",
+            Self::StyleDeclarationRejected => "style_declaration_rejected",
             Self::ImageSrcRejected => "image_src_rejected",
             Self::EmbedSrcRejected => "embed_src_rejected",
             Self::LinkHrefRejected => "link_href_rejected",
@@ -298,6 +303,23 @@ fn explain_attributes<'a>(
             ValueRule::EmbedSrc => RemovalRule::EmbedSrcRejected,
             _ => RemovalRule::LinkHrefRejected,
         };
+        // A style is classified by the CSS grammar. That includes the forced
+        // styles of `table` and `tbody`: ammonia writes their one value, but a
+        // declaration the grammar rejects there (a legacy `width: 100%`) is a
+        // removal, not a re-spelling.
+        let style = match attribute.rule {
+            ValueRule::Style => Some(attrs::decide_style(tag, value).1),
+            ValueRule::Forced(forced) if name == "style" => {
+                Some(attrs::forced_style_rule(tag, value, forced))
+            }
+            _ => None,
+        };
+        if let Some(rule) = style {
+            if let Some(rule) = rule {
+                record(rule);
+            }
+            continue;
+        }
         // ammonia removes `rel` and appends its own, and a forced attribute
         // ends up with its canonical value however it was written.
         let fixed_value = match attribute.rule {
@@ -372,6 +394,7 @@ mod tests {
             (DefaultValueOmitted, "default_value_omitted"),
             (ValueCanonicalised, "value_canonicalised"),
             (StyleRejected, "style_rejected"),
+            (StyleDeclarationRejected, "style_declaration_rejected"),
             (ImageSrcRejected, "image_src_rejected"),
             (EmbedSrcRejected, "embed_src_rejected"),
             (LinkHrefRejected, "link_href_rejected"),
@@ -544,6 +567,61 @@ mod tests {
             "start, colspan"
         );
         assert_eq!(report.count(RemovalRule::CommentRemoved), 0);
+    }
+
+    #[test]
+    fn styles_are_counted_by_what_happened() {
+        // The forced table and tbody styles are classified by the grammar too:
+        // a rejected declaration there is a removal, another spelling of the
+        // forced value a re-spelling, and the forced value itself nothing.
+        let report = report(
+            r#"<p style="color: red">a</p><span style="color: red; font-family: x">b</span><span style="COLOR: red">c</span>
+               <span style="color: #ff0000">d</span><ul style="list-style-type: disc"><li>e</li></ul>
+               <table style="width: 100%"><tbody style="display: table"><tr><td style="width: 10px">f</td></tr></tbody></table>
+               <table style="max-width: fit-content; border-collapse: collapse"><tbody style="display: table-row-group"><tr><td>g</td></tr></tbody></table>
+               <table style="border-collapse: collapse; max-width: fit-content"><tbody><tr><td>h</td></tr></tbody></table>"#,
+        );
+        assert_eq!(
+            report
+                .entries()
+                .map(|(r, n)| (r.clone(), n))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    entry(RemovalRule::DefaultValueOmitted, "ul", Some("style")),
+                    1
+                ),
+                (
+                    entry(RemovalRule::ValueCanonicalised, "span", Some("style")),
+                    1
+                ),
+                (
+                    entry(RemovalRule::ValueCanonicalised, "table", Some("style")),
+                    1
+                ),
+                (entry(RemovalRule::StyleRejected, "p", Some("style")), 1),
+                (
+                    entry(RemovalRule::StyleDeclarationRejected, "span", Some("style")),
+                    1
+                ),
+                (
+                    entry(
+                        RemovalRule::StyleDeclarationRejected,
+                        "table",
+                        Some("style")
+                    ),
+                    1
+                ),
+                (
+                    entry(
+                        RemovalRule::StyleDeclarationRejected,
+                        "tbody",
+                        Some("style")
+                    ),
+                    1
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -32,8 +32,12 @@
 //!   forced attributes left (§7.4), so two sanitiser instances write the
 //!   same bytes.
 //!
-//! The rule that drops `font-size` from a `span` inside a sized `span`
-//! belongs to the CSS grammar, which drops every `style` until it lands.
+//! Two rules of editor.md §7.5 are style rules and are not here yet: the
+//! one that drops `font-size` from a `span` inside a sized `span`, and the
+//! one that gives an `img` without a `style` its locked declarations. Until
+//! they are, a nested span keeps its `font-size`, and an `img` without a
+//! `style` keeps none: the CSS grammar ([`super::css`]) sees one `style` at
+//! a time, and ammonia calls it only for attributes that exist.
 //!
 //! It also asserts the invariants the public sites' sink chain relies on: no
 //! `table` inside a `p`, and every element and attribute is in content-v1,

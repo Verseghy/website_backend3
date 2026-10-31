@@ -5,9 +5,12 @@
 //!
 //! The tables are `const` data rather than code so that the ammonia builder,
 //! the attribute filter, the removal report and, later, the policy manifest
-//! (editor.md §3.9) read one source. Any change here is a policy change: it
+//! (editor.md §3.9) read one source. The per-element CSS grammar of editor.md
+//! §3.3 is the same kind of data and lives beside its parser, in
+//! [`super::css::grammar`]. Any change here or there is a policy change: it
 //! bumps [`POLICY_VERSION`] and ships with a `content_normalize` run
-//! (editor.md §3).
+//! (editor.md §3). The R11 hardening, made before any body was stored, is
+//! the one change that did not, and [`POLICY_VERSION`] records why.
 //!
 //! [`SanitizePolicy`] holds what differs between deployments: the embed
 //! providers, the image path prefix, backend3's own hosts, and the bounds on
@@ -32,8 +35,8 @@ pub const POLICY_VERSION: &str = "content-v1";
 /// How the value of one allowed attribute is checked (editor.md §3.2, §7.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueRule {
-    /// `style`: the per-element CSS grammar of editor.md §3.3. Until that
-    /// grammar exists, every `style` attribute is dropped.
+    /// `style`: the per-element CSS grammar of editor.md §3.3
+    /// ([`super::css::sanitize_style`]).
     Style,
     /// Free text kept as written (`img[alt]`, `iframe[title]`).
     Text,
@@ -151,6 +154,16 @@ pub const LINK_TARGET: &str = "_blank";
 pub const IFRAME_ALLOW: &str = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
 /// The one `referrerpolicy` of an embed.
 pub const IFRAME_REFERRER_POLICY: &str = "strict-origin-when-cross-origin";
+/// The one `style` of a table. Both of its declarations are locked and
+/// always present (editor.md §3.3), so the whole attribute is forced like
+/// the iframe attributes: ammonia then adds it to every table, which the
+/// attribute filter alone cannot, because it only sees attributes that
+/// exist. The CSS grammar lists the same declarations, and a test keeps the
+/// two equal.
+pub const TABLE_STYLE: &str = "border-collapse: collapse; max-width: fit-content";
+/// The one `style` of a table body, forced for the same reason as
+/// [`TABLE_STYLE`].
+pub const TBODY_STYLE: &str = "display: table-row-group";
 
 const NO_ATTRIBUTES: &[AttributeRule] = &[];
 const STYLE_ONLY: &[AttributeRule] = &[attribute("style", ValueRule::Style)];
@@ -186,7 +199,10 @@ pub const ELEMENTS: &[ElementRule] = &[
     element("blockquote", NO_ATTRIBUTES),
     element("li", NO_ATTRIBUTES),
     element("tr", NO_ATTRIBUTES),
-    element("tbody", STYLE_ONLY),
+    element(
+        "tbody",
+        &[attribute("style", ValueRule::Forced(TBODY_STYLE))],
+    ),
     element("span", STYLE_ONLY),
     element("ul", STYLE_ONLY),
     element(
@@ -221,7 +237,10 @@ pub const ELEMENTS: &[ElementRule] = &[
             attribute("style", ValueRule::Style),
         ],
     ),
-    element("table", STYLE_ONLY),
+    element(
+        "table",
+        &[attribute("style", ValueRule::Forced(TABLE_STYLE))],
+    ),
     element("td", CELL),
     element("th", CELL),
     element(

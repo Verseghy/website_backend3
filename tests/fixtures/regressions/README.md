@@ -26,6 +26,11 @@ write the same bytes and the same report (P5).
 
 ## When an expected output changes
 
-A policy change that alters an output (for example the CSS grammar, which
-keeps `style` values that are dropped today) updates the `.out.html` file in
-the same PR and says why in the PR body.
+A change that alters an output updates the `.out.html` file in the same PR
+and says why in the PR body. The CSS grammar did so when it landed: it
+keeps the `style` values the sanitiser dropped before, and gives every
+`table` and `tbody` its locked style (editor.md §3.3, §7.3), so the
+expected outputs with a table gained those attributes. `canonical-shapes`
+became every editor.md §3.7 shape with its styles: the shapes it held got
+their `style` values back, and the shapes it lacked (the styled `span` and
+`ul`, the blockquote, and the YouTube and Padlet embeds) were added.

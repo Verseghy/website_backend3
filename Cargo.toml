@@ -148,6 +148,12 @@ html5ever = "0.40.1"
 # warns about duplicates. The default features add a command-line binary
 # (`main`) and a parse-error list (`errors`) that backend3 does not use.
 scraper = { version = "0.29", default-features = false }
+# The CSS tokenizer of the sanitiser's style grammar (editor.md §7.3): the
+# cssparser 0.38 line that ammonia 4.2.4 and scraper 0.29 already require
+# ("^0.38.0"), so it adds no crate to the graph. Only its tokenizer, block
+# handling and colour helpers are used; ammonia's own style filter, built on
+# the same crate, is never enabled (ADR 0013 §5).
+cssparser = "0.38"
 # Two-factor sign-in (ADR 0006 §6), used by the pure modules
 # src/domain/totp.rs and src/domain/totp_secret.rs. All are RustCrypto crates
 # (pure Rust, MIT OR Apache-2.0) of one generation, the digest 0.11 and
@@ -349,6 +355,7 @@ percent-encoding = { workspace = true }
 ammonia = { workspace = true }
 html5ever = { workspace = true }
 scraper = { workspace = true }
+cssparser = { workspace = true }
 ts-rs = { workspace = true }
 utoipa = { workspace = true }
 chrono = { workspace = true }
