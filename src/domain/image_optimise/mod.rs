@@ -37,17 +37,34 @@
 //! canvas to hold every frame. Code that walks the frames can still hold each
 //! one to the budget with [`PixelBudget::admits`].
 //!
+//! After the check comes the optimisation itself, one module per format:
+//! [`optimise_jpeg`] strips the metadata of a JPEG and re-encodes it
+//! ([`strip_jpeg`] runs the strip alone, for the corpus tests). The
+//! rules they share are here too: the EXIF block reduced to its Orientation
+//! tag ([`Orientation`]), and the keep-or-discard rule of a lossy re-encode
+//! (ADR 0033 §1), whose size half is [`reencode_is_kept`] and whose
+//! similarity half is [`reencode_meets_ssim_floor`] over the streaming luma
+//! SSIM of [`LumaSsim`], which the lossy WebP re-encode uses too.
+//!
 //! Everything here is pure (ADR 0008): bytes in, a typed result out. The
 //! caller reads the upload, passes the budget from its settings, and maps each
 //! [`ImageError`] to the Hungarian message the editor sees.
 
 mod budget;
+mod exif;
 mod format;
 mod header;
+mod jpeg;
+mod keep;
+mod ssim;
 
 pub use budget::{Dimensions, PixelBudget, PixelBudgetError};
+pub use exif::{ORIENTATION_TIFF_LEN, ORIENTATION_TIFF_MIN_LEN, Orientation};
 pub use format::{ImageFormat, sniff};
 pub use header::HeaderDefect;
+pub use jpeg::{JpegKept, MAX_JPEG_SCANS, NotReencoded, OptimisedJpeg, optimise_jpeg, strip_jpeg};
+pub use keep::{SSIM_FLOOR, reencode_is_kept, reencode_meets_ssim_floor};
+pub use ssim::{LumaSsim, SSIM_WINDOW, SsimError, mean_ssim};
 
 /// What the header of an accepted image says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,6 +111,55 @@ pub enum ImageError {
         /// The budget they exceed.
         budget: PixelBudget,
     },
+    /// A format-specific optimiser got an image of another format.
+    #[error("the file is a {found} image, not a {expected} image")]
+    WrongFormat {
+        /// The format the optimiser handles.
+        expected: ImageFormat,
+        /// The sniffed format.
+        found: ImageFormat,
+    },
+    /// The JPEG has more scans than [`MAX_JPEG_SCANS`], so it is refused
+    /// before any decode (ADR 0033 §4). Nothing says it is corrupt: a
+    /// crafted progressive file can repeat nearly empty scans that each cost
+    /// a pass over the whole image. The editor is asked to save the image
+    /// again, which any editor writes with a handful of scans.
+    #[error("the JPEG image has more than {limit} scans, the most the optimiser decodes")]
+    TooManyScans {
+        /// The cap that was passed: [`MAX_JPEG_SCANS`].
+        limit: usize,
+    },
+    /// The header is accepted, but the image data does not decode as its
+    /// sniffed format, so ADR 0015 §7 refuses it as corrupt.
+    #[error("the {format} image does not decode: {defect}")]
+    Undecodable {
+        /// The sniffed format.
+        format: ImageFormat,
+        /// What is wrong with the data.
+        defect: DecodeDefect,
+    },
+}
+
+/// What is wrong with the data of an image whose header was accepted. The
+/// messages are English, for logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum DecodeDefect {
+    /// The JPEG data ends inside a segment or the scan data, or before its
+    /// end of image marker.
+    #[error("the JPEG data ends before its end of image marker")]
+    JpegCutShort,
+    /// A JPEG marker where libjpeg refuses it: a second start of image or
+    /// frame header, a scan before the frame header, the end of image before
+    /// the first scan, or a code libjpeg does not know.
+    #[error("the JPEG marker 0x{0:02X} is not allowed here")]
+    JpegMarker(u8),
+    /// A JPEG table, frame header or scan header whose length is below 2,
+    /// the size of the length field itself.
+    #[error("a JPEG segment length is below 2")]
+    JpegSegmentLength,
+    /// The JPEG decoder refused the compressed image data.
+    #[error("the JPEG image data is corrupt")]
+    JpegData,
 }
 
 /// Reads the header of an upload and checks it against the pixel budget,

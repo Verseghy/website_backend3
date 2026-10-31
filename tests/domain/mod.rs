@@ -5,3 +5,4 @@
 //! of real files, such as sample images, live here instead.
 
 mod image_optimise;
+mod image_optimise_jpeg;

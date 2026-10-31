@@ -33,6 +33,11 @@ One folder per format, plus `over-budget/`.
 | `jpeg/grayscale.jpg` | One component, so a frame header of 11 bytes |
 | `jpeg/comment.jpg` | A COM segment before the frame header |
 | `jpeg/exif-orientation.jpg` | `baseline.jpg` with an EXIF APP1 segment that holds only Orientation 6 (rotate 90°); the stored dimensions stay 67×41 |
+| `jpeg/camera.jpg` | `progressive.jpg` with the metadata a camera or phone writes, every value invented: an EXIF APP1 segment (Orientation 6, make, model, date, a serial number, a GPS position in open sea, and a thumbnail in IFD1), an XMP APP1 segment, an ICC profile (APP2), an MPF index (APP2), IPTC data (APP13), a comment, and a second image appended after the end of image |
+| `jpeg/cmyk.jpg` | CMYK with an Adobe APP14 segment, which the optimiser decodes but does not re-encode |
+| `jpeg/high-quality.jpg` | Quality 95 with full-resolution chroma (4:4:4), as cameras save their originals: the re-encode at quality 85 is more than 5 % smaller but stays below the SSIM floor, so the stripped original is kept (below) |
+| `jpeg/soft-444.jpg` | The picture with soft edges (a blur of 1.5 pixels), at quality 95 with 4:4:4 chroma: the re-encode reaches the SSIM floor and is kept, with its chroma halved to 4:2:0 |
+| `jpeg/low-quality.jpg` | Quality 60: compressed harder than the re-encode at quality 85 would be, so the optimiser keeps the stripped original |
 | `png/rgb.png` | 8-bit truecolour |
 | `png/rgba-interlaced.png` | 8-bit truecolour with alpha, Adam7 interlaced |
 | `png/palette.png` | 8-bit indexed colour |
@@ -54,6 +59,27 @@ The files in `over-budget/` end exactly where their header ends. The test
 shows that they are refused for the pixel budget, which is just under their
 size, and accepted with a larger budget: the refusal comes from the header
 alone, since there is nothing else to decode.
+
+## The re-encoded JPEGs and the SSIM floor
+
+ADR 0015 §7 asks every re-encoded JPEG of the corpus to reach a luma SSIM
+of at least 0.98, and
+[ADR 0033](../../../docs/design/adr/0033-image-optimisation-ssim-floor-reference-parsing-cpu-limits-a.md)
+§1 makes that floor part of the keep rule: a re-encode below it is
+discarded and the stripped original stored. The corpus covers each side:
+
+- `progressive.jpg` and `camera.jpg` were saved at quality 85 with 4:2:0
+  chroma, much as the re-encode writes them, and reach 0.990, so they are
+  re-encoded. `camera.jpg` is `progressive.jpg` with metadata spliced in,
+  so it adds the metadata cases, not a second picture.
+- `high-quality.jpg` is the usual camera original, quality 95 with 4:4:4
+  chroma. Its re-encode at quality 85 is more than 5 % smaller but reaches
+  only 0.974, as half of the photographs measured in
+  [`docs/design/image-encoders.md`](../../../docs/design/image-encoders.md)
+  do, so it keeps its stripped original.
+- `soft-444.jpg` is the same kind of original with softer edges. Its
+  re-encode reaches 0.994 and is kept, so the chroma test still sees a
+  4:4:4 original whose chroma the re-encode halves to 4:2:0 (ADR 0033 §2).
 
 ## How the files were made
 
@@ -91,6 +117,47 @@ ffmpeg -i gif/animated.gif -map_metadata -1 -fflags +bitexact -flags +bitexact -
 { head -c 20 jpeg/baseline.jpg
   printf '\xff\xe1\x00\x22Exif\x00\x00II\x2a\x00\x08\x00\x00\x00\x01\x00\x12\x01\x03\x00\x01\x00\x00\x00\x06\x00\x00\x00\x00\x00\x00\x00'
   tail -c +21 jpeg/baseline.jpg; } > jpeg/exif-orientation.jpg
+
+draw -strip -colorspace CMYK -quality 90 jpeg/cmyk.jpg
+draw -strip -quality 60 jpeg/low-quality.jpg
+draw -strip -quality 95 -sampling-factor 1x1 jpeg/high-quality.jpg
+draw -blur 0x1.5 -strip -quality 95 -sampling-factor 1x1 jpeg/soft-444.jpg
+
+# jpeg/camera.jpg: progressive.jpg with metadata segments spliced in after its
+# SOI, and the EXIF thumbnail appended after its end of image. segment() writes
+# a marker and a payload file, with the length field that counts itself.
+segment() { len=$(( $(stat -c %s "$2") + 2 )); printf "\xff\x$1\x$(printf %02x $((len >> 8)))\x$(printf %02x $((len & 255)))"; cat "$2"; }
+magick -size 8x5 xc:'#1f6f8b' -strip -quality 50 thumb.jpg     # 287 bytes
+# A 584-byte RGB profile with sRGB primaries and transfer, written by lcms2.
+ffmpeg -f lavfi -i 'color=c=0x1f6f8b:s=67x41,format=rgb24,setparams=color_primaries=bt709:color_trc=iec61966-2-1,iccgen=force=1' \
+  -frames:v 1 -map_metadata -1 -fflags +bitexact -flags +bitexact icc.png
+magick icc.png icc:profile.icc
+# EXIF, big-endian: IFD0 (Make "backend3 test", Model "Corpus", Orientation 6,
+# DateTime, the EXIF and GPS IFD pointers, IFD1 at 258), the EXIF IFD
+# (BodySerialNumber "TEST-0001"), the GPS IFD (1°2'3" N, 4°5'6" E), and IFD1
+# with the thumbnail at offset 288.
+{ printf 'Exif\0\0MM\x00\x2a\x00\x00\x00\x08\x00\x06'
+  printf '\x01\x0f\x00\x02\x00\x00\x00\x0e\x00\x00\x00\x56\x01\x10\x00\x02\x00\x00\x00\x07\x00\x00\x00\x64'
+  printf '\x01\x12\x00\x03\x00\x00\x00\x01\x00\x06\x00\x00\x01\x32\x00\x02\x00\x00\x00\x14\x00\x00\x00\x6c'
+  printf '\x87\x69\x00\x04\x00\x00\x00\x01\x00\x00\x00\x80\x88\x25\x00\x04\x00\x00\x00\x01\x00\x00\x00\x9c'
+  printf '\x00\x00\x01\x02backend3 test\0Corpus\0\0'; printf '2026:10:25 12:00:00\0'
+  printf '\x00\x01\xa4\x31\x00\x02\x00\x00\x00\x0a\x00\x00\x00\x92\x00\x00\x00\x00TEST-0001\0\x00\x04'
+  printf '\x00\x01\x00\x02\x00\x00\x00\x02N\x00\x00\x00\x00\x02\x00\x05\x00\x00\x00\x03\x00\x00\x00\xd2'
+  printf '\x00\x03\x00\x02\x00\x00\x00\x02E\x00\x00\x00\x00\x04\x00\x05\x00\x00\x00\x03\x00\x00\x00\xea\x00\x00\x00\x00'
+  printf '\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00\x03\x00\x00\x00\x01'
+  printf '\x00\x00\x00\x04\x00\x00\x00\x01\x00\x00\x00\x05\x00\x00\x00\x01\x00\x00\x00\x06\x00\x00\x00\x01'
+  printf '\x00\x02\x02\x01\x00\x04\x00\x00\x00\x01\x00\x00\x01\x20\x02\x02\x00\x04\x00\x00\x00\x01\x00\x00\x01\x1f\x00\x00\x00\x00'
+  cat thumb.jpg; } > exif.bin
+{ printf 'http://ns.adobe.com/xap/1.0/\0'
+  printf '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:CreatorTool="backend3 corpus"/></rdf:RDF></x:xmpmeta>'; } > xmp.bin
+{ printf 'ICC_PROFILE\0\x01\x01'; cat profile.icc; } > icc.bin
+printf 'MPF\0MM\x00\x2a\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00' > mpf.bin
+printf 'Photoshop 3.0\0''8BIM\x04\x04\x00\x00\x00\x00\x00\x17\x1c\x02\x00\x00\x02\x00\x04\x1c\x02\x78\x00\x0btest record\x00' > iptc.bin
+printf 'backend3 corpus comment' > com.bin
+{ head -c 2 jpeg/progressive.jpg
+  segment e1 exif.bin; segment e1 xmp.bin; segment e2 icc.bin; segment e2 mpf.bin; segment ed iptc.bin; segment fe com.bin
+  tail -c +3 jpeg/progressive.jpg
+  cat thumb.jpg; } > jpeg/camera.jpg
 
 # over-budget/: a solid colour at 8688x5792, cut after the header. The JPEG
 # header ends with the marker of the first scan (SOS, FF DA), at byte 189,

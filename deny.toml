@@ -124,6 +124,19 @@ exceptions = [
   # which loco-rs 1.2.0 pulls in through its non-optional lettre dependency
   # (ADR 0027 §2).
   { allow = ["0BSD"], crate = "quoted_printable" },
+  # IJG (the Independent JPEG Group's licence of libjpeg): the FSF list names
+  # it ("License of the Independent JPEG Group") among the GPL-compatible
+  # free software licenses. Its conditions are notices: keep the licence
+  # text with the source, mark changed files, and state in the documentation
+  # of a binary that "this software is based in part on the work of the
+  # Independent JPEG Group", which THIRD_PARTY.md does. Allowed, as the
+  # maintainer accepted with the measured encoder on 2026-10-25 (research:
+  # DECISIONS R9, D37; ADR 0015 §7, ADR 0022 §4), for the MozJPEG crates
+  # only, one exception per crate as ADR 0027 §2 requires: mozjpeg (IJG) and
+  # mozjpeg-sys (IJG AND Zlib AND BSD-3-Clause, the libjpeg-turbo code it
+  # builds); docs/design/image-encoders.md records why MozJPEG.
+  { allow = ["IJG"], crate = "mozjpeg" },
+  { allow = ["IJG"], crate = "mozjpeg-sys" },
 ]
 
 [licenses.private]

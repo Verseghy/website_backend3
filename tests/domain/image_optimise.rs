@@ -25,16 +25,21 @@ const CORPUS_DIR: &str = "tests/fixtures/images";
 
 /// Every corpus file: its path below [`CORPUS_DIR`], its format and its
 /// stored width and height. The files under `over-budget/` are headers only.
-const CORPUS: &[(&str, ImageFormat, u32, u32)] = &[
+pub(super) const CORPUS: &[(&str, ImageFormat, u32, u32)] = &[
     ("gif/animated.gif", ImageFormat::Gif, 67, 41),
     ("gif/gif87a.gif", ImageFormat::Gif, 67, 41),
     ("gif/still.gif", ImageFormat::Gif, 67, 41),
     ("jpeg/baseline.jpg", ImageFormat::Jpeg, 67, 41),
+    ("jpeg/camera.jpg", ImageFormat::Jpeg, 67, 41),
+    ("jpeg/cmyk.jpg", ImageFormat::Jpeg, 67, 41),
     ("jpeg/comment.jpg", ImageFormat::Jpeg, 67, 41),
     // Orientation 6 rotates the display only; the stored size stays 67x41.
     ("jpeg/exif-orientation.jpg", ImageFormat::Jpeg, 67, 41),
     ("jpeg/grayscale.jpg", ImageFormat::Jpeg, 67, 41),
+    ("jpeg/high-quality.jpg", ImageFormat::Jpeg, 67, 41),
+    ("jpeg/low-quality.jpg", ImageFormat::Jpeg, 67, 41),
     ("jpeg/progressive.jpg", ImageFormat::Jpeg, 67, 41),
+    ("jpeg/soft-444.jpg", ImageFormat::Jpeg, 67, 41),
     (
         "over-budget/camera-50mp.gif",
         ImageFormat::Gif,
@@ -71,7 +76,7 @@ const CORPUS: &[(&str, ImageFormat, u32, u32)] = &[
 ];
 
 /// The bytes of a corpus file.
-fn corpus_file(path: &str) -> Vec<u8> {
+pub(super) fn corpus_file(path: &str) -> Vec<u8> {
     let full = repository_root().join(CORPUS_DIR).join(path);
     fs::read(&full).unwrap_or_else(|error| panic!("{}: {error}", full.display()))
 }

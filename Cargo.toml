@@ -210,6 +210,17 @@ chrono-tz = "=0.10.4"
 # features are empty in 0.25.1; `default-features = false` keeps them off
 # should a release turn on the protobuf encoders, which would add prost.
 prometheus-client = { version = "0.25.1", default-features = false }
+# JPEG decode check and re-encode of image uploads (ADR 0015 §7): MozJPEG,
+# a fork of libjpeg-turbo, chosen by the measurement in
+# docs/design/image-encoders.md. The crate builds MozJPEG's C code with
+# `cc` (gcc, which the Containerfile's rust stage already installs).
+# Default features are off: they add NASM-assembled SIMD, and UBI 9 has no
+# nasm package, so the image builds the portable C code; `mozjpeg` then
+# turns on only the `unwinding` feature of mozjpeg-sys, which lets libjpeg's
+# errors unwind back into Rust instead of aborting, so no profile may set
+# `panic = "abort"` (src/domain/image_optimise/jpeg/reencode.rs refuses to
+# compile then). The licence is IJG (deny.toml has the scoped exception).
+mozjpeg = { version = "0.10", default-features = false }
 
 # Test-only crates (backend3's [dev-dependencies]).
 proptest = "1"
@@ -303,6 +314,7 @@ hmac = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
+mozjpeg = { workspace = true }
 
 [[bin]]
 name = "backend3-cli"

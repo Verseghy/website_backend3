@@ -1,6 +1,6 @@
 # 0015. Media: separate static server, media library, image optimisation
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0033](0033-image-optimisation-ssim-floor-reference-parsing-cpu-limits-a.md) (2026-10-26)
 - Decision questions: Q17; Q26; Q27 (the image half; the dashboard half is in [ADR 0019](0019-scope-parity-tracking-retired-features-release-1-additions.md)); Q28 (only the archiving and deletion of the 2020-21 backup archives)
 
 ## Context
