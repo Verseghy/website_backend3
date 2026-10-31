@@ -26,6 +26,7 @@
       "Bash(argocd app patch-resource *finalizers*)",
       "Bash(argocd app patch-resource *persistentVolumeReclaimPolicy*Delete*)",
       "Bash(argocd app patch-resource *persistentVolumeReclaimPolicy*Recycle*)",
+      "Bash(argocd app patch *finalizers*)",
       "Bash(argocd *deletion-approved*)",
       "Bash(oc patch *finalizers*)",
       "Bash(oc patch *persistentVolumeReclaimPolicy*Delete*)",
