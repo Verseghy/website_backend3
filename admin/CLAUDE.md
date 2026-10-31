@@ -30,6 +30,24 @@ ADR 0005 (bindings) before changing anything here.
   loads a tracking image from marmelab's server, which the admin CSP forbids).
 - **react-router stays on major 7.** ra-core 5.15.5 accepts `^6.28.1 || ^7.1.1`
   only; npm's `latest` tag is 8.
+- **ra-core's query-string stays on 7.** ra-core 5.15.5 parses list and
+  create URLs with its nested query-string 7.1.3 (CommonJS), which
+  `require()`s decode-uri-component 0.2.2. An npm `overrides` entry (or a
+  Vite alias) for either must resolve to a CommonJS module with the same
+  exports, and `src/ra-core-query-string.test.ts` must stay green. Two
+  targets break ra-core, so never override to them:
+  - query-string 8 and later, which export only a default: ra-core's named
+    imports fail to link, which `npm run build` and every test that imports
+    ra-core report;
+  - decode-uri-component 0.4 and later as published, which are ESM-only:
+    the `require()` gets a namespace object and every non-empty query
+    throws. `npm run build`, the other unit tests and the E2E suite stay
+    green (no screen reads a query yet); only that test fails, in Node and
+    in a production bundle.
+
+  The app's own query-string (10, for the kit's `filter-form.tsx`) is a
+  separate copy. Drop this note, and that test's override reasoning, when a
+  ra-core release leaves query-string 7.
 
 ## Rules for this directory
 
