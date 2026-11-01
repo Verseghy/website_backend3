@@ -216,6 +216,7 @@ Public page list for G9:
 |---|---|---|
 | Home | `/` | newest posts and the featured carousel; paging with "Több betöltése" reaches every published post (the count equals the report's published-post count, back-dated posts included) |
 | Post | `/posts/:id` | title, body, gallery, author link, labels |
+| YouTube embed | `/posts/:id` of an imported post with a YouTube embed | the video plays in a browser, with no error 153. YouTube blocks playback without the HTTP Referer, which the stored `referrerpolicy` sends, so the check plays the embed on the post page; an embed URL opened on its own sends no Referer ([ADR 0043](adr/0043-youtube-embed-input-playlists-ids-minimum-height-and-referer.md), D137) |
 | Archive | `/archive` | months; one month opened lists its posts |
 | Canteen | `/canteen` | this week and next week |
 | Events | `/events` | open a month that holds imported events; start and end times equal the old admin's values |
@@ -327,13 +328,13 @@ Messages to editors are in Hungarian, like the admin UI ([ADR 0021](adr/0021-hun
 
 ## 14. References
 
-- [ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) as amended by [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md), and ADRs 0002, 0006, 0011, 0014, 0015, 0016, 0017, 0019, 0021, 0023, 0024
+- [ADR 0003](adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md) as amended by [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md), and ADRs 0002, 0006, 0011, 0014, 0015, 0016, 0017, 0019, 0021, 0023, 0024; [ADR 0043](adr/0043-youtube-embed-input-playlists-ids-minimum-height-and-referer.md) (the G9 playback check)
 - [data-migration.md](data-migration.md) §3.3, §4.1, §6.11, §13; checks V3 and V10
 - research: SYNTHESIS §1.1, §1.4, §1.5.1, §1.8.4, §1.8.5, §1.10, §1.11, §1.16.7
 - research: SYNTHESIS §4.11.1, §4.11.3, §4.12.3, §4.12.7, §4.12.8
 - research: SYNTHESIS §5.5.3, §5.13, §5.17.1, §5.17.3, §5.17.5; §8 (O13, O15, O16, O18, O25)
 - research: gap-01 §3.2; gap-02 §1.3, §4.2, §4.5; gap-07 §4; frontend-contract §3, §7; side-projects-iam §1.6
-- research: QUESTIONS Q2, Q17, Q25, Q29, Q31, Q32, Q33, Q41, Q42; decisions of 2026-10-24 (2, 17, 20, 25a, 31, 35, 37, 41, R2) and of 2026-10-25 (R6, R7)
+- research: QUESTIONS Q2, Q17, Q25, Q29, Q31, Q32, Q33, Q41, Q42; decisions of 2026-10-24 (2, 17, 20, 25a, 31, 35, 37, 41, R2), of 2026-10-25 (R6, R7) and of 2026-11-01 (R28, item D137)
 - website_frontend@f74c765:apps/frontend/src/environments/environment.prod.ts, apps/frontend/ngsw-config.json
 - website_k8s@34b8b55:verseghy-website/frontend/kustomization.yaml, verseghy-website/backend/serviceaccount.yaml, verseghy-website/image-updater/imageupdater.yaml
 - MySQL 8.4 Reference Manual: [`read_only`](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_read_only), [`super_read_only`](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_super_read_only), [persisted system variables](https://dev.mysql.com/doc/refman/8.4/en/persisted-system-variables.html), [mysqldump `--lock-all-tables`](https://dev.mysql.com/doc/refman/8.4/en/mysqldump.html#option_mysqldump_lock-all-tables)
