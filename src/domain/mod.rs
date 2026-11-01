@@ -41,6 +41,7 @@ pub mod rich_text;
 pub mod route_coverage;
 pub mod runtime_metrics;
 pub mod schema_snapshot;
+pub mod seed;
 pub mod session;
 pub mod session_cookie;
 pub mod session_jwt;

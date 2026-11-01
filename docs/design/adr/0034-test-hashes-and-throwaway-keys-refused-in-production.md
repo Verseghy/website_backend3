@@ -1,6 +1,6 @@
 # 0034. Test hashes and throwaway keys, refused in production
 
-- Status: Accepted (2026-10-25)
+- Status: Amended by [0040](0040-local-seed-account-and-every-db-seed-refused-in-production.md) (2026-11-01)
 - Decision questions: none: records the maintainer's answer of 2026-10-25 to the decision-register item D75 (research: DECISIONS R15), which settles whether public-safety rule 1 allows the test hashes and throwaway keys that the first authentication slices commit. It amends rule 1 of the public-safety rules in [ADR 0024](0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) §1 and in [ADR 0001](0001-record-architecture-decisions.md) §8.
 
 ## Context

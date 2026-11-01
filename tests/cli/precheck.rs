@@ -1,8 +1,9 @@
 //! With `LOCO_ENV=production`, `backend3-cli db reset` (and `db truncate`,
 //! `db seed --reset`) exits with an error before it connects
-//! (ADR 0024 §4, "What must be true in code and tests"), and so does
+//! (ADR 0024 §4, "What must be true in code and tests"), and so do
 //! `doctor --config`, which would print every secret of the configuration
-//! (ADR 0039).
+//! (ADR 0039), and every other `db seed`: production never holds the seed
+//! account (ADR 0040 §3, `src/domain/cli_guard.rs`).
 
 use std::time::Duration;
 
@@ -60,6 +61,41 @@ fn destructive_db_commands_are_refused_in_production_before_connecting() {
         );
         assert!(
             run.stderr.contains("from LOCO_ENV"),
+            "{args:?}: {}",
+            run.stderr
+        );
+        assert!(!probe.was_connected(), "{args:?} connected to the database");
+    }
+}
+
+/// `db seed` in every form: plain, with `--from`, and the `--dump` forms
+/// that share its subcommand. Each stops before it connects, so no seed
+/// account can reach a production database.
+#[test]
+fn every_db_seed_is_refused_in_production_before_connecting() {
+    for args in [
+        &["db", "seed"][..],
+        &["db", "seed", "--from", "src/fixtures"][..],
+        &["db", "seed", "--dump"][..],
+        &["db", "seed", "--dump-tables", "users"][..],
+    ] {
+        let probe = ConnectionProbe::bind("127.0.0.1");
+        let url = format!(
+            "postgres://loco:loco@127.0.0.1:{}/backend3_test",
+            probe.port()
+        );
+        let env = production_env(&url);
+
+        let run = run_cli(&as_refs(&env), args, TIMEOUT);
+
+        assert_eq!(run.status.code(), Some(2), "{args:?}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("Refusing to run `db seed`:"),
+            "{args:?}: {}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("never seeds production"),
             "{args:?}: {}",
             run.stderr
         );

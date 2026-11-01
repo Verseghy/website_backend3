@@ -1,4 +1,5 @@
-//! The CLI pre-check: the second code-level guard of ADR 0024 §4, layer 3.
+//! The CLI pre-check: the second code-level guard of ADR 0024 §4, layer 3,
+//! as amended by ADR 0039 (`doctor --config`) and ADR 0040 (every `db seed`).
 //!
 //! `Hooks::load_config` cannot see which subcommand runs, so the
 //! database-target guard cannot stop `db reset` in production. This check can:
@@ -13,6 +14,24 @@
 //! - `db reset` (drops every table, then migrates up);
 //! - `db truncate` (deletes the rows of every table);
 //! - `db seed --reset` / `db seed -r` (a reset before seeding);
+//!
+//! every other `db seed`, with or without `--from`, `--dump` or
+//! `--dump-tables`:
+//!
+//! - `db seed` runs `Hooks::seed`, which creates the invented development
+//!   and E2E account of [`crate::domain::seed`], whose password is published
+//!   in this repository. Production holds no account before the cut-over
+//!   import, which refuses to run into a `users` table that holds a row
+//!   (data-migration.md §4.2), and its first accounts come only from that
+//!   import (ADR 0006 §4). The maintainer accepted this refusal as one guard
+//!   of that pre-import invariant on 2026-10-25 (ADR 0040, which amends
+//!   ADR 0024 §4; research: DECISIONS R9 (D10)). `Hooks::seed` itself
+//!   refuses every environment but development, test and e2e, so a seed that
+//!   gets past this check still stops there.
+//! - `db seed --dump` and `--dump-tables` share the subcommand and its
+//!   option grammar. They write every table, password hashes included, to
+//!   files in the container; a backup is the operator runbook's procedure,
+//!   never a file in a pod;
 //!
 //! and the one that prints every secret (ADR 0039, amending ADR 0024 §4
 //! layer 3; D92, research: DECISIONS R15):
@@ -41,8 +60,8 @@
 /// The environment in which the pre-check refuses its commands.
 pub const PRODUCTION: &str = "production";
 
-/// A subcommand that production refuses: one that wipes data, or the one
-/// that prints every secret.
+/// A subcommand that production refuses: one that wipes data, a seed, or
+/// the one that prints every secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusedCommand {
     /// `db reset`.
@@ -51,6 +70,9 @@ pub enum RefusedCommand {
     DbTruncate,
     /// `db seed --reset` or `db seed -r`.
     DbSeedReset,
+    /// Any other `db seed`: plain, with `--from`, `--dump` or
+    /// `--dump-tables`.
+    DbSeed,
     /// `doctor --config` or `doctor -c`.
     DoctorConfig,
 }
@@ -63,6 +85,7 @@ impl RefusedCommand {
             Self::DbReset => "db reset",
             Self::DbTruncate => "db truncate",
             Self::DbSeedReset => "db seed --reset",
+            Self::DbSeed => "db seed",
             Self::DoctorConfig => "doctor --config",
         }
     }
@@ -112,6 +135,16 @@ impl core::fmt::Display for Refusal {
                      runbook."
                 )
             }
+            RefusedCommand::DbSeed => write!(
+                formatter,
+                "Refusing to run `{command}`: the environment is production ({source}), and \
+                 backend3 never seeds production. Production holds no account before the cut-over \
+                 import, which refuses to run once `users` holds a row, and its first accounts come \
+                 only from that import; the seed would create the development and E2E account, \
+                 whose password is published (ADR 0040, data-migration.md §4.2). `db seed --dump` \
+                 would write every table, password hashes included, to files; to back up data, \
+                 follow the backup procedure in the operator runbook."
+            ),
             // The message names what the command would print, never a value:
             // nothing has been loaded yet.
             RefusedCommand::DoctorConfig => write!(
@@ -234,9 +267,11 @@ fn parse(args: &[String]) -> Parsed {
 /// # Errors
 ///
 /// Returns a [`Refusal`] when the environment resolves to `production` and
-/// the arguments name `db reset`, `db truncate`, `db seed` with `--reset`,
-/// or `doctor` with `--config`. For `doctor`, `--production` also makes the
-/// environment `production`, as it does in Loco.
+/// the arguments name `db reset`, `db truncate`, `db seed` in any form
+/// (`--reset` and `-r` give [`RefusedCommand::DbSeedReset`], every other form
+/// [`RefusedCommand::DbSeed`]), or `doctor` with `--config`. For `doctor`,
+/// `--production` also makes the environment `production`, as it does in
+/// Loco.
 pub fn check(args: &[String], ambient_environment: &str) -> Result<(), Refusal> {
     let parsed = parse(args);
 
@@ -250,6 +285,7 @@ pub fn check(args: &[String], ambient_environment: &str) -> Result<(), Refusal> 
         ["db", "reset", ..] => RefusedCommand::DbReset,
         ["db", "truncate", ..] => RefusedCommand::DbTruncate,
         ["db", "seed", ..] if parsed.seed_reset => RefusedCommand::DbSeedReset,
+        ["db", "seed", ..] => RefusedCommand::DbSeed,
         ["doctor", ..] if parsed.doctor_config => RefusedCommand::DoctorConfig,
         _ => return Ok(()),
     };
@@ -293,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_the_three_commands_in_ambient_production() {
+    fn refuses_the_three_wiping_commands_in_ambient_production() {
         assert_eq!(
             refused("db reset", "production"),
             Some(RefusedCommand::DbReset)
@@ -330,11 +366,8 @@ mod tests {
             "db down",
             "db down 2",
             "db status",
-            "db seed",
-            "db seed --dump",
-            "db seed --from -r",
-            "db seed --from=-r",
-            "db seed --dump-tables r",
+            "seed",
+            "task seed",
             "task reset",
             "jobs tidy",
             "routes",
@@ -355,6 +388,32 @@ mod tests {
             "config doctor",
         ] {
             assert_eq!(check(&args(line), "production"), Ok(()), "{line}");
+        }
+    }
+
+    /// Every form of `db seed` that does not reset: the seed would create the
+    /// published development and E2E account, and `--dump` writes every table
+    /// to files (ADR 0040 §3). An `-r` that is the value of
+    /// `--from` or `--dump-tables` is no reset, so those stay `DbSeed`.
+    #[test]
+    fn refuses_every_other_db_seed_in_ambient_production() {
+        for line in [
+            "db seed",
+            "db seed --from src/fixtures",
+            "db seed --from=src/fixtures",
+            "db seed --dump",
+            "db seed -d",
+            "db seed --dump-tables users",
+            "db seed --dump-tables=users,activity_log",
+            "db seed --from -r",
+            "db seed --from=-r",
+            "db seed --dump-tables r",
+        ] {
+            assert_eq!(
+                refused(line, "production"),
+                Some(RefusedCommand::DbSeed),
+                "{line}"
+            );
         }
     }
 
@@ -474,7 +533,13 @@ mod tests {
     #[test]
     fn allows_the_commands_outside_production() {
         for ambient in ["development", "test", "e2e", "staging", "Production", ""] {
-            for line in ["db reset", "db truncate", "db seed --reset"] {
+            for line in [
+                "db reset",
+                "db truncate",
+                "db seed --reset",
+                "db seed",
+                "db seed --dump",
+            ] {
                 assert_eq!(check(&args(line), ambient), Ok(()), "{ambient}: {line}");
             }
         }
@@ -561,6 +626,18 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("from --environment"), "{message}");
+        let message = check(&args("db seed"), "production")
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            message.starts_with("Refusing to run `db seed`:"),
+            "{message}"
+        );
+        assert!(message.contains("never seeds production"), "{message}");
+        assert!(message.contains("cut-over import"), "{message}");
+        assert!(message.contains("ADR 0040"), "{message}");
+        assert!(message.contains("backup procedure"), "{message}");
+        assert!(!message.contains("deletes data"), "{message}");
     }
 
     #[test]
@@ -568,6 +645,7 @@ mod tests {
         assert_eq!(RefusedCommand::DbReset.as_str(), "db reset");
         assert_eq!(RefusedCommand::DbTruncate.as_str(), "db truncate");
         assert_eq!(RefusedCommand::DbSeedReset.as_str(), "db seed --reset");
+        assert_eq!(RefusedCommand::DbSeed.as_str(), "db seed");
         assert_eq!(RefusedCommand::DoctorConfig.as_str(), "doctor --config");
     }
 
@@ -587,6 +665,22 @@ mod tests {
     /// `doctor --config` in one of its spellings, each without `-p`.
     fn doctor_config() -> impl Strategy<Value = Vec<&'static str>> {
         prop_oneof![Just(vec!["doctor", "--config"]), Just(vec!["doctor", "-c"]),]
+    }
+
+    /// Options and values of `db seed`, in the loco-rs 1.2.0 grammar.
+    fn seed_argument() -> impl Strategy<Value = &'static str> {
+        proptest::sample::select(vec![
+            "--dump",
+            "-d",
+            "--from",
+            "--from=src/fixtures",
+            "src/fixtures",
+            "--dump-tables",
+            "users",
+            "-r",
+            "--reset",
+            "-dr",
+        ])
     }
 
     fn environment_option() -> impl Strategy<Value = Vec<String>> {
@@ -646,12 +740,32 @@ mod tests {
             prop_assert_eq!(check(&args, PRODUCTION), Ok(()));
         }
 
+        /// Whatever options follow, `db seed` never runs in production; it
+        /// is `DbSeed` unless a reset flag is among them.
+        #[test]
+        fn every_db_seed_is_refused_in_production(
+            options in proptest::collection::vec(seed_argument(), 0..6),
+        ) {
+            let mut args = vec!["db".to_owned(), "seed".to_owned()];
+            args.extend(options.iter().map(|option| (*option).to_owned()));
+            let command = check(&args, PRODUCTION).err().map(|refusal| refusal.command);
+            prop_assert!(
+                matches!(command, Some(RefusedCommand::DbSeed | RefusedCommand::DbSeedReset)),
+                "{args:?}: {command:?}"
+            );
+            if !options.iter().any(|option| matches!(*option, "-r" | "--reset" | "-dr")) {
+                prop_assert_eq!(command, Some(RefusedCommand::DbSeed), "{:?}", args);
+            }
+        }
+
         #[test]
         fn the_environment_option_is_found_anywhere(
             command in prop_oneof![
                 Just(vec!["db", "reset"]),
                 Just(vec!["db", "truncate"]),
                 Just(vec!["db", "seed", "--reset"]),
+                Just(vec!["db", "seed"]),
+                Just(vec!["db", "seed", "--dump"]),
                 doctor_config(),
             ],
             option in environment_option(),

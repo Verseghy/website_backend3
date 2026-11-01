@@ -24,9 +24,13 @@ import { Loading } from "@/components/admin/loading";
  * backend3 change: the page content sits in its own `<main>`, and an optional
  * `footer` renders after it, outside `<main>`, so a `<footer>` there is the
  * page's contentinfo landmark (HTML-AAM maps a footer inside `<main>` to a
- * generic element). See LOCAL_CHANGES.md.
+ * generic element). An optional `userMenu` replaces the kit's `<UserMenu />`
+ * in the header; `null` renders none. See LOCAL_CHANGES.md.
  */
-export const Layout = (props: CoreLayoutProps & { footer?: ReactNode }) => {
+export const Layout = (
+  props: CoreLayoutProps & { footer?: ReactNode; userMenu?: ReactNode },
+) => {
+  const { userMenu = <UserMenu /> } = props;
   const [errorInfo, setErrorInfo] = useState<ErrorInfo | undefined>(undefined);
   const handleError = (_: unknown, info: ErrorInfo) => {
     setErrorInfo(info);
@@ -51,7 +55,7 @@ export const Layout = (props: CoreLayoutProps & { footer?: ReactNode }) => {
           <LocalesMenuButton />
           <ThemeModeToggle />
           <RefreshButton />
-          <UserMenu />
+          {userMenu}
         </header>
         <main className="flex flex-1 flex-col">
           <ErrorBoundary

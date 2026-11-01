@@ -17,6 +17,7 @@
  */
 import type { DataProvider } from "ra-core"
 
+import { basePathProblem } from "@/api/base-path"
 import type { MessageKey } from "@/i18n/keys"
 
 /** The ra-core data provider methods backend3 implements, in ra-core's order. */
@@ -114,13 +115,6 @@ export class DataProviderConfigError extends Error {
 const KNOWN_METHODS: ReadonlySet<string> = new Set(DATA_PROVIDER_METHODS)
 
 /**
- * A same-origin API base path: `/` and an unreserved segment, repeated, with no
- * empty, `.` or `..` segment. A browser resolves it against the admin's own
- * origin, never against another host.
- */
-const SAME_ORIGIN_BASE_PATH = /^(?:\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9._~-]+)+$/
-
-/**
  * Checks the provider options and throws an actionable error for the first
  * problem it finds.
  *
@@ -130,15 +124,10 @@ const SAME_ORIGIN_BASE_PATH = /^(?:\/(?!\.{1,2}(?:\/|$))[A-Za-z0-9._~-]+)+$/
  */
 function validateOptions(options: DataProviderOptions): void {
   const { apiBaseUrl, resources } = options
-  if (
-    typeof apiBaseUrl !== "string" ||
-    !SAME_ORIGIN_BASE_PATH.test(apiBaseUrl)
-  ) {
-    throw new DataProviderConfigError(
-      `apiBaseUrl must be a root-relative path such as "/api/admin" (leading "/", no trailing "/", ` +
-        `no scheme or host, only letters, digits and "-._~" in "/"-separated segments, so requests ` +
-        `stay same-origin), but it is ${JSON.stringify(apiBaseUrl)}.`
-    )
+  // The same rule as the auth provider's (src/api/base-path.ts).
+  const problem = basePathProblem("apiBaseUrl", apiBaseUrl)
+  if (problem !== undefined) {
+    throw new DataProviderConfigError(problem)
   }
   for (const [resource, handlers] of Object.entries(resources)) {
     if (resource.trim() === "") {

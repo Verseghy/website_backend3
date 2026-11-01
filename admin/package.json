@@ -13,6 +13,7 @@
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
     "licenses": "node scripts/check-licenses.mjs",
+    "clean-room": "node scripts/check-clean-room.mjs",
     "e2e": "playwright test",
     "format": "prettier --write \"**/*.{ts,tsx,mjs,js}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,mjs,js}\""

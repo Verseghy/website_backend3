@@ -47,8 +47,10 @@
 #
 # Safety (ADR 0024 §4, layer 3): `App::load_config` refuses
 # dangerously_truncate, dangerously_recreate and queue.dangerously_flush here,
-# and backend3-cli refuses `db reset`, `db truncate`, `db seed --reset` and
-# `doctor --config` (ADR 0039).
+# and backend3-cli refuses `db reset`, `db truncate`, every `db seed`
+# (`--reset`, `--from`, `--dump` and `--dump-tables` included) and
+# `doctor --config`, before it loads this file or connects (ADR 0039,
+# ADR 0040 §3, src/domain/cli_guard.rs).
 
 logger:
   enable: true

@@ -24,6 +24,7 @@ mod models;
 mod requests;
 mod rich_text;
 mod schema;
+mod seed;
 mod support;
 mod tasks;
 mod tz_parity;
