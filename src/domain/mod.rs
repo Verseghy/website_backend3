@@ -20,6 +20,7 @@
 //!
 //! `tests/architecture.rs` enforces the mechanical part of these rules.
 
+pub mod activity;
 pub mod admin_path;
 pub mod api_path;
 pub mod budapest;

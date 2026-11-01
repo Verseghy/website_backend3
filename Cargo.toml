@@ -365,7 +365,15 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
-sea-orm = { workspace = true }
+# `with-ipnetwork` maps PostgreSQL's `inet` to `ipnetwork::IpNetwork`, which
+# Sea-ORM re-exports in its prelude: `activity_log.ip` (ADR 0011 §5) is an
+# `inet` column, and without the feature its entity cannot be generated or
+# built. Only this crate reads or writes the column, so the feature is set
+# here and not on the workspace entry. It adds one crate, `ipnetwork` 0.21
+# (MIT OR Apache-2.0, depends only on serde), which sqlx and sea-query also
+# switch on through their own `ipnetwork` features; `cargo deny check bans
+# licenses sources` accepts it.
+sea-orm = { workspace = true, features = ["with-ipnetwork"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }

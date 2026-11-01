@@ -27,6 +27,7 @@ The test for where logic goes: if it needs the database or another external syst
 
 - Controllers, workers and tasks read the instant with `crate::app::clock(&ctx)?.now()` and pass it down; `src/domain/` takes it as an argument (rule 1 above, [ADR 0010](docs/design/adr/0010-all-instants-stored-as-timestamptz.md) point 7). Nothing else in `src/` reads the system time or uses chrono's `Local`, and only `src/app.rs` calls `set_clock`; `tests/architecture.rs` enforces it.
 - Time-dependent tests start at a chosen instant with `tests/support::with_app_at` or `with_server_at`. They read the wall clock only where recipe 7 of the project skill says so, because Loco's JWT reads the system time; the recipe also says how to change the `before_save` that `cargo loco db entities` generates.
+- Stored audit instants come from PostgreSQL's clock, not the app clock: `created_at`, `updated_at`, `deleted_at` and the instants of revisions and activity entries are set by their `CURRENT_TIMESTAMP` defaults and by `Expr::current_timestamp()` in an UPDATE (research: DECISIONS R15, D90; recipe 7 step 6). The one exception is the legacy `created_at` and `updated_at` that the importer keeps and writes explicitly ([ADR 0011](docs/design/adr/0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md) §2). The app clock decides the rules that compare with "now".
 
 ## Calendar days and event wall times
 

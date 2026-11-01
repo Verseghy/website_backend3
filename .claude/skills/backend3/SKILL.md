@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, or code that needs the current time. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, or an activity-log entry. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its seven repeated tasks. They sit on
+These recipes are backend3's way of doing its eight repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -188,15 +188,20 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
    deleted (like site settings). Index the foreign keys. Declare them
    `ON DELETE RESTRICT`, as `users`' own are, not Loco's default `SET NULL`
    for a nullable reference: accounts are anonymised, never deleted, and
-   keep every reference (ADR 0011 §6, ADR 0006 §7).
+   keep every reference (ADR 0011 §6, ADR 0006 §7). The instants come from
+   PostgreSQL's clock (recipe 7 step 6): `created_at` and `updated_at` keep
+   their `CURRENT_TIMESTAMP` defaults.
 2. **Uniqueness over live rows** uses partial unique indexes
    `... WHERE deleted_at IS NULL` (ADR 0011 section 3, ADR 0009 constraints).
    Decide for each rule whether trashed rows count, as the ADRs say.
 3. **Model methods** in `src/models/<name>.rs` (ADR 0011 section 7): create,
    update, delete, restore and purge take the transaction and the actor (a
    user id or `System`) as arguments. Create and update write the row, one
-   revision and one activity entry in the same transaction; delete and
-   restore write only the activity entry. A relation change (labels on a post)
+   revision and one activity entry (recipe 8) in the same transaction;
+   delete and restore write only the activity entry. An update or restore
+   sets `updated_at` (and delete `deleted_at`) to
+   `Expr::current_timestamp()`, never to an app-clock instant (recipe 7
+   step 6). A relation change (labels on a post)
    updates the parent's audit columns and writes a parent revision.
 4. **The live-row helper**: one finder that adds `deleted_at IS NULL`, used by
    every public query on every table it touches (ADR 0011 section 3). Every
@@ -504,9 +509,11 @@ apart (ADR 0016 §4).
 
 ## 7. Use the current time
 
-"Now" has one source, the app clock in the `AppContext` (ADR 0010 point 7),
-so every time-dependent rule can be tested at a chosen instant (public-api.md
-section 16.2). `App::after_context` registers the system clock; the
+The rules that compare with "now" read one source, the app clock in the
+`AppContext` (ADR 0010 point 7), so every time-dependent rule can be tested
+at a chosen instant (public-api.md section 16.2). The instants that rows
+store, the audit columns and the instants of revisions and activity
+entries, come from PostgreSQL's clock instead (step 6). `App::after_context` registers the system clock; the
 interface is `Clock` in `src/domain/clock.rs`.
 
 1. **Read it once, at the edge.** A controller, worker or task takes
@@ -551,6 +558,100 @@ interface is `Clock` in `src/domain/clock.rs`.
    (loco-rs 1.2.0 `src/db/entities.rs`). The check rejects that line, and
    ADR 0011 section 2 keeps some updates from changing `updated_at`, so
    delete the fallback and let `before_save` return `Ok(self)`: the write
-   path sets the audit columns (ADR 0011 sections 2 and 7). The `Local::now()`
-   examples of the vendored Loco skill (`doctrine.md`,
-   `recipes/model-and-migration.md`) do not apply here.
+   path sets the audit columns (ADR 0011 sections 2 and 7), from
+   PostgreSQL's clock (step 6). The `Local::now()` examples of the vendored
+   Loco skill (`doctrine.md`, `recipes/model-and-migration.md`) do not apply
+   here.
+6. **Stored instants come from PostgreSQL's clock.** The audit columns
+   (`created_at`, `updated_at`, `deleted_at`) and the instants of revisions
+   and activity entries are set by the database, never from the app clock:
+   the `CURRENT_TIMESTAMP` column defaults on insert, and
+   `Expr::current_timestamp()` in an UPDATE (research: DECISIONS R15, D90).
+   Both give the start of the transaction, so every row that one save
+   writes carries the same instant, and model write methods take no "now"
+   for them (ADR 0011 section 7's `update(txn, actor, changes)`). The app
+   clock still decides the rules that compare with "now" (today's date,
+   expiry, throttle windows). A test of a stored instant compares it with
+   PostgreSQL's own `now()` in the same transaction, or with two
+   `clock_timestamp()` readings around the call, never with the
+   `TestClock`. That reads the database's clock, not the test process's, so
+   step 4's list of wall-clock reads stays complete. The one exception is the
+   importer, which keeps the legacy `created_at` and `updated_at` of imported
+   rows and writes them explicitly (ADR 0011 section 2, recipe 4).
+
+---
+
+## 8. Record an activity entry
+
+Every data change, sign-in or account event and media operation writes one
+entry to the append-only `activity_log` (ADR 0011 section 5). The pure parts
+are in `src/domain/activity.rs` (`Actor`, `Action`, `check_entry`,
+`changed_field_names`); the model is `src/models/activity_log.rs`.
+
+1. **Build the entry** from `Entry::new(Action::...)` with struct-update
+   syntax, setting only what the action has (the example on
+   `models::activity_log::Entry`):
+   - `entity`: `EntityRef::record("<table>", id)`, or
+     `EntityRef::table("<table>")` for an entry about a whole table (the
+     importer writes one `import` entry per table per run, with counts);
+   - `revision_id`: the revision the action wrote, if any; it needs a
+     record;
+   - `label`: the display label of a content record (its title or name), so
+     the log stays readable after a purge. Only with an `entity`, and never
+     on a sign-in or account entry or for `users`, `authors` or
+     `colleagues`, which are people: their entries keep only the id. A media
+     operation has no label: its paths go in `details`, and the trash reads
+     a deleted file's former path from there. The table's CHECKs refuse
+     the same (ADR 0011 section 5), because a label can never be removed;
+   - `details`: a JSON object, never the changed values. For an update,
+     `changed_fields_details(&changed_field_names(&before, &after))` over
+     the revision snapshots before and after (`{"changed_fields": [...]}`);
+     for a media operation, the old and new path and the size; for a batch,
+     the counts;
+   - `request_id`: the controller takes it from Loco's `LocoRequestId`
+     request extension, so the entries of one request group together;
+     `None` in tasks, jobs and the importer. Loco keeps an incoming
+     `x-request-id` header as that id (loco-rs 1.2.0
+     `src/controller/middleware/request_id.rs`: characters outside letters,
+     digits, `_`, `-` and `@` removed, at most 255 kept), so the text is the
+     caller's own and stays in the log for good. An entry written for a
+     caller who has not signed in (a failed sign-in) must decide whether to
+     record that text: the slice that adds the first such entry settles it
+     and updates this step;
+   - `ip`: only for sign-in and account events, the address that Loco's
+     `remote_ip` middleware resolved.
+2. **Record it on the change's transaction**:
+   `activity_log::record(&txn, actor, entry)`, with the actor passed down
+   from the controller (`Actor::User(session.user.id)`, the account of the
+   handler's `AdminSession`, recipe 1 step 7), or `Actor::System` in tasks
+   and queue jobs and `Actor::Import` in the importer (ADR 0011 section 2). A
+   failed insert then rolls the change back, and a rolled-back change leaves
+   no entry. Only an entry that records no data change (a failed sign-in)
+   goes on a connection of its own, so it survives the request's rollback.
+   `record` refuses an entry that breaks a rule of `check_entry` before it
+   writes anything. Leave `occurred_at` alone: it comes from PostgreSQL's
+   clock (recipe 7 step 6).
+3. **Never update or delete an entry.** The table's triggers refuse every
+   `DELETE` and `TRUNCATE` (so `App::truncate` never covers the table), and
+   every `UPDATE` but one: inside a transaction that called
+   `activity_log::with_permanent_delete_flag(&txn)`, an UPDATE that only
+   sets `ip` to NULL. Only the anonymisation of a user issues it, for that
+   user's own sign-in and account entries (ADR 0011 section 6). The
+   `revisions` triggers will read the same flag for a permanent delete. Set
+   the flag on the outermost transaction of the permanent delete, never on a
+   nested one: a nested transaction is a savepoint, and committing it keeps
+   a `SET LOCAL` until the outer transaction ends (only rolling it back
+   undoes the flag), so the work after it would run with the flag too.
+4. **A new action** needs an ADR that adds it to ADR 0011 section 5 first.
+   Then, in one PR: a row in the `actions!` table of `src/domain/activity.rs`
+   (in its group; `Action::ALL` follows), a migration that drops and re-adds
+   the `activity_log_action_known` CHECK with the whole list (ADR 0009's
+   rule for string codes), and the schema snapshot. A new account action
+   also drops and re-adds `activity_log_ip_account_only` and
+   `activity_log_label_content_only` with the whole list of account
+   actions. `tests/models/activity_log.rs` fails while the CHECKs and
+   `Action::ALL` differ.
+5. **Tests**: model tests assert the entries each operation writes (action,
+   actor, entity, label, the changed field names) and that a failed entry
+   rolls the change back. Compare `occurred_at` with the database's clock,
+   as recipe 7 step 6 says.

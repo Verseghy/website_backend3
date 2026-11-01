@@ -18,6 +18,7 @@ pub use sea_orm_migration::prelude::*;
 
 mod m20261024_000001_search_support;
 mod m20261025_044606_users;
+mod m20261031_223930_activity_log;
 // Generated `mod` lines go above the first line naming `pub struct Migrator`,
 // which is this one, so the doc comment below stays attached to the struct
 // (the `missing_docs` lint requires that).
@@ -32,6 +33,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20261024_000001_search_support::Migration),
             Box::new(m20261025_044606_users::Migration),
+            Box::new(m20261031_223930_activity_log::Migration),
             // inject-above (do not remove this comment)
         ]
     }
