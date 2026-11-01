@@ -521,6 +521,9 @@ impl Hooks for App {
 
     #[allow(unused_variables)]
     fn register_tasks(tasks: &mut Tasks) {
+        // The legacy import exists only with its Cargo feature (data-migration.md §3.3).
+        #[cfg(feature = "import-mysql")]
+        tasks.register(tasks::import_mysql::ImportMysql);
         // tasks-inject (do not remove)
     }
 

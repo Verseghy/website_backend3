@@ -117,15 +117,15 @@ cargo loco task import_mysql \
 | Argument | Required | Meaning |
 |---|---|---|
 | `mode` | no, default `dry-run` | `dry-run` computes, writes and verifies everything, then rolls back and writes no files to `storage_root`. `apply` commits. |
-| `snapshot_at` | yes | The moment the source was frozen or dumped (RFC 3339, UTC). It is the `created_at` and `updated_at` of rows whose legacy table has no timestamps. It must not be earlier than any timestamp in the source. |
-| `resolutions` | yes | Path of the editor-signed resolution file (§8). |
-| `storage_root` | yes | The directory that is served as `/storage` (the uploads volume's public root). Read for file checks, written only in `apply` mode for the inline images of §7. |
-| `report` | yes | An empty directory for the run report (§11.3). |
+| `snapshot_at` | yes | The moment the source was frozen or dumped (RFC 3339, UTC: `Z` or `+00:00`; another offset is refused, and the message gives the same instant in UTC). It is the `created_at` and `updated_at` of rows whose legacy table has no timestamps. It must not be earlier than any timestamp in the source, nor later than the start of the run. |
+| `resolutions` | no, default `/app/data/import/resolutions.toml` | Path of the editor-signed resolution file (§8). The default is where the image keeps the repository's `data/import/resolutions.toml` (research: DECISIONS R9, D12). It must be a file the task can open. |
+| `storage_root` | yes | The directory that is served as `/storage` (the uploads volume's public root). Read for file checks, written only in `apply` mode for the inline images of §7. It must be a directory the task can list. |
+| `report` | yes | An existing, empty directory for the run report (§11.3), outside `storage_root`: the media server publishes everything under `storage_root`, and the report stays private. The check compares canonical paths, so a symbolic link cannot hide it there. |
 | `canteen_audit_local_before` | no, default `2022-01-21T00:00:00Z` | Which `canteen_data` audit values are Budapest wall time (§5.2, ADR 0010 open item): values before this instant are, values at or after it are UTC. An RFC 3339 instant, or `all`. The default is the end of the backend2 fix window; backend2's fix 03 shifted only the rows that existed then (322 rows; research: SYNTHESIS §4.4.2). |
 
-Loco 1.2.0 splits each task argument at its first `:` (loco-rs@1.2.0:`src/cli.rs`, `parse_key_val`), so values such as RFC 3339 instants may contain colons.
+Loco 1.2.0 splits each task argument at its first `:` (loco-rs@1.2.0:`src/cli.rs`, `parse_key_val`), so values such as RFC 3339 instants may contain colons. Loco ignores the arguments a task does not read and keeps the last of two with the same key, so the task refuses every key that is not in the table above, naming it: a misspelt optional argument cannot fall back to its default. Every refusal names the argument and says what to write instead. The task checks the arguments, then the source setting, then the paths, all before it takes the task lock (ADR 0016 §4); a run that finds the lock held exits 0 and writes nothing.
 
-The source connection string comes from the environment variable `IMPORT_SOURCE_DATABASE_URL` (at the cut-over, a key of the shared `backend-secrets` ExternalSecret, §3.3), read by the task and passed on as an argument. It is never a command-line argument, so it never lands in shell history or a process list. The target is backend3's own configured database.
+The source connection string comes from the environment variable `IMPORT_SOURCE_DATABASE_URL` (at the cut-over, a key of the shared `backend-secrets` ExternalSecret, §3.3), which `config/production.yaml` reads into the setting `settings.import.source_database_url`, with the empty string as its default. Only the task reads the setting; it builds the source connection and passes it, with the target and the `ImportOptions`, to the import as arguments. It is never a command-line argument, so it never lands in shell history or a process list. The empty string and the placeholder `disabled`, which the secret holds outside the cut-over window, both mean unset: the task then refuses to start, naming the setting. A value that is not a `mysql://` URL the MySQL driver accepts is refused the same way. The URL holds the source password, so no message, log line or report shows any part of it. The source connection is opened on first use, by the one session that reads the source. The target is backend3's own configured database.
 
 ### 4.2 Refusal rules
 
@@ -514,14 +514,14 @@ Fixes that need no sign-off, because they change nothing an editor or reader can
 
 ### 8.2 The resolution file
 
-The resolutions live in a versioned file in the repository (proposed path `data/import/resolutions.toml`; settled in the import PR). It holds only ids, dates, enum choices and source values: no names of people. Who signed and when is recorded in the private runbook.
+The resolutions live in a versioned file in the repository, `data/import/resolutions.toml`, which the image ships as `/app/data/import/resolutions.toml`, the default of the `resolutions` argument (research: DECISIONS R9, D12). It holds only ids, dates, enum choices and source values: no names of people. Who signed and when is recorded in the private runbook.
 
 Every entry carries a **precondition**: the source value the editors saw when they signed. If the source row has changed since then, for example because someone corrected a date in the old admin, the importer stops and names the entry. The entry is then re-signed. This keeps the list honest without freezing the old admin for weeks.
 
 **Sign-off procedure.** Staging is LAN-only and used only by developers (decision 42), and run reports stay private (§11.3), so editors never see a report. The maintainer exports a sign-off sheet from a staging dry-run report. It holds only defect ids, row ids, the public URLs of the affected posts, and both menus of each D6 date. The maintainer hands it to the editors outside staging, as the private runbook describes, and records there who signed and when. The PR that changes `resolutions.toml` cites the runbook entry by date only.
 
 ```toml
-# Shape sketch. The import PR defines the schema and its validation.
+# Shape sketch. The PR that adds the schema defines it and its validation.
 version = 1
 signed_against = "2026-10-23T17:01:02Z"   # snapshot the list was reviewed on
 
@@ -655,7 +655,7 @@ Dry run is the default for manual checks. The nightly rehearsal and the dress re
 
 ### 11.3 The run report
 
-Every run writes a report to the `report` directory:
+Every run that gets past the checks of §4.1 and the task lock writes a report to the `report` directory, also when it fails: `report.md` for people, then `summary.json`, the machine-readable part that the nightly rehearsal saves (cutover.md §5.2). A directory with a `summary.json` holds a complete report, and neither file ever overwrites an existing one. Both files are created readable by the task's own user only (mode `0600`), because the report stays private (below). `summary.json` records the outcome (`completed` or `failed`, with the error), `started_at` and `finished_at` (two readings of the app clock, the first at the start of the run and the second just before the report is written) and `duration_ms`, their difference, which is the run time of ADR 0003; every argument of the run, defaults included; and the not-migrated tables of §9.1 with their reasons. Its `report_format` changes only when a field is renamed or removed. Two runs of the same dump with the same other arguments give the same report (ADR 0003) except in the fields that describe the run itself: `started_at`, `finished_at`, `duration_ms` and the `report` argument; a comparison of two runs leaves those out. Each import step adds its part:
 
 | Part | Content |
 |---|---|
@@ -693,7 +693,7 @@ The synthetic fixture reproduces every production shape that the REST-spec fixtu
 | 5 | Settled: the exact content-v1 markup (the editor's YouTube and padlet nodes, the centred image, the table shape, the style serialisation and the whitespace handling). | ADR 0013 (Accepted) and [editor.md](editor.md) §3 define it, and [editor.md](editor.md) §9 lists the rules that N2, N5, N5b and N7 apply. N9 and V13 check that every output is the editor's fixed point. The row stays so that the other items keep their numbers. |
 | 6 | Public links to the 3 label ids that D8 merges away (`/search/label/<id>`). | The maintainer decides, before the PR that implements `/search/label/{id}` merges, whether the public API answers them with the surviving label or with 404, and [public-api.md](public-api.md) records the answer. Until then the importer reports the 3 merged ids and their survivors. Low traffic is expected. |
 | 7 | How the release-1 seed of ADR 0019 (partner banners, site settings, one Diáktoll issue) runs at the cut-over. `import_mysql` does not write those tables. | Proposed: a separate idempotent task that reads versioned seed files from the repository and runs right after the import in the window, rehearsed nightly together with it. Settled with ADR 0019 and [cutover.md](cutover.md) before the first dress rehearsal. |
-| 8 | The path and schema of the resolution file. | The import PR. |
+| 8 | The schema of the resolution file. Its path is settled: `data/import/resolutions.toml`, shipped in the image as `/app/data/import/resolutions.toml` (research: DECISIONS R9, D12). | The PR that adds the resolution file's schema and its validation. |
 | 9 | Removal of the importer. | After the maintainer decommissions the legacy stack (backend1, MySQL, backend2 and its Redis; decision 41, [ADR 0026](adr/0026-backend2-unchanged-and-running-until-decommissioning.md)), a dedicated PR removes the `import-mysql` feature and the `import_mysql` task. `content_normalize` stays. |
 
 ## 14. References

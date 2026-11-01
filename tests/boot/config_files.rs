@@ -276,3 +276,43 @@ fn production_reads_the_totp_key_from_the_environment_without_a_default() {
         ]
     );
 }
+
+#[test]
+fn test_and_e2e_configure_no_import_source() {
+    // data-migration.md §4.1: these files never read
+    // IMPORT_SOURCE_DATABASE_URL, so a variable left in a shell cannot point
+    // a test run or the E2E server at a source; the import task's tests set
+    // the source in the context they run it with.
+    for environment in [Environment::Test, Environment::Any("e2e".to_owned())] {
+        let settings = Settings::from_section(load(&environment).settings.as_ref())
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        assert!(
+            !settings.import.source_database_url.is_set(),
+            "{environment}: {:?}",
+            settings.import.source_database_url
+        );
+    }
+}
+
+#[test]
+fn production_and_development_read_the_import_source_with_an_unset_default() {
+    // data-migration.md §4.1: the source comes from IMPORT_SOURCE_DATABASE_URL
+    // and nowhere else, its default is the empty string (unset), and it is
+    // quoted and escaped like the TOTP key, so any value reaches the task's
+    // own check. Read as text, because the variable decides the loaded value
+    // (tests/cli/import_mysql.rs runs production end to end).
+    for file in ["config/production.yaml", "config/development.yaml"] {
+        let source = std::fs::read_to_string(repository_root().join(file)).expect(file);
+        let lines: Vec<&str> = source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("source_database_url:"))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                r#"    source_database_url: "<%= get_env(name='IMPORT_SOURCE_DATABASE_URL', default='') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>""#
+            ],
+            "{file}"
+        );
+    }
+}

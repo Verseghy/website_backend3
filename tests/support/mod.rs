@@ -150,7 +150,8 @@ impl ConnectionProbe {
 pub struct CliRun {
     /// The exit status.
     pub status: ExitStatus,
-    /// Everything the process wrote to stdout.
+    /// Everything the process wrote to stdout, where production writes its
+    /// JSON log (ADR 0023 §9).
     pub stdout: String,
     /// Everything the process wrote to stderr.
     pub stderr: String,
@@ -205,6 +206,46 @@ fn read_to_end(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<Str
         stream.read_to_end(&mut bytes).expect("read the output");
         String::from_utf8_lossy(&bytes).into_owned()
     })
+}
+
+/// A fresh, empty directory below Cargo's scratch directory for the test
+/// target (`CARGO_TARGET_TMPDIR`, inside the git-ignored `target/`), with a
+/// name no other test or process uses; removed with everything in it when
+/// dropped.
+#[cfg_attr(
+    not(feature = "import-mysql"),
+    allow(dead_code, reason = "only the import_mysql tests use it so far")
+)]
+pub struct ScratchDir(PathBuf);
+
+#[cfg_attr(
+    not(feature = "import-mysql"),
+    allow(dead_code, reason = "only the import_mysql tests use it so far")
+)]
+impl ScratchDir {
+    /// Creates the directory; `label` starts its name, to tell runs apart
+    /// when one is kept for debugging.
+    pub fn new(label: &str) -> Self {
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&path)
+            .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
+        Self(path)
+    }
+
+    /// The directory.
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// A `TOTP_ENCRYPTION_KEY` for the child processes that load

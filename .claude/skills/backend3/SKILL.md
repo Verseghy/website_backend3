@@ -381,9 +381,11 @@ is its specification; each slice adds the step for its own tables.
    mismatch, and each exemption flag of section 4.3; proptests cover
    round trips and idempotence.
 3. **The step** in `src/tasks/import_mysql/` (code that only the task uses,
-   ADR 0008 rule 5): it reads the source rows through the source connection it
-   is given (`run(&source_db, &target_db, &ImportOptions)`; only the task reads
-   `ctx` and `IMPORT_SOURCE_DATABASE_URL`, data-migration.md section 4.1),
+   ADR 0008 rule 5), called from `run(&source_db, &target_db, &ImportOptions)`
+   in `src/tasks/import_mysql/mod.rs`: it reads the source rows through the
+   source pool it is given (only the task reads `ctx` and the source setting
+   `settings.import.source_database_url`, which production and development
+   fill from `IMPORT_SOURCE_DATABASE_URL`; data-migration.md section 4.1),
    inserts in the foreign-key order of section 4.3 with explicit values (no
    model save hooks), and writes the `import` (and `import_original`)
    revisions and the per-table activity entry (ADR 0011 section 4).
@@ -391,19 +393,36 @@ is its specification; each slice adds the step for its own tables.
    mismatch or a constraint violation stops the import with a message that
    names the defect id, the row id and the rule.
 5. **Verification and report**: add the table to the row counts and digests
-   of section 10 and to the run report of section 11.3.
+   of section 10 and to the run report of section 11.3: the step's data joins
+   `RunSummary` in `src/domain/import_mysql/report.rs`, which renders
+   `summary.json` and `report.md`; a step that fills a Markdown section
+   replaces its "No import step of this build reports here yet." line. Add
+   new `summary.json` fields without changing `REPORT_FORMAT`; rename or
+   remove one only with a `REPORT_FORMAT` bump.
 6. **Fixtures**: extend the synthetic legacy fixture (section 12) with every
    production shape of the table that `public-api.md` section 17.2 and the
    ADR 0019 section 2 table list, written by hand in the legacy format, and
    assert the result through the public API's request helpers.
 7. **Safety**: the source must be a local throwaway MySQL in `test` and
-   `development`; the import task refuses a non-local source there, and the
-   guard hook blocks a non-local `IMPORT_SOURCE_DATABASE_URL` for cargo
-   commands (ADR 0024 section 4). Never point a run at the production
-   database; the operator runs the production import in the cut-over window.
-8. **Run it**: `cargo loco task import_mysql mode:dry-run snapshot_at:<RFC 3339>
+   `development`. The guard hook blocks a non-local
+   `IMPORT_SOURCE_DATABASE_URL` for cargo commands (ADR 0024 section 4,
+   layer 2). The task's own refusal of a non-local source in those
+   environments (layer 3) comes with the slice that adds the MySQL test
+   source, before any step connects to the source: until then the task
+   opens no source connection, because its pool connects on first use and
+   `run` has no step yet. Never point a run at the production database; the
+   operator runs the production import in the cut-over window.
+8. **Run it**: `IMPORT_SOURCE_DATABASE_URL=mysql://<local throwaway source>
+   cargo loco task import_mysql mode:dry-run snapshot_at:<RFC 3339, UTC>
    resolutions:<file> storage_root:<dir> report:<empty dir>` against the local
-   databases, then check the report.
+   databases, then check `report.md` and `summary.json` in the report
+   directory. The task refuses an unset source (empty or `disabled`), an
+   unknown argument, a `snapshot_at` that is not UTC or lies after the start
+   of the run, and a report directory that is not empty or lies inside
+   `storage_root`. The task and its MySQL driver exist only with the default
+   Cargo feature `import-mysql`. Its tests set the source in the context they
+   run the task with (`tests/tasks/import_mysql.rs`), because
+   `config/test.yaml` names none.
 9. **PR**: the `import` scope, for example `feat(import): import labels and post labels`,
    with the D-numbers it resolves and the parity IDs it finishes.
 

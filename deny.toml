@@ -12,12 +12,12 @@
 
 [graph]
 # Resolve the graph with every feature of the workspace crates enabled, so an
-# optional dependency (for example the importer's MySQL driver, which the
-# importer slice puts behind the `import-mysql` feature, ADR 0022 §2) cannot
-# slip a license, a banned crate or an advisory past the policy. CI passes
-# `--all-features` as well; this setting makes a local `cargo deny check` see
-# the same graph. `targets` is left unset, so the graph of every target
-# platform is checked, not only the build host's.
+# optional dependency (for example the importer's MySQL driver behind the
+# `import-mysql` feature, ADR 0022 §2) cannot slip a license, a banned crate
+# or an advisory past the policy. CI passes `--all-features` as well; this
+# setting makes a local `cargo deny check` see the same graph. `targets` is
+# left unset, so the graph of every target platform is checked, not only the
+# build host's.
 all-features = true
 
 [advisories]

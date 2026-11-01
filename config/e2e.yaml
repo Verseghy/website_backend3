@@ -105,3 +105,7 @@ settings:
     png:
       threshold_pixels: 6000000
       large_preset: 0
+  # The legacy import's source (data-migration.md §4.1): none. The E2E run
+  # never imports, and this file does not read IMPORT_SOURCE_DATABASE_URL.
+  import:
+    source_database_url: ""
