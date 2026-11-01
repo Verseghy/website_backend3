@@ -296,7 +296,7 @@ They sit outside `app/public/`, so neither the media server nor the fallback rou
 
 ### Negative
 
-- One more Deployment to patch. nginx 1.24 retires in May 2027, so a dedicated PR must move to `ubi9/nginx-126` (retires May 2028) before then. The media contract tests keep that bump low-risk.
+- One more Deployment to patch, on an nginx stream that retires. The media server starts on `ubi9/nginx-126` (the maintainer's answer of 2026-10-25, research: DECISIONS R9), not on nginx 1.24, which retires in May 2027. nginx 1.26 retires in May 2028, so the media server needs another image move before then; the media contract tests keep that bump low-risk.
 - Two or three pods share one `ReadWriteOnce` volume: the media server, backend3 and, if its separate check passes, the backend1 reference view. This works only because the cluster has one node, and only the co-mount test shows that it works here.
 - A rename or move breaks links in content until editors update them. The reference list warns editors but does not rewrite anything.
 - Optimisation costs CPU and memory on a small node and adds seconds to large photo uploads. The JPEG and lossy WebP re-encodes are not lossless, and originals are not kept.
@@ -311,7 +311,7 @@ They sit outside `app/public/`, so neither the media server nor the fallback rou
 2. Run the co-mount test (section 3) and record the result.
 3. A website_k8s PR, for human review, adds the `media` Application, Deployment, Service, ConfigMap and the `media-storage-admin` Route, plus backend3's volume mount.
 4. A separate website_k8s PR moves the two public `/storage` Routes, with the runbook step that removes `backend-storage`. A held PR removes backend1's write access at the freeze ([cutover.md](../cutover.md)).
-5. Before May 2027, a PR moves to nginx 1.26.
+5. Before May 2027, a PR moves to nginx 1.26. Done: the media server starts on `ubi9/nginx-126` (research: DECISIONS R9), pinned in `deploy/media/image.txt` since Verseghy/website_backend3#214.
 6. When the maintainer decommissions backend1 ([ADR 0003](0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md)), `backend-pv-claim` moves out of backend1's Argo CD Application. Its PV is already `Retain`, and the move must not cascade a delete.
 
 ### What must be true in code and tests
@@ -360,7 +360,7 @@ They sit outside `app/public/`, so neither the media server nor the fallback rou
 
 ## References
 
-- research: DECISIONS 17 (media serving), 26 (media library), 15d (pasted images are never inserted; replaces the paste part of 26), 27 (images), 28 (2020-21 archives), 36 (edge capacity), 10d (who the editors are).
+- research: DECISIONS 17 (media serving), R9 (D35: the media server starts on nginx 1.26), 26 (media library), 15d (pasted images are never inserted; replaces the paste part of 26), 27 (images), 28 (2020-21 archives), 36 (edge capacity), 10d (who the editors are).
 - research: QUESTIONS 17, 26, 27, 28.
 - research: gap-04 §1 (volume contents), §3 (SCC, LVMS, `fsGroup`, router), §4 (the CORS header's source and consumers), §5 (Loco facts), §7 (takeover options), §8 (Routes and the `ServeDir` design).
 - research: SYNTHESIS §1.6 (PHP2Shell timeline), §1.10 (router), §3.4.2 (dashboard card), §3.7.3 (the `uploads/` tree), §3.8.4 (entity uploads), §4.7.3 (inline `data:` images), §4.9 (uploads inventory and URL shapes), §5.15 (non-GraphQL dependencies), §6.5-§6.7 (Loco storage, HTTP layer, static assets), §8.2 (O13, O15).

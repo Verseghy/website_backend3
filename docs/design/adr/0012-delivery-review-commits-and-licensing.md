@@ -76,7 +76,7 @@ The planned slice order follows the dependencies, and the project board (ADR 001
 - **Everything merges through Tide.** Nobody pushes to `master`, uses the merge button or uses an admin override. Once branchprotector has protected the branch, `enforce_admins` makes this binding.
 - **What the approved-only query implies.** A PR opened by an approver can merge as soon as Tide sees its required contexts pass. Two rules follow:
   - work in progress stays a draft (Prow's wip plugin then adds `do-not-merge/work-in-progress`) or carries `/hold`;
-  - until the PR-check jobs are required contexts, Tide does not wait for them, because only `tide` is required and unlisted contexts are skipped. Until the follow-up website_k8s PR merges, a PR is marked ready only after all of its checks have passed.
+  - a PR is marked ready only when its work is complete and every check is green (section 1, item 7). Tide waits for the PR-check jobs, because they are required contexts since the follow-up website_k8s PR, Verseghy/website_k8s#53 (merged 2026-10-25), but nothing else stops a ready PR once they pass. Before that PR, only `tide` was required and Tide skipped the unlisted contexts, so a PR was marked ready only after all of its checks had passed.
 
 ### 3. Commits and PR titles
 
@@ -96,7 +96,7 @@ Tide squash-merges, so the PR title becomes the commit subject on `master`. The 
 | `admin` | everything under `admin/`: screens, the data provider, the Hungarian message file, npm dependencies |
 | `db` | migrations and schema changes |
 | `import` | the legacy MySQL importer and its normalisation and resolution rules (ADR 0017) |
-| `deploy` | `Containerfile`, `.tekton/`, `.github/workflows/`, build and release scripts, `.claude/settings.json` and hooks |
+| `deploy` | `Containerfile`, `.tekton/`, `.github/workflows/`, `deploy/` (the media server's configuration and pinned image, [ADR 0015](0015-media-separate-static-server-media-library-image-optimisatio.md) §1), build and release scripts, `.claude/settings.json` and hooks |
 | `docs` | `docs/`, `README.md`, `THIRD_PARTY.md`, `AGENTS.md`, `CLAUDE.md` and the project skill |
 
 Examples: `feat(db,api,admin): add labels with trash and history`, `fix(api): keep backdated posts in keyset paging`, `build(api): bump loco-rs to 1.3.0`.
@@ -140,7 +140,7 @@ Examples: `feat(db,api,admin): add labels with trash and history`, `fix(api): ke
 
 - No second person reviews each PR before it merges. A defect can reach `master` and stay there until the final review. The mitigations are the required checks (ADR 0022), the testing standard, small slices and the ADRs. The maintainer can stop any PR with `/hold`.
 - The final human review covers the whole codebase. To keep it workable, every PR body names the parity IDs and the ADRs it implements.
-- Until the required-contexts follow-up merges, CI does not gate Tide; the draft rule covers that gap.
+- Until the required-contexts follow-up merged (Verseghy/website_k8s#53, 2026-10-25), CI did not gate Tide, and the draft rule covered that gap. CI gates Tide since then.
 - Every change in website_k8s, website_frontend and website_backend2 waits for a human. Cross-repository steps must start early: the PAC CR (ADR 0022) and the Angular REST build. website_backend2 #251 and #258 already exist, and decision 2 says to merge them now; the maintainer merges them (R2).
 - Code cannot move from backend3 into the MPL-2.0 house repositories unless its authors relicense it. The other direction works: MPL-2.0 code can be combined into this AGPL-3.0 work (MPL-2.0 §3.3).
 
@@ -148,7 +148,7 @@ Examples: `feat(db,api,admin): add labels with trash and history`, `fix(api): ke
 
 - The maintainer merges website_backend2 #251 and #258 now (decision 2); [cutover.md](../cutover.md) P5 checks that they are deployed.
 - The parity-issue script PR merges after this design PR and before the bootstrap PR opens (section 1; ADR 0019 section 1).
-- A follow-up website_k8s PR adds website_backend3's required contexts to Prow branch protection (ADR 0022).
+- A follow-up website_k8s PR adds website_backend3's required contexts to Prow branch protection (ADR 0022). Done: Verseghy/website_k8s#53 (merged 2026-10-25) requires the 15 PR-check jobs that ADR 0022 §3 marks required (§2, the branch-protection row).
 - The bootstrap PR adds: the `PR title` and `No session links` jobs, `THIRD_PARTY.md` and the licence files, `deny.toml`, the npm licence check, the Dependabot prefixes and the admin footer source link.
 - The first PR confirms that self-approval sets `approved`.
 - The repository settings check (PLT-01 in [parity.md](../parity.md)) was completed on 2026-10-25 ([ADR 0019](0019-scope-parity-tracking-retired-features-release-1-additions.md) section 1, rule 3).
