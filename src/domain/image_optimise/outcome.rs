@@ -1,21 +1,25 @@
-//! What optimising a WebP or GIF upload produces, and the two checks that
-//! the WebP and GIF optimisers share: the sniffed format, and the totals
-//! that bound the decode check of an animation (ADR 0015 §7, amended by
-//! ADR 0033 §1 and §4).
+//! What optimising an upload produces, and the two checks that the WebP and
+//! GIF optimisers share: the sniffed format, and the totals that bound the
+//! decode check of an animation (ADR 0015 §7, amended by ADR 0033 §1 and
+//! §4).
 //!
 //! [`super::optimise_webp`] and [`super::optimise_gif`] return an
-//! [`Optimised`] value, so the upload code stores [`Optimised::bytes`] and
-//! records the [`Treatment`] in its metrics without knowing which of the two
-//! formats it was. They refuse with the [`ImageError`] of every optimiser,
-//! with the shared [`ImageError::AnimationTooLarge`] for an animation above
+//! [`Optimised`] value, and [`super::optimise_image`] returns one for every
+//! format: it converts JPEG's [`OptimisedJpeg`] (`From` below) and wraps
+//! PNG's bytes as [`Treatment::Recompressed`]. So the upload code stores
+//! [`Optimised::bytes`] and records the [`Treatment`] in its metrics without
+//! knowing which format it was. The per-format results stay as they are,
+//! because the corpus tests of each format read their details. Every
+//! optimiser refuses with the one [`ImageError`], with the shared
+//! [`ImageError::AnimationTooLarge`] for an animation above
 //! [`MAX_ANIMATION_FRAMES`] or [`MAX_ANIMATION_PIXELS`], which also holds an
 //! animated PNG. The keep rule of a lossy re-encode is shared with JPEG and
 //! lives in `keep.rs`; the reasons a re-encode is not kept are JPEG's
 //! [`NotReencoded`], so both formats report them alike.
 
 use super::{
-    ImageError, ImageFormat, ImageHeader, MAX_ANIMATION_FRAMES, MAX_ANIMATION_PIXELS, NotReencoded,
-    PixelBudget, inspect,
+    ImageError, ImageFormat, ImageHeader, JpegKept, MAX_ANIMATION_FRAMES, MAX_ANIMATION_PIXELS,
+    NotReencoded, OptimisedJpeg, PixelBudget, inspect,
 };
 
 /// What an optimiser did to an upload.
@@ -29,10 +33,36 @@ pub enum Treatment {
     /// keep rule (ADR 0033 §1), or failed: the stripped original, with its
     /// image data unchanged, is what is stored. [`NotReencoded`] says why.
     ReEncodeDiscarded(NotReencoded),
-    /// A lossy still WebP was re-encoded, and the re-encode, at least 5 %
-    /// smaller than the stripped original and at a luma SSIM of at least
-    /// 0.98 against it, is what is stored.
+    /// A JPEG or a lossy still WebP was re-encoded, and the re-encode, at
+    /// least 5 % smaller than the stripped original and at a luma SSIM of at
+    /// least 0.98 against it, is what is stored.
     ReEncoded,
+    /// A PNG was recompressed losslessly with its metadata stripped
+    /// (ADR 0015 §7, ADR 0033 §5 and §6): every decoded pixel and every kept
+    /// frame is the upload's. When the encoder's output would have been
+    /// larger than the upload, the stripped rewrite is stored instead; both
+    /// are this treatment.
+    Recompressed,
+}
+
+impl From<OptimisedJpeg> for Optimised {
+    /// The JPEG result as an [`Optimised`] value: a kept re-encode is
+    /// [`Treatment::ReEncoded`], and the stripped original is
+    /// [`Treatment::ReEncodeDiscarded`] with its reason, as for a lossy WebP.
+    /// `MozJPEG` reports no text for a failed re-encode, so
+    /// [`Optimised::re_encode_failure`] stays `None`.
+    fn from(jpeg: OptimisedJpeg) -> Self {
+        let treatment = match jpeg.kept {
+            JpegKept::Reencoded => Treatment::ReEncoded,
+            JpegKept::Stripped(reason) => Treatment::ReEncodeDiscarded(reason),
+        };
+        Self {
+            header: jpeg.header,
+            bytes: jpeg.bytes,
+            treatment,
+            re_encode_failure: None,
+        }
+    }
 }
 
 /// An optimised upload, ready to be stored.
@@ -140,6 +170,44 @@ mod tests {
         // ADR 0033 §4 accepts for WebP, GIF and APNG.
         assert_eq!(MAX_ANIMATION_FRAMES, 4096);
         assert_eq!(MAX_ANIMATION_PIXELS, 268_435_456);
+    }
+
+    #[test]
+    fn a_jpeg_result_converts_with_its_reason() {
+        let header = inspect(&samples::jpeg(67, 41), PixelBudget::DEFAULT).unwrap();
+        let reasons = [
+            NotReencoded::NotSmallerEnough,
+            NotReencoded::BelowSsimFloor,
+            NotReencoded::TooSmallForSsim,
+            NotReencoded::ColourModel,
+            NotReencoded::EncoderFailed,
+        ];
+        let cases = reasons
+            .into_iter()
+            .map(|reason| {
+                (
+                    JpegKept::Stripped(reason),
+                    Treatment::ReEncodeDiscarded(reason),
+                )
+            })
+            .chain([(JpegKept::Reencoded, Treatment::ReEncoded)]);
+        for (kept, treatment) in cases {
+            let optimised = Optimised::from(OptimisedJpeg {
+                bytes: vec![1, 2, 3],
+                header,
+                kept,
+            });
+            assert_eq!(
+                optimised,
+                Optimised {
+                    header,
+                    bytes: vec![1, 2, 3],
+                    treatment,
+                    re_encode_failure: None,
+                },
+                "{kept:?}"
+            );
+        }
     }
 
     #[test]

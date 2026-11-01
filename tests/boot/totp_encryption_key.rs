@@ -19,7 +19,9 @@ use std::time::Duration;
 use backend3::domain::totp_secret::{PUBLISHED_LOCAL_KEY, TotpEncryptionKey};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::support::{CliRun, ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli};
+use crate::support::{
+    CLI_MEDIA_PUBLIC_BASE_URL, CliRun, ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -38,6 +40,7 @@ fn db_status_with(totp_key: Option<&str>) -> (CliRun, bool) {
         ("LOCO_ENV", "production"),
         ("DATABASE_URL", url.as_str()),
         ("HOST", "http://localhost"),
+        ("MEDIA_PUBLIC_BASE_URL", CLI_MEDIA_PUBLIC_BASE_URL),
         // The session secret that config/production.yaml also requires
         // (ADR 0006 §1), so that only the TOTP key decides the outcome.
         ("JWT_SECRET", jwt_secret.as_str()),

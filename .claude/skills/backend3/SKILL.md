@@ -141,7 +141,30 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    A handler that reads a JSON body takes `Result<Json<T>, JsonRejection>`
    and answers a refused body with `controllers::admin::json_rejection_response`:
    `422 invalid_body`, or `413 body_too_large` above the request body limit
-   (research: DECISIONS R15 (D74)).
+   (research: DECISIONS R15 (D74)). Mount it above the
+   `DefaultBodyLimit::max(JSON_BODY_LIMIT)` layer of `routes()`, so its body
+   may be at most 4 MiB (ADR 0023 §5).
+   An upload handler (an entity image field, later the media library) is
+   mounted between that layer and the `no-store` layer, so it keeps the
+   128 MiB of `server.middlewares.limit_payload` (ADR 0015 §6). It takes
+   `Result<Multipart, MultipartRejection>` last, reads the one `file` part
+   with `controllers::admin::media::receive_image_part` (the media and image
+   settings of `media_uploads(&ctx)`), stores it with
+   `models::media::store_entity_image` (folder, `random_name_bytes()`, and
+   the same settings and the gate), and answers every error with
+   `upload_error_response`, which maps each refusal to its Hungarian
+   `ErrorCode` and its status (ADR 0021 §4): an upload that would leave less
+   than `media.min_free_bytes` free is `507 insufficient_storage` (research:
+   DECISIONS R24 (D121)). The model writes no row and no activity entry:
+   the handler stores `stored.stored_value` on its entity in its own
+   transaction. That is the legacy rows' shape, the bare `<32 hex>.<ext>`
+   or `index/<32 hex>.<ext>` for a post's index image
+   (`media_rules::stored_value`, data-migration.md §6), never `stored.path`,
+   the path below the root: the public URL is
+   `{public_base_url}/{disk}/{stored value}` (public-api.md §2.3), and the
+   admin's is `/storage/` followed by `stored.path` (ADR 0015 §3).
+   Request tests of an upload endpoint follow `tests/requests/media_upload.rs`
+   and give each test its own media volume (`tests/support::TempMedia`).
    A handler for a signed-in account takes
    `controllers::admin::session::AdminSession`, which loads the account on
    every request and answers `401 unauthorized` itself when it is trashed,

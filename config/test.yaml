@@ -28,6 +28,13 @@ server:
       enable: false
     fallback:
       enable: false
+    # ADR 0015 §6, ADR 0023 §5: request bodies up to 128 MiB (134,217,728
+    # bytes), for media uploads; Loco's default is 2,000,000 bytes. The
+    # admin API's JSON routes take at most 4 MiB, a limit of their own in
+    # controllers::admin::routes. A body above either limit is answered 413
+    # with the admin error envelope.
+    limit_payload:
+      body_limit: 128mib
     compression:
       enable: true
     # public-api.md §9: a request whose If-None-Match equals the ETag of a
@@ -109,12 +116,14 @@ settings:
     # refuses it." Production reads its own key from TOTP_ENCRYPTION_KEY,
     # with no default, and refuses this one at boot (ADR 0034 §3).
     totp_encryption_key: "YmFja2VuZDMgVE9UUCBlbmNyeXB0aW9uIGtleTogcHVibGljIGFuZCB0aHJvd2F3YXksIGZvciBkZXZlbG9wbWVudCwgdGVzdCBhbmQgZTJlIG9ubHk7IHByb2R1Y3Rpb24gcmVmdXNlcyBpdC4="
-  # How uploaded images are optimised (ADR 0015 §7, ADR 0033). `png`: the
-  # oxipng preset by image size (ADR 0033 §5), preset 2 up to
-  # `threshold_pixels` pixels and the cheaper `large_preset` (0 or 1) above;
-  # the default derived in src/domain/image_optimise/png/effort.rs. Checked
-  # at boot.
+  # How uploaded images are optimised (ADR 0015 §7, ADR 0033).
+  # `pixel_budget`: the largest pixel count decoded for one image, 50
+  # megapixels (ADR 0015 §7). `png`: the oxipng preset by image size
+  # (ADR 0033 §5), preset 2 up to `threshold_pixels` pixels and the cheaper
+  # `large_preset` (0 or 1) above; the default derived in
+  # src/domain/image_optimise/png/effort.rs. Checked at boot.
   image_optimisation:
+    pixel_budget: 50000000
     png:
       threshold_pixels: 6000000
       large_preset: 0
@@ -125,3 +134,22 @@ settings:
   # one here (ADR 0024 §4, layer 3).
   import:
     source_database_url: ""
+  # The media volume (ADR 0015 §3): three sibling directories under the
+  # git-ignored target/ here, the volume at /data in production. Create
+  # `root` before the first upload (uploads refuse to start without it, as
+  # they do in production before the volume is mounted); `tmp_dir` and the
+  # entity image folders below `root` are created when missing.
+  # `min_free_bytes`: uploads are refused below 2 GiB of free space.
+  # `public_base_url`: the base of the public API's absolute media URLs,
+  # with no trailing slash (public-api.md §2.3), here the test server's.
+  # Tests that write files pass media settings of their own, under
+  # target/, so parallel tests never share a directory.
+  # `serve_storage`: the fallback of ADR 0015 §4, off. Checked at boot;
+  # whether the directories exist is checked by each upload.
+  media:
+    root: target/media/test/public
+    tmp_dir: target/media/test/tmp
+    trash_dir: target/media/test/trash
+    min_free_bytes: 2147483648
+    public_base_url: "http://localhost/storage"
+    serve_storage: false

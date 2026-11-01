@@ -9,12 +9,12 @@
 //! `totp_encryption_key.rs` load it in a child process. `published_keys.rs`
 //! checks every key value these files hold against the production refusal.
 
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, path::PathBuf};
 
 use backend3::{
     app::enforce_database_guard,
     domain::{
-        image_optimise::PngEffort,
+        image_optimise::{PixelBudget, PngEffort},
         session_jwt::SESSION_LIFETIME_SECS,
         totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT, TotpEncryptionKey},
     },
@@ -22,6 +22,7 @@ use backend3::{
 };
 use loco_rs::{
     config::{CacheConfig, Config, QueueConfig, WorkerMode},
+    controller::middleware::limit_payload::DefaultBodyLimitKind,
     environment::Environment,
 };
 
@@ -315,4 +316,117 @@ fn production_and_development_read_the_import_source_with_an_unset_default() {
             "{file}"
         );
     }
+}
+
+/// The request body limit of a loaded configuration, in bytes.
+fn body_limit(config: &Config) -> usize {
+    match config
+        .server
+        .middlewares
+        .limit_payload
+        .clone()
+        .unwrap_or_default()
+        .body_limit
+    {
+        DefaultBodyLimitKind::Limit(limit) => limit,
+        DefaultBodyLimitKind::Disable => panic!("the body limit must stay on"),
+    }
+}
+
+#[test]
+fn every_local_config_takes_bodies_of_128_mib() {
+    // ADR 0015 §6 and ADR 0023 §5: `body_limit: 128mib`, 134,217,728 bytes,
+    // not Loco's default of 2,000,000 bytes. The admin JSON routes take
+    // 4 MiB of it (controllers::admin::JSON_BODY_LIMIT).
+    for environment in local_environments() {
+        assert_eq!(
+            body_limit(&load(&environment)),
+            134_217_728,
+            "{environment}"
+        );
+    }
+}
+
+#[test]
+fn production_takes_bodies_of_128_mib() {
+    // The file is read as text, because loading it needs its variables;
+    // the block is the same as in the local files, which load above.
+    let source = std::fs::read_to_string(repository_root().join("config/production.yaml"))
+        .expect("config/production.yaml");
+    assert_eq!(
+        source
+            .matches("\n    limit_payload:\n      body_limit: 128mib\n")
+            .count(),
+        1,
+        "server.middlewares.limit_payload.body_limit: 128mib"
+    );
+    for environment in local_environments() {
+        let path = repository_root().join(format!("config/{environment}.yaml"));
+        let local = std::fs::read_to_string(&path).expect("a config file");
+        assert!(
+            local.contains("\n    limit_payload:\n      body_limit: 128mib\n"),
+            "{environment}"
+        );
+    }
+}
+
+#[test]
+fn local_media_settings_point_below_target_and_never_serve_storage() {
+    for environment in local_environments() {
+        let settings = Settings::from_section(load(&environment).settings.as_ref())
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        let media = &settings.media;
+        // Three siblings below the git-ignored target/, one set per
+        // environment, so a development server and the E2E server never
+        // share a file.
+        let base = PathBuf::from(format!("target/media/{environment}"));
+        assert_eq!(media.root, base.join("public"), "{environment}");
+        assert_eq!(media.tmp_dir, base.join("tmp"), "{environment}");
+        assert_eq!(media.trash_dir, base.join("trash"), "{environment}");
+        // ADR 0015 §3: 2 GiB of reserve.
+        assert_eq!(media.min_free_bytes, 2_147_483_648, "{environment}");
+        // A local address, never the production host, and no trailing
+        // slash (public-api.md §2.3).
+        let base_url = media.public_base_url.as_str();
+        assert!(
+            base_url.starts_with("http://localhost"),
+            "{environment}: {base_url}"
+        );
+        assert!(base_url.ends_with("/storage"), "{environment}: {base_url}");
+        assert!(!media.serve_storage, "{environment}");
+        // ADR 0015 §7: 50 megapixels.
+        assert_eq!(
+            settings.image_optimisation.pixel_budget,
+            PixelBudget::DEFAULT,
+            "{environment}"
+        );
+    }
+}
+
+#[test]
+fn production_media_settings_are_the_volume_and_its_base_url_has_no_default() {
+    // ADR 0015 §3's table, and an address that takes no default
+    // (public-api.md §2.3): unset, the process stops naming the variable
+    // (tests/cli/media_public_base_url.rs runs it end to end).
+    let source = std::fs::read_to_string(repository_root().join("config/production.yaml"))
+        .expect("config/production.yaml");
+    let media: Vec<&str> = source
+        .lines()
+        .skip_while(|line| *line != "  media:")
+        .take_while(|line| line.is_empty() || line.starts_with("    ") || *line == "  media:")
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect();
+    assert_eq!(
+        media,
+        [
+            "  media:",
+            "    root: /data/app/public",
+            "    tmp_dir: /data/backend3/tmp",
+            "    trash_dir: /data/backend3/trash",
+            "    min_free_bytes: 2147483648",
+            r#"    public_base_url: "<%= get_env(name='MEDIA_PUBLIC_BASE_URL') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>""#,
+            r#"    serve_storage: <%= get_env(name="MEDIA_SERVE_STORAGE", default="false") %>"#,
+        ]
+    );
+    assert!(source.contains("\n    pixel_budget: 50000000\n"));
 }

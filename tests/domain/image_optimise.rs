@@ -1,5 +1,6 @@
 //! The image corpus of `tests/fixtures/images/` through
-//! `domain::image_optimise::inspect`.
+//! `domain::image_optimise::inspect`, and through `optimise_image`, the one
+//! entry point of the upload code, which must give each format's own result.
 //!
 //! The in-module tests use headers built by hand; these use the output of
 //! real encoders (libjpeg-turbo, libpng, libwebp, the GIF and APNG writers of
@@ -12,7 +13,9 @@
 use std::{fs, path::Path};
 
 use backend3::domain::image_optimise::{
-    Dimensions, HeaderDefect, ImageError, ImageFormat, ImageHeader, PixelBudget, inspect, sniff,
+    Dimensions, HeaderDefect, ImageError, ImageFormat, ImageHeader, Optimised, PixelBudget,
+    PngEffort, Treatment, inspect, optimise_gif, optimise_image, optimise_jpeg, optimise_png,
+    optimise_webp, sniff,
 };
 use proptest::{
     collection::vec,
@@ -292,6 +295,44 @@ proptest! {
         if let Ok(header) = inspect(&bytes, PixelBudget::DEFAULT) {
             prop_assert_eq!(Some(header.format), sniff(&bytes));
             prop_assert!(PixelBudget::DEFAULT.admits(header.dimensions));
+        }
+    }
+}
+
+#[test]
+fn optimise_image_gives_each_format_s_own_result() {
+    // The one entry point of the upload code returns, for every corpus file,
+    // exactly what the format's own optimiser returns, and says what was
+    // done; the over-budget headers are refused as they are.
+    for &(path, format, ..) in CORPUS {
+        let bytes = corpus_file(path);
+        let result = optimise_image(&bytes, PixelBudget::DEFAULT, PngEffort::DEFAULT);
+        let own: Result<Optimised, ImageError> = match format {
+            ImageFormat::Jpeg => optimise_jpeg(&bytes, PixelBudget::DEFAULT).map(Optimised::from),
+            ImageFormat::Png => {
+                optimise_png(&bytes, PixelBudget::DEFAULT, PngEffort::DEFAULT).map(|stored| {
+                    Optimised {
+                        header: inspect(&bytes, PixelBudget::DEFAULT).unwrap(),
+                        bytes: stored,
+                        treatment: Treatment::Recompressed,
+                        re_encode_failure: None,
+                    }
+                })
+            }
+            ImageFormat::Gif => optimise_gif(&bytes, PixelBudget::DEFAULT),
+            ImageFormat::WebP => optimise_webp(&bytes, PixelBudget::DEFAULT),
+        };
+        assert_eq!(result, own, "{path}");
+        if is_over_budget(path) {
+            assert!(
+                matches!(result, Err(ImageError::OverPixelBudget { .. })),
+                "{path}"
+            );
+        } else {
+            let optimised = result.unwrap_or_else(|error| panic!("{path}: {error}"));
+            assert_eq!(optimised.header.format, format, "{path}");
+            assert_eq!(sniff(&optimised.bytes), Some(format), "{path}");
+            assert!(optimised.bytes.len() <= bytes.len(), "{path}");
         }
     }
 }

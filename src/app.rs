@@ -8,7 +8,10 @@
 //!   and pass the instant down; tests replace it with [`set_clock`]. It also
 //!   creates the metrics registry, registers every metric family on it and
 //!   puts the [`Metrics`] into the shared store, from where the hooks below
-//!   hand it down (ADR 0023 §9, ADR 0008 rule 3).
+//!   hand it down (ADR 0023 §9, ADR 0008 rule 3). It also stores the upload
+//!   handles ([`MediaUploads`]: the media settings and the process's one
+//!   image optimiser permit, ADR 0015 §7), which upload handlers take from
+//!   there.
 //! - `load_config` runs the database-target guard of ADR 0024 §4 (layer 3)
 //!   and validates the typed settings, including that `settings.metrics.port`
 //!   is not `server.port`, and the admin session's `auth.jwt` section
@@ -97,6 +100,7 @@ use crate::tasks;
 use crate::{
     controllers::{
         self,
+        admin::media::MediaUploads,
         admin_ui::{self, DistRequirement},
         metrics::{self, HttpMetrics, Metrics, runtime::RuntimeMetrics},
         not_found,
@@ -391,7 +395,8 @@ impl Hooks for App {
     /// CLI and test harness; loco-rs 1.2.0 `src/boot.rs`, `src/cli.rs`), so
     /// the clock and the registry are there before any other hook,
     /// initializer, route or worker runs. Tasks get a registry as well; an
-    /// unused one costs a few allocations.
+    /// unused one costs a few allocations. Last, it stores the upload
+    /// handles ([`MediaUploads`]), one optimiser permit per process.
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
         set_clock(&ctx, Arc::new(SystemClock));
         let mut registry = Registry::default();
@@ -403,6 +408,11 @@ impl Hooks for App {
         // registry, before it is frozen.
         ctx.shared_store
             .insert(Metrics::new(registry, http, runtime));
+        // The upload handles: the media settings and the one optimiser
+        // permit of this process (ADR 0015 §7). `load_config` has already
+        // validated the settings, so this parse cannot fail on them.
+        let settings = Settings::from_section(ctx.config.settings.as_ref()).map_err(Error::msg)?;
+        ctx.shared_store.insert(MediaUploads::new(&settings));
         Ok(ctx)
     }
 

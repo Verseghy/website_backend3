@@ -37,6 +37,22 @@ const KIT_ONLY_RA_KEYS = [
   "ra.navigation.breadcrumb_drawer_title",
 ]
 
+/**
+ * The `params` of each upload refusal, as src/dtos/admin/error.rs documents
+ * them and src/controllers/admin/media.rs sends them. The Rust tests of that
+ * module and tests/requests/media_upload.rs pin the same names, so a change
+ * of the params changes this table too.
+ */
+const UPLOAD_REFUSAL_PARAMS = {
+  image_not_allowed: [],
+  image_type_mismatch: ["extension", "format"],
+  image_corrupt: ["format"],
+  image_too_many_pixels: ["height", "max_megapixels", "width"],
+  image_animation_too_large: ["max_frames", "max_megapixels"],
+  image_too_many_scans: ["max_scans"],
+  insufficient_storage: [],
+} satisfies Partial<Record<ErrorCode, string[]>>
+
 describe("hu.ts", () => {
   it("defines every key of the installed ra-language-english (key parity)", () => {
     const missing = englishKeys.filter(
@@ -152,13 +168,18 @@ describe("hu.ts", () => {
     expect(hu.errors.unauthorized).toBe(
       "A munkamenet lejárt vagy érvénytelen. Jelentkezz be újra!"
     )
+    // The editor's wording of editor.md §10.1 for a file that is no image.
+    expect(hu.errors.image_not_allowed).toBe(
+      "Csak JPEG, PNG, GIF vagy WebP kép tölthető fel."
+    )
   })
 
   it("fills error messages only with the names the server sends for the code", () => {
-    // The envelope codes carry no params yet. A rich-text finding
-    // (`ContentError`, editor.md §7.6) has the `detail` names that
-    // `src/dtos/admin/content.rs` documents for its code, and an `index` for
-    // the image and embed codes only (it is null for the whole-body codes).
+    // The envelope codes carry no params, except the upload refusals
+    // (`UPLOAD_REFUSAL_PARAMS`). A rich-text finding (`ContentError`,
+    // editor.md §7.6) has the `detail` names that `src/dtos/admin/content.rs`
+    // documents for its code, and an `index` for the image and embed codes
+    // only (it is null for the whole-body codes).
     const sent: Record<ErrorCode, string[]> = {
       not_found: [],
       invalid_credentials: [],
@@ -172,6 +193,7 @@ describe("hu.ts", () => {
       content_too_deep: ["limit", "line"],
       content_not_normalisable: ["passes"],
       unauthorized: [],
+      ...UPLOAD_REFUSAL_PARAMS,
     }
     const unknown = Object.entries(hu.errors).flatMap(([code, message]) =>
       placeholders(message)
@@ -179,6 +201,14 @@ describe("hu.ts", () => {
         .map((name) => `errors.${code}: %{${name}}`)
     )
     expect(unknown).toEqual([])
+  })
+
+  it("fills exactly the params the server sends with each upload refusal", () => {
+    // A placeholder the server never fills would show as `%{name}`; a param
+    // no placeholder uses is information the editor never sees.
+    for (const [code, names] of Object.entries(UPLOAD_REFUSAL_PARAMS)) {
+      expect(placeholders(hu.errors[code as ErrorCode]), code).toEqual(names)
+    }
   })
 
   it("names what editor.md §7.6 asks each rich-text message to name", () => {
@@ -199,6 +229,16 @@ describe("hu.ts", () => {
       "limit",
     ])
     expect(placeholders(hu.errors.content_too_deep)).toEqual(["limit", "line"])
+  })
+
+  it("asks for a re-saved or smaller file for every image refusal (ADR 0033 §4)", () => {
+    // The CPU limits and the corrupt image ask to save the file again; the
+    // pixel budget and the animation totals ask for a smaller one.
+    for (const code of ["image_corrupt", "image_too_many_scans"] as const) {
+      expect(hu.errors[code], code).toContain("mentsd el újra")
+    }
+    expect(hu.errors.image_too_many_pixels).toContain("kicsinyítsd le")
+    expect(hu.errors.image_animation_too_large).toContain("kicsinyítsd le")
   })
 
   it("keeps the ADR 0004 §5 update prompt verbatim", () => {

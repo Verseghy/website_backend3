@@ -5,6 +5,7 @@ mod admin_ui;
 mod auth_login;
 mod auth_logout;
 mod auth_session;
+mod media_upload;
 mod metrics;
 mod not_found;
 mod openapi;
