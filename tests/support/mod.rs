@@ -6,11 +6,17 @@
 //! the validation of a body against the served OpenAPI document (ADR 0005
 //! §4); [`public_samples`], the per-route samples of the global suite; and
 //! [`public_rules`], the global rules of §16.3 that the suite checks.
+//!
+//! - [`safety_net`]: the checks every admin-editable entity runs on its own
+//!   write methods (ADR 0011), and [`probe_notes`], the test-only entity
+//!   they are proven on.
 
 pub mod fixtures;
 pub mod openapi_schema;
+pub mod probe_notes;
 pub mod public_rules;
 pub mod public_samples;
+pub mod safety_net;
 
 use std::{
     collections::BTreeSet,

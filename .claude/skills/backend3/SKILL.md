@@ -201,13 +201,22 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
    Decide for each rule whether trashed rows count, as the ADRs say.
 3. **Model methods** in `src/models/<name>.rs` (ADR 0011 section 7): create,
    update, delete, restore and purge take the transaction and the actor (a
-   user id or `System`) as arguments. Create and update write the row, one
-   revision and one activity entry (recipe 8) in the same transaction;
-   delete and restore write only the activity entry. An update or restore
+   user id or `System`) as arguments. Create and update write the row first
+   and then call `models::revisions::record_save(&txn, actor, Save { .. })`
+   in the same transaction: it locks the record's row, writes the next
+   revision and the `create`, `update` or `revert` entry (recipe 8) that
+   names it, with the changed field names of an update computed against the
+   latest revision; set the entry's `label` for a content record only.
+   Delete and restore write only the activity entry. An update or restore
    sets `updated_at` (and delete `deleted_at`) to
    `Expr::current_timestamp()`, never to an app-clock instant (recipe 7
    step 6). A relation change (labels on a post)
-   updates the parent's audit columns and writes a parent revision.
+   updates the parent's audit columns and writes a parent revision. Both
+   `record_save` and `revisions::append` take a transaction, never the
+   pool: the row lock that numbers concurrent saves lasts until the save
+   ends (`src/models/revisions.rs`). The importer calls `append` itself,
+   with `Actor::Import` and the reasons `import_original` and `import`, and
+   writes one entry per table (recipe 4).
 4. **The live-row helper**: one finder that adds `deleted_at IS NULL`, used by
    every public query on every table it touches (ADR 0011 section 3). Every
    model function that the public API calls and that takes a database
@@ -229,20 +238,46 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
    a restore while a row it depends on is trashed or a live row holds its
    unique value (409). The refusal names the blocking rows in a Hungarian
    message through an `ErrorCode` (ADR 0011 section 3, ADR 0021 section 4).
-6. **Revision DTO**: an explicit allow-list of the editable fields plus
-   relation id lists, with a `schema_version`; never secrets (ADR 0011
-   section 4). A shape change bumps `schema_version` and adds a pure upcaster
-   in `src/domain/` with a test per version step.
+6. **Revision snapshot**: a plain struct in the entity's domain module that
+   implements `domain::revision::RevisionSnapshot`: `ENTITY_TYPE` is the
+   table name, `FIELDS` the explicit allow-list of the editable fields plus
+   relation id lists (every one serialised, `null` for no value, never a
+   `skip_serializing_if`), `SCHEMA_VERSION` from 1; never secrets
+   (`SECRET_FIELDS`), never the entity model (ADR 0011 section 4). It
+   derives serde only, no ts-rs or utoipa (ADR 0008 rule 6). A shape change
+   bumps `SCHEMA_VERSION` and appends one `UpcastStep` from the old version
+   to `UPCASTS`, a pure function over the JSON members with a unit test of
+   its own; `check_snapshot_type::<T>()` in the type's unit tests fails on
+   a gap in the registry. The importer's `import` revisions use the same
+   type, so it exists before the entity's importer step.
 7. **Permanent delete** (`admin` role only) follows the entity's row of the
-   ADR 0011 section 6 table; owned files are removed by a queue job after the
-   commit (ADR 0016).
+   ADR 0011 section 6 table, in a transaction that called
+   `activity_log::with_permanent_delete_flag` first: the `revisions`
+   trigger lets a `DELETE` of the record's revisions through only then.
+   Write the record first (the purge deletes the row on the condition that
+   it is still in the trash; the anonymisation updates the account), then
+   remove the revisions with
+   `models::revisions::delete_for_record::<T>(&txn, id)`, never with a
+   `DELETE` of your own. It locks the record's row before it deletes, so a
+   save that is still running ends first and its revision is deleted too;
+   a plain `DELETE` would miss that revision, which would then outlive the
+   purge or keep the personal data that the anonymisation removes.
+   Owned files are removed by a queue job after the commit (ADR 0016).
 8. **Admin API and UI**: the restore, purge and revisions routes of ADR 0011
    section 8 behind the resource's permission (ADR 0007 section 4), the
    trash filter on the list, and the „Előzmények” panel on the edit page.
-9. **Tests**: model tests for delete, restore, each refusal, the revision and
-   activity rows written per operation, and rollback on error; a request test
-   that every public read path ignores trashed rows, through the
-   soft-deleted twins of the public fixtures (recipe 3 step 6).
+9. **Tests**: in the entity's model tests, implement
+   `tests/support::safety_net::SafetyNetEntity` for the entity's own create
+   and update methods and call `assert_safety_net`: it checks revision 1
+   and the `create` entry, the next revision and the `update` entry with
+   exactly the changed fields, the audit columns and the one instant of
+   both, and that a refused activity entry rolls the save back
+   (`tests/models/safety_net.rs` proves it on the test-only `probe_notes`
+   entity of `tests/support/probe_notes.rs`, which is also a complete
+   example). Add model tests for delete, restore, each refusal and the
+   entries they write, and a request test that every public read path
+   ignores trashed rows, through the soft-deleted twins of the public
+   fixtures (recipe 3 step 6).
 
 ---
 
@@ -405,8 +440,11 @@ is its specification; each slice adds the step for its own tables.
    its tables from `SOURCE_TABLES` and maps the driver's errors with
    `source::source_error`. The step inserts in the foreign-key order of
    section 4.3 with explicit values (no model save hooks), and writes the
-   `import` (and `import_original`) revisions and the per-table activity
-   entry (ADR 0011 section 4).
+   `import` (and `import_original`) revisions of the entity's revision
+   snapshot type (recipe 2 step 6) with `models::revisions::append` and
+   `Actor::Import`, or with a bulk insert that keeps the same rules
+   (`domain::revision::snapshot_object`, `check_revision`, numbers from 1
+   per record), and the per-table activity entry (ADR 0011 section 4).
 4. **Refusals** (section 4.2): an uncovered defect instance, a precondition
    mismatch or a constraint violation stops the import with a message that
    names the defect id, the row id and the rule. A legacy calendar day
@@ -654,7 +692,10 @@ are in `src/domain/activity.rs` (`Actor`, `Action`, `check_entry`,
      `EntityRef::table("<table>")` for an entry about a whole table (the
      importer writes one `import` entry per table per run, with counts);
    - `revision_id`: the revision the action wrote, if any; it needs a
-     record;
+     record. A create, update or revert gets its entry from
+     `models::revisions::record_save`, which sets the record and the
+     revision for it (recipe 2 step 3), so an entry is built by hand only
+     for an action that writes no revision, such as a delete or a restore;
    - `label`: the display label of a content record (its title or name), so
      the log stays readable after a purge. Only with an `entity`, and never
      on a sign-in or account entry or for `users`, `authors` or
@@ -696,7 +737,12 @@ are in `src/domain/activity.rs` (`Actor`, `Action`, `check_entry`,
    `activity_log::with_permanent_delete_flag(&txn)`, an UPDATE that only
    sets `ip` to NULL. Only the anonymisation of a user issues it, for that
    user's own sign-in and account entries (ADR 0011 section 6). The
-   `revisions` triggers will read the same flag for a permanent delete. Set
+   `revisions` table reads the same flag: it refuses every `UPDATE` and
+   `TRUNCATE`, and a `DELETE` outside a permanent-delete transaction, so a
+   purge (and the anonymisation, for the account record's revisions) sets
+   it, writes the record, and then deletes the revisions with
+   `models::revisions::delete_for_record`, which locks the record's row
+   first (recipe 2 step 7). Set
    the flag on the outermost transaction of the permanent delete, never on a
    nested one: a nested transaction is a savepoint, and committing it keeps
    a `SET LOCAL` until the outer transaction ends (only rolling it back

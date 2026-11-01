@@ -230,9 +230,10 @@ where
     Ok(row.insert(db).await?)
 }
 
-/// Marks `txn` as a permanent-delete transaction (ADR 0011 §5, §6), the
-/// only kind in which the table's trigger lets an `UPDATE` through, and then
-/// only one that sets `ip` to NULL.
+/// Marks `txn` as a permanent-delete transaction (ADR 0011 §5, §6): the
+/// only kind in which the `activity_log` trigger lets an `UPDATE` through,
+/// and then only one that sets `ip` to NULL, and in which the `revisions`
+/// trigger lets a `DELETE` through.
 ///
 /// - `txn`: the outermost transaction of the permanent delete. A
 ///   transaction, not a connection: the flag is set with `SET LOCAL`, so it
@@ -249,9 +250,15 @@ where
 /// test `a_flag_set_in_a_savepoint_lasts_until_the_outer_transaction_ends`
 /// pins this.
 ///
-/// Only the anonymisation of a user calls this (ADR 0011 §6), which clears
-/// the address of that user's own sign-in and account entries. The flag
-/// does not let `DELETE` or `TRUNCATE` through.
+/// Only a permanent delete calls this (ADR 0011 §6): the purge of a record,
+/// which deletes the record's revisions with it, and the anonymisation of a
+/// user, which deletes the revisions of the account record and clears the
+/// address of that user's own sign-in and account entries. Both delete the
+/// revisions with [`super::revisions::delete_for_record`], after they have
+/// written the record: it locks the record's row before it deletes, so a
+/// save of the record that is still running cannot leave a revision behind.
+/// The flag lets no `DELETE` or `TRUNCATE` of `activity_log` through, and
+/// no `UPDATE` or `TRUNCATE` of `revisions`.
 ///
 /// # Errors
 ///

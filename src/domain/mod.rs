@@ -36,6 +36,7 @@ pub mod image_optimise;
 pub mod import_mysql;
 pub mod password_hash;
 pub mod proc_stat;
+pub mod revision;
 pub mod rich_text;
 pub mod route_coverage;
 pub mod runtime_metrics;
