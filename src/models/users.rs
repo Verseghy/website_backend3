@@ -27,6 +27,11 @@
 //! `before_save` hook below does not stamp `updated_at` the way Loco's
 //! generated model does; the content write paths set it explicitly.
 //!
+//! Revocation is [`ActiveModel::revoke_sessions`]: it increments
+//! `token_version` in one `UPDATE`, which ends every session of the account
+//! on its next request (ADR 0006 §2). Logout uses it, and so will the other
+//! events of that section.
+//!
 //! Sign-in ([`Model::authenticate`]) and the session token
 //! ([`Model::generate_session_token`]) live here too. The [`Authenticable`]
 //! impl lets Loco's `JWTWithUser` extractor load the account a token names,
@@ -68,6 +73,16 @@ use crate::domain::{
 fn lower_email_equals(email: &str) -> Expr {
     use sea_orm::sea_query::ExprTrait as _;
     Func::lower(Expr::col(Column::Email)).eq(Func::lower(email))
+}
+
+/// `token_version + 1`: the new value of a revocation, computed by
+/// PostgreSQL from the stored value ([`ActiveModel::revoke_sessions`]).
+///
+/// `ExprTrait` is imported here only, for the reason
+/// [`lower_email_equals`] gives.
+fn token_version_plus_one() -> Expr {
+    use sea_orm::sea_query::ExprTrait as _;
+    Expr::col(Column::TokenVersion).add(1)
 }
 
 #[async_trait::async_trait]
@@ -147,6 +162,90 @@ pub fn verify_stored_password(stored: Option<&str>, password: &str) -> bool {
             verify_dummy_password(password);
             false
         }
+    }
+}
+
+/// Why [`ActiveModel::revoke_sessions`] refused an account before it wrote
+/// anything. Both are programming errors of the caller, never of the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RevokeSessionsError {
+    /// The active model has no `id`, so no row can be addressed.
+    #[error(
+        "revoke_sessions needs the account's id: build the active model from a stored row \
+         (`into_active_model`)"
+    )]
+    NoId,
+    /// The caller set `token_version` itself.
+    #[error(
+        "revoke_sessions increments token_version itself; leave it unset on the active model \
+         (ADR 0006 §2)"
+    )]
+    TokenVersionSet,
+}
+
+impl ActiveModel {
+    /// Ends every session of this account: increments `token_version` by one
+    /// and returns the account as stored afterwards (ADR 0006 §2).
+    ///
+    /// - `db`: the connection or transaction to write to.
+    ///
+    /// Every token carries the version it was issued at (`tv`), and the
+    /// admin session extractor refuses one that differs from the stored
+    /// value, so after this call every token issued before it fails on its
+    /// next request: cookies and Bearer tokens alike, on every device. A
+    /// token issued from the returned row's `token_version` holds.
+    ///
+    /// The increment is one statement, `token_version = token_version + 1`,
+    /// not a read and a write: PostgreSQL locks the row for it, so two
+    /// concurrent revocations move the version twice, and the one that
+    /// commits second moves it past the value the first returned. A token
+    /// that an event issues from its returned value (the new cookie of a
+    /// password change) therefore ends with every later revocation, and a
+    /// read-then-write could have let it survive one.
+    ///
+    /// The changes that this active model holds, if any, are written in the
+    /// same `UPDATE`, so an account event that also changes a column (a
+    /// deactivation, a new password) revokes in the statement that makes the
+    /// change. Logout holds none.
+    ///
+    /// It writes nothing else: no revision, and neither `updated_at` nor
+    /// `updated_by` unless the caller set them, because a revocation is an
+    /// account event, not a content update (ADR 0011 §4). The `UPDATE` goes
+    /// past the model's save hooks; [`ActiveModelBehavior::before_save`] of
+    /// this module acts on inserts only. The column is an `integer`: after
+    /// 2,147,483,647 increments PostgreSQL refuses the next one, which a
+    /// school's accounts never reach.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::Any`] with [`RevokeSessionsError::NoId`] when the active
+    /// model has no `id`, and with [`RevokeSessionsError::TokenVersionSet`]
+    /// when the caller set `token_version`; both before any query.
+    /// [`ModelError::EntityNotFound`] when no row has the id (accounts are
+    /// anonymised, never deleted, so a stored row's id always matches).
+    /// [`ModelError::DbErr`] when the statement fails.
+    pub async fn revoke_sessions<C>(mut self, db: &C) -> ModelResult<Model>
+    where
+        C: ConnectionTrait,
+    {
+        let id = match self.id {
+            ActiveValue::Set(id) | ActiveValue::Unchanged(id) => id,
+            ActiveValue::NotSet => return Err(ModelError::wrap(RevokeSessionsError::NoId)),
+        };
+        if self.token_version.is_set() {
+            return Err(ModelError::wrap(RevokeSessionsError::TokenVersionSet));
+        }
+        // The id addresses the row; it is never part of the `SET` list.
+        self.id = ActiveValue::NotSet;
+        Entity::update_many()
+            .set(self)
+            .col_expr(Column::TokenVersion, token_version_plus_one())
+            .filter(Column::Id.eq(id))
+            .exec_with_returning(db)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(ModelError::EntityNotFound)
     }
 }
 

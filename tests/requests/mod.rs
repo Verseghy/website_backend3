@@ -3,6 +3,7 @@
 
 mod admin_ui;
 mod auth_login;
+mod auth_logout;
 mod auth_session;
 mod metrics;
 mod not_found;

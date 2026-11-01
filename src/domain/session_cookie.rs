@@ -22,10 +22,24 @@
 //! `cookie-octet`s, which every JWT does (base64url segments joined by
 //! dots). The builder refuses any other value instead of quoting or
 //! escaping it: a value that would need either is not a token Loco issued.
+//!
+//! Logout clears the cookie with [`cleared_session_cookie`] (ADR 0006 §2):
+//! the same name and attributes with an empty value and `Max-Age=0`, which
+//! tells the browser to delete it at once. Both builders format the same
+//! name and attribute list, because a browser deletes a cookie only when the
+//! deleting `Set-Cookie` names the same cookie (name, host and `Path`), and
+//! refuses a `__Host-` cookie, the deleting one included, without `Secure`
+//! and `Path=/`.
 
 /// The name of the admin session cookie (ADR 0006 §1). `auth.jwt.location`
 /// in every `config/<env>.yaml` reads the token from this cookie first.
 pub const SESSION_COOKIE_NAME: &str = "__Host-admin_session";
+
+/// The `Set-Cookie` attributes of the session cookie except `Max-Age`, the
+/// one attribute that setting and clearing write differently. Both
+/// [`session_cookie`] and [`cleared_session_cookie`] format it in, so they
+/// cannot drift apart.
+const COOKIE_ATTRIBUTES: &str = "HttpOnly; Secure; SameSite=Strict; Path=/";
 
 /// Why a session cookie could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -89,9 +103,44 @@ pub fn session_cookie(token: &str, max_age_secs: u64) -> Result<String, SessionC
         return Err(SessionCookieError::ZeroMaxAge);
     }
     Ok(format!(
-        "{SESSION_COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; \
-         Max-Age={max_age_secs}"
+        "{SESSION_COOKIE_NAME}={token}; {COOKIE_ATTRIBUTES}; Max-Age={max_age_secs}"
     ))
+}
+
+/// Builds the `Set-Cookie` header value that deletes the session cookie in
+/// the browser: `__Host-admin_session=; HttpOnly; Secure; SameSite=Strict;
+/// Path=/; Max-Age=0` (ADR 0006 §2, "Logout").
+///
+/// The browser stores it in place of the session cookie, because it names
+/// the same cookie: the same name, host and `Path` (RFC 6265 §5.3 step 11),
+/// so the empty value replaces the token at once. `Max-Age=0` gives it the
+/// earliest representable expiry (RFC 6265 §5.2.2: a `Max-Age` of zero or
+/// less), and the browser evicts every expired cookie (RFC 6265 §5.3, after
+/// step 12), so the cookie is gone; RFC 6265bis keeps both rules. The name
+/// and attributes are those of [`session_cookie`], so the browser matches
+/// the cookie it holds and accepts the `__Host-` name. Like
+/// [`session_cookie`], it sends no `Expires`.
+///
+/// It takes no argument: the value is the same for every logout, so it
+/// cannot fail.
+#[must_use]
+pub fn cleared_session_cookie() -> String {
+    format!("{SESSION_COOKIE_NAME}=; {COOKIE_ATTRIBUTES}; Max-Age=0")
+}
+
+/// The cookie that a `Set-Cookie` value names, and its attributes: the name
+/// before the first `=`, and every `;`-separated attribute after the value,
+/// trimmed. `None` for a value without a `=` in its first part.
+///
+/// - `set_cookie`: a `Set-Cookie` header value.
+///
+/// A test helper only: it reads the values this module writes, not every
+/// header a server could send.
+#[cfg(test)]
+fn name_and_attributes(set_cookie: &str) -> Option<(&str, Vec<&str>)> {
+    let mut parts = set_cookie.split(';');
+    let (name, _value) = parts.next()?.split_once('=')?;
+    Some((name, parts.map(str::trim).collect()))
 }
 
 #[cfg(test)]
@@ -162,6 +211,52 @@ mod tests {
     }
 
     #[test]
+    fn the_cleared_cookie_has_an_empty_value_and_max_age_zero() {
+        assert_eq!(
+            cleared_session_cookie(),
+            "__Host-admin_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
+        );
+        let cleared = cleared_session_cookie();
+        let (pair, _) = cleared.split_once(';').expect("attributes");
+        assert_eq!(pair, format!("{SESSION_COOKIE_NAME}="));
+    }
+
+    #[test]
+    fn the_cleared_cookie_names_the_cookie_that_sign_in_sets() {
+        // A browser deletes only the cookie whose name, host and Path the
+        // deleting `Set-Cookie` repeats, and takes a `__Host-` one only with
+        // `Secure` and `Path=/` (the module documentation).
+        let set = session_cookie("aaa.bbb.ccc", 7200).expect("valid");
+        let cleared = cleared_session_cookie();
+        let (set_name, mut set_attributes) = name_and_attributes(&set).expect("set");
+        let (cleared_name, mut cleared_attributes) =
+            name_and_attributes(&cleared).expect("cleared");
+        assert_eq!(set_name, cleared_name);
+        assert_eq!(set_attributes.pop(), Some("Max-Age=7200"));
+        assert_eq!(cleared_attributes.pop(), Some("Max-Age=0"));
+        assert_eq!(set_attributes, cleared_attributes);
+        for required in ["Secure", "Path=/"] {
+            assert!(cleared_attributes.contains(&required), "{required}");
+        }
+        assert!(
+            !cleared_attributes
+                .iter()
+                .any(|attribute| attribute.starts_with("Domain")),
+            "a __Host- cookie has no Domain"
+        );
+    }
+
+    #[test]
+    fn name_and_attributes_reads_the_values_this_module_writes() {
+        assert_eq!(
+            name_and_attributes("n=v; A; B=1"),
+            Some(("n", vec!["A", "B=1"]))
+        );
+        assert_eq!(name_and_attributes("n="), Some(("n", vec![])));
+        assert_eq!(name_and_attributes("no pair; A"), None);
+    }
+
+    #[test]
     fn errors_say_what_to_fix() {
         let message = SessionCookieError::InvalidCharacter {
             character: ';',
@@ -202,6 +297,28 @@ mod tests {
                     prop_assert!(false, "{token:?}: {outcome:?} with first bad {first_bad:?}");
                 }
             }
+        }
+
+        #[test]
+        fn the_cleared_cookie_deletes_every_session_cookie_sign_in_can_set(
+            token in JWT_LIKE,
+            max_age in 1..=u64::MAX,
+        ) {
+            // Whatever token and lifetime sign-in used, logout's value names
+            // the same cookie with the same attributes and differs only in
+            // the empty value and `Max-Age=0`.
+            let set = session_cookie(&token, max_age).expect("a JWT-shaped token is valid");
+            let cleared = cleared_session_cookie();
+            let (set_name, mut set_attributes) = name_and_attributes(&set).expect("set");
+            let (cleared_name, mut cleared_attributes) =
+                name_and_attributes(&cleared).expect("cleared");
+            prop_assert_eq!(set_name, cleared_name);
+            let expected_age = format!("Max-Age={max_age}");
+            prop_assert_eq!(set_attributes.pop(), Some(expected_age.as_str()));
+            prop_assert_eq!(cleared_attributes.pop(), Some("Max-Age=0"));
+            prop_assert_eq!(set_attributes, cleared_attributes);
+            let empty_value = format!("{SESSION_COOKIE_NAME}=;");
+            prop_assert!(cleared.starts_with(&empty_value));
         }
     }
 }

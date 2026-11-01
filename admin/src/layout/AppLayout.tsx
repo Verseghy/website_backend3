@@ -1,6 +1,6 @@
 /**
  * backend3's layout: the kit's `Layout` with the footer below the page
- * content, and without the kit's user menu for now.
+ * content, and with backend3's own user menu in the header.
  *
  * The footer goes into the kit layout's `footer` slot, after its `<main>`,
  * not into the page content: a `<footer>` inside `<main>` is a generic element
@@ -8,18 +8,17 @@
  * contentinfo landmark. The slot is a local change in the kit's `layout.tsx`
  * (see `src/components/admin/LOCAL_CHANGES.md`).
  *
- * The user menu stays out (`userMenu={null}`, the kit layout's other local
- * change). The kit shows it as soon as an auth provider exists, and its only
- * entry is „Kijelentkezés”. Signing out needs the server's
- * `POST /api/admin/auth/logout`, which ends the session; without it the
- * cookie would stay valid behind a sign-out that only looked done. The logout
- * slice adds the endpoint and brings the menu back with it.
+ * The user menu goes into the layout's `userMenu` slot, the kit layout's
+ * other local change, in place of the kit's `UserMenu`: its „Kijelentkezés”
+ * must end the session on the server (`POST /api/admin/auth/logout`, ADR 0006
+ * §2), and the kit's could not ask for that (`AppUserMenu.tsx` says why).
  */
 import type { CoreLayoutProps } from "ra-core"
 
 import { Layout } from "@/components/admin/layout"
 
 import { AppFooter } from "./AppFooter"
+import { AppUserMenu } from "./AppUserMenu"
 
 /**
  * Builds the layout component for one build's source commit.
@@ -35,7 +34,7 @@ export function createAppLayout(sourceCommit: string | undefined) {
     return (
       <Layout
         footer={<AppFooter sourceCommit={sourceCommit} />}
-        userMenu={null}
+        userMenu={<AppUserMenu />}
       >
         {children}
       </Layout>

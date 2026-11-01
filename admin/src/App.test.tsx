@@ -18,6 +18,14 @@ import { adminRoutes } from "@/router"
 
 const SHA = "fedcba9876543210fedcba9876543210fedcba98"
 
+/**
+ * How long a test waits for the page that follows a sign-out or the end of a
+ * session. ra-core navigates after `logout` in a `setTimeout`, then clears its
+ * caches, and React swaps the whole layout for the sign-in page; on a loaded
+ * machine that takes longer than Testing Library's default of one second.
+ */
+const AFTER_SIGN_OUT = { timeout: 5000 }
+
 const ME: MeResponse = {
   pid: "0b7c4a52-7e3d-4c55-9a7f-4b3c2d1e0f9a",
   name: "Próba Szerkesztő",
@@ -41,8 +49,9 @@ function json(status: number, body: unknown): Response {
 
 /**
  * A stand-in for the admin API's `/auth` routes: `/auth/me` answers the
- * account while `signedIn` is true and `401 unauthorized` otherwise, and
- * `/auth/login` signs in with `password`.
+ * account while `signedIn` is true and `401 unauthorized` otherwise,
+ * `/auth/login` signs in with `password`, and `/auth/logout` ends the
+ * session (`204`), or answers `401` when there is none.
  */
 class FakeAuthApi {
   /** Whether the browser holds a session cookie. */
@@ -74,6 +83,18 @@ class FakeAuthApi {
       }
       this.signedIn = true
       return json(200, { step: "done" })
+    }
+    if (url === "/api/admin/auth/logout" && init?.method === "POST") {
+      if (!this.signedIn) {
+        return json(401, {
+          error: "unauthorized",
+          description: "d",
+          field: null,
+          params: {},
+        })
+      }
+      this.signedIn = false
+      return new Response(null, { status: 204 })
     }
     return json(404, {
       error: "not_found",
@@ -327,12 +348,70 @@ describe("AdminApp with a session", () => {
     )
   })
 
-  it("shows no user menu until the logout slice adds the server's sign-out", async () => {
+  it("shows backend3's user menu in the header", async () => {
     mountAdmin("/admin")
     await screen.findByTestId("dashboard")
-    // The kit's user menu is an avatar button with „Kijelentkezés” in it.
-    expect(document.querySelector('[data-slot="avatar"]')).toBeNull()
-    expect(screen.queryByText(ME.name)).not.toBeInTheDocument()
+    const trigger = screen.getByRole("button", { name: "Profil" })
+    expect(trigger.closest("header")).not.toBeNull()
+    await userEvent.setup().click(trigger)
+    expect(await screen.findByText(ME.name)).toBeInTheDocument()
+    expect(
+      screen.getByRole("menuitem", { name: "Kijelentkezés" })
+    ).toBeInTheDocument()
+  })
+
+  it("signs out through the user menu: the server ends the session, and every page then asks for a sign-in", async () => {
+    const api = new FakeAuthApi(true)
+    const router = mountAdmin("/admin/about", undefined, api)
+    await screen.findByTestId("about-page")
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole("button", { name: "Profil" }))
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Kijelentkezés" })
+    )
+
+    expect(
+      await screen.findByTestId("sign-in-page", {}, AFTER_SIGN_OUT)
+    ).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe("/admin/login")
+    expect(api.signedIn).toBe(false)
+    expect(
+      api.fetch.mock.calls.filter(
+        ([url, init]) =>
+          url === "/api/admin/auth/logout" && init?.method === "POST"
+      )
+    ).toHaveLength(1)
+
+    // The session is gone on the server, so the dashboard asks again.
+    await router.navigate("/admin/")
+    await waitFor(
+      () => expect(router.state.location.pathname).toBe("/admin/login"),
+      AFTER_SIGN_OUT
+    )
+    expect(screen.queryByTestId("dashboard")).not.toBeInTheDocument()
+  })
+
+  it("lands on the dashboard after the next sign-in, not on the page signed out from", async () => {
+    const api = new FakeAuthApi(true)
+    const router = mountAdmin("/admin/about", undefined, api)
+    await screen.findByTestId("about-page")
+    const user = userEvent.setup()
+    await user.click(screen.getByRole("button", { name: "Profil" }))
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Kijelentkezés" })
+    )
+    await screen.findByTestId("sign-in-page", {}, AFTER_SIGN_OUT)
+
+    await user.type(screen.getByLabelText(/E-mail-cím/), ME.email)
+    await user.type(screen.getByLabelText(/Jelszó/), "helyes jelszó")
+    await user.click(screen.getByRole("button", { name: "Bejelentkezés" }))
+
+    expect(
+      await screen.findByTestId("dashboard", {}, AFTER_SIGN_OUT)
+    ).toBeInTheDocument()
+    // ra-core's default `afterLoginUrl` ("/") under the basename.
+    expect(router.state.location.pathname).toBe("/admin/")
   })
 
   it("lets ra-core send the user to the sign-in page when the session ends", async () => {
@@ -343,9 +422,12 @@ describe("AdminApp with a session", () => {
     // The session ends (expiry, deactivation); the next page checks it.
     api.signedIn = false
     await router.navigate("/admin/")
-    await waitFor(() =>
-      expect(router.state.location.pathname).toBe("/admin/login")
+    await waitFor(
+      () => expect(router.state.location.pathname).toBe("/admin/login"),
+      AFTER_SIGN_OUT
     )
-    expect(await screen.findByTestId("sign-in-page")).toBeInTheDocument()
+    expect(
+      await screen.findByTestId("sign-in-page", {}, AFTER_SIGN_OUT)
+    ).toBeInTheDocument()
   })
 })

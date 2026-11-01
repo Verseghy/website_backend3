@@ -5,17 +5,22 @@
 import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 
+import { parseErrorEnvelope } from "@/api/error-envelope"
 import type { ErrorEnvelope } from "@/bindings/ErrorEnvelope"
 import type { MeResponse } from "@/bindings/MeResponse"
 
 import {
   AuthProviderConfigError,
   createAuthProvider,
+  isSignOutRequest,
   parseLoginResponse,
   parseMeResponse,
   SessionCheckError,
+  SIGN_OUT_PARAMS,
   SignInError,
   signInFailureMessage,
+  SignOutError,
+  signOutFailureMessage,
 } from "./auth-provider"
 
 const ME: MeResponse = {
@@ -384,10 +389,165 @@ describe("getIdentity", () => {
 })
 
 describe("logout", () => {
-  it("asks the server nothing yet and lets ra-core show the sign-in page", async () => {
-    const { provider, fetch } = providerAnswering(json(200, ME))
-    await expect(provider.logout({})).resolves.toBeUndefined()
-    expect(fetch).not.toHaveBeenCalled()
+  it.each([{}, undefined, null, { endSession: "true" }, { endSession: 1 }])(
+    "asks the server nothing for ra-core's own call with %j and lets it show the sign-in page",
+    async (params) => {
+      // ra-core calls logout({}) after checkAuth or checkError found no
+      // session: there is nothing to end on the server.
+      const { provider, fetch } = providerAnswering(json(500, {}))
+      await expect(provider.logout(params)).resolves.toBeUndefined()
+      expect(fetch).not.toHaveBeenCalled()
+    }
+  )
+
+  it("posts /auth/logout for the user's sign-out and resolves on 204", async () => {
+    const { provider, fetch } = providerAnswering(
+      new Response(null, { status: 204 })
+    )
+    await expect(provider.logout(SIGN_OUT_PARAMS)).resolves.toBeUndefined()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = fetch.mock.calls[0]
+    expect(url).toBe("/api/admin/auth/logout")
+    expect(init).toEqual({
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    })
+  })
+
+  it("resolves on 401: the session had ended already", async () => {
+    const { provider } = providerAnswering(json(401, envelope("unauthorized")))
+    await expect(provider.logout(SIGN_OUT_PARAMS)).resolves.toBeUndefined()
+  })
+
+  it.each([
+    ["a server error without an envelope", json(500, { error: "x" })],
+    ["a proxy's page", new Response("<html>502</html>", { status: 502 })],
+    ["a 200, which is not the server's confirmation", json(200, {})],
+    ["a 403", json(403, {})],
+  ])(
+    "rejects %s with auth.sign_out.failed, keeping the user signed in",
+    async (_case, answer) => {
+      const { provider } = providerAnswering(answer)
+      const error = await rejection(provider.logout(SIGN_OUT_PARAMS))
+      expect(error).toBeInstanceOf(SignOutError)
+      expect((error as SignOutError).status).toBe(answer.status)
+      expect((error as SignOutError).display).toEqual({
+        kind: "key",
+        key: "auth.sign_out.failed",
+        values: {},
+      })
+      expect((error as SignOutError).message).toBe("auth.sign_out.failed")
+    }
+  )
+
+  it("rejects a refusal with its envelope's message", async () => {
+    const known = providerAnswering(json(422, envelope("invalid_body")))
+    expect(
+      (
+        (await rejection(
+          known.provider.logout(SIGN_OUT_PARAMS)
+        )) as SignOutError
+      ).display
+    ).toEqual({ kind: "key", key: "errors.invalid_body", values: {} })
+
+    // A code this build does not know shows the server's text (ADR 0021 §4).
+    const unknown = providerAnswering(json(403, envelope("origin_mismatch")))
+    const error = (await rejection(
+      unknown.provider.logout(SIGN_OUT_PARAMS)
+    )) as SignOutError
+    expect(error.status).toBe(403)
+    expect(error.display).toEqual({
+      kind: "text",
+      text: "English text for origin_mismatch.",
+    })
+    expect(error.message).toBe("English text for origin_mismatch.")
+  })
+
+  it("rejects with auth.sign_out.failed when the request never reaches the server", async () => {
+    const { provider } = providerAnswering(new TypeError("Failed to fetch"))
+    const error = await rejection(provider.logout(SIGN_OUT_PARAMS))
+    expect(error).toBeInstanceOf(SignOutError)
+    expect((error as SignOutError).status).toBeNull()
+    expect((error as SignOutError).display).toEqual({
+      kind: "key",
+      key: "auth.sign_out.failed",
+      values: {},
+    })
+  })
+
+  it("ends the session exactly for 204 and 401", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.integer({ min: 200, max: 599 }), async (status) => {
+        // A null-body status (204, 205, 304) cannot carry a body; the others
+        // carry an empty JSON object.
+        const answer = [204, 205, 304].includes(status)
+          ? new Response(null, { status })
+          : json(status, {})
+        const { provider } = providerAnswering(answer)
+        const outcome = await provider.logout(SIGN_OUT_PARAMS).then(
+          () => "signed out",
+          (error: unknown) => error
+        )
+        if (status === 204 || status === 401) {
+          expect(outcome).toBe("signed out")
+        } else {
+          expect(outcome).toBeInstanceOf(SignOutError)
+        }
+      }),
+      // The two that end it, and the other null-body statuses, every run.
+      { examples: [[204], [401], [205], [304], [200]] }
+    )
+  })
+})
+
+describe("isSignOutRequest", () => {
+  it("is true for the user menu's params only", () => {
+    expect(isSignOutRequest(SIGN_OUT_PARAMS)).toBe(true)
+    expect(isSignOutRequest({ endSession: true, other: 1 })).toBe(true)
+    fc.assert(
+      fc.property(fc.anything(), (params) => {
+        const expected =
+          typeof params === "object" &&
+          params !== null &&
+          (params as { endSession?: unknown }).endSession === true
+        expect(isSignOutRequest(params)).toBe(expected)
+      })
+    )
+  })
+
+  it("is frozen, so no caller can switch it off", () => {
+    expect(Object.isFrozen(SIGN_OUT_PARAMS)).toBe(true)
+  })
+})
+
+describe("signOutFailureMessage", () => {
+  it("is the generic failure for any body without an envelope", () => {
+    fc.assert(
+      fc.property(
+        fc.jsonValue().filter((body) => parseErrorEnvelope(body) === undefined),
+        (body) => {
+          expect(signOutFailureMessage(body)).toEqual({
+            kind: "key",
+            key: "auth.sign_out.failed",
+            values: {},
+          })
+        }
+      )
+    )
+    expect(signOutFailureMessage(undefined)).toEqual({
+      kind: "key",
+      key: "auth.sign_out.failed",
+      values: {},
+    })
+  })
+
+  it("is the envelope's message for an envelope", () => {
+    expect(signOutFailureMessage(envelope("body_too_large"))).toEqual({
+      kind: "key",
+      key: "errors.body_too_large",
+      values: {},
+    })
   })
 })
 

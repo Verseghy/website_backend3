@@ -47,6 +47,8 @@ pub fn routes() -> Routes {
         .prefix(ADMIN_API_PREFIX)
         .add("/auth/login", post(auth::login))
         .add("/auth/me", get(auth::me))
+        // POST only (ADR 0006 §2): axum answers every other method with 405.
+        .add("/auth/logout", post(auth::logout))
         // Last, so that it wraps every handler above. `overriding`: no
         // handler may make an admin response cacheable.
         .layer(SetResponseHeaderLayer::overriding(
