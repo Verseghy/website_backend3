@@ -1,4 +1,5 @@
-//! The browser sign-in, `POST /api/admin/auth/login` (ADR 0006 §4).
+//! The browser sign-in, `POST /api/admin/auth/login` (ADR 0006 §4), and the
+//! signed-in account, `GET /api/admin/auth/me` (ADR 0007 §7).
 //!
 //! A correct e-mail address and password answer `200 {"step": "done"}` and
 //! set the `__Host-admin_session` cookie with a full `admin` session token
@@ -15,16 +16,25 @@
 //! any lookup, so its answer is the same for every address and tells nothing
 //! about the accounts. ADR 0006 §4's "same answer for every failure" covers
 //! the credential failures.
+//!
+//! `auth/me` answers the account of the request's admin session
+//! ([`super::session::AdminSession`]) as a [`MeResponse`]. It is one of the
+//! three routes that a `password_change` session may reach (ADR 0006 §4), so
+//! the admin UI can tell such a session to set a new password. Without a
+//! valid session it answers `401 unauthorized`.
 
 use axum::{Json, extract::rejection::JsonRejection, http::header::SET_COOKIE};
 use loco_rs::prelude::*;
 
-use super::{error_response, json_rejection_response};
+use super::{
+    error_response, json_rejection_response,
+    session::{AdminOrPasswordChange, AdminSession},
+};
 use crate::{
     app::clock,
     domain::session_cookie::session_cookie,
     dtos::admin::{
-        auth::{LoginRequest, LoginResponse, LoginStep},
+        auth::{LoginRequest, LoginResponse, LoginStep, MeResponse},
         error::ErrorCode,
     },
     models::users,
@@ -72,4 +82,30 @@ pub async fn login(
         .json(LoginResponse {
             step: LoginStep::Done,
         })
+}
+
+/// `GET /api/admin/auth/me`: the account of the request's admin session and
+/// the session's scope.
+///
+/// - `session`: the checked admin session; an `admin` or a `password_change`
+///   one (ADR 0006 §4). Without one the extractor has already answered
+///   `401 unauthorized`.
+///
+/// # Errors
+///
+/// An internal error (`500`) when the response cannot be built: an account
+/// without an e-mail address or an `mfa` scope, both of which the session
+/// check rules out ([`MeResponse::new`]). A failed account lookup is the
+/// extractor's `500`.
+// `state` is named because the handler takes no `State`, from which the
+// macro would otherwise infer it; the extractor reads the `AppContext`.
+#[debug_handler(state = AppContext)]
+pub async fn me(session: AdminSession<AdminOrPasswordChange>) -> Result<Response> {
+    // The model-to-DTO conversion happens here, at the controller boundary
+    // (ADR 0005, ADR 0008 rule 6): only the allow-listed columns leave the
+    // row, so the DTO never sees the password hash or the TOTP secret.
+    let user = session.user;
+    let me =
+        MeResponse::new(user.pid, user.name, user.email, session.scope).map_err(Error::wrap)?;
+    format::json(me)
 }

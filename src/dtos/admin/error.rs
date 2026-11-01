@@ -11,14 +11,16 @@
 //!
 //! Codes are added by the slice that first returns them: `not_found` for
 //! unknown `/api/admin` paths, `invalid_credentials` for every failed
-//! sign-in (ADR 0006 §4), and `invalid_body` and `body_too_large` for a
+//! sign-in (ADR 0006 §4), `invalid_body` and `body_too_large` for a
 //! request body that cannot be read as the endpoint's JSON DTO (the
-//! maintainer's answer of 2026-10-25, research: DECISIONS R15 (D74)). The
-//! seven codes of a refused rich-text body (editor.md §7.6) came with the
-//! validator that finds them, `domain::rich_text::validate_content`, before
-//! the post and page writes that answer them: each finding is a
-//! [`super::content::ContentError`], `{code, index, detail}`, and the codes
-//! needed their Hungarian messages first.
+//! maintainer's answer of 2026-10-25, research: DECISIONS R15 (D74)), and
+//! `unauthorized` for a request without a valid admin session (ADR 0006 §1,
+//! ADR 0021 §4's 401 row). The seven codes of a refused rich-text body
+//! (editor.md §7.6) came with the validator that finds them,
+//! `domain::rich_text::validate_content`, before the post and page writes
+//! that answer them: each finding is a [`super::content::ContentError`],
+//! `{code, index, detail}`, and the codes needed their Hungarian messages
+//! first.
 
 use std::collections::BTreeMap;
 
@@ -69,6 +71,12 @@ pub enum ErrorCode {
     /// `422`: the sanitiser could not bring a rich-text body to a fixed
     /// point; the server logs it as an error.
     ContentNotNormalisable,
+    /// `401`: the request has no valid admin session, so the user signs in
+    /// again. One code for every reason: no token, a token that is not
+    /// valid or has expired, an account that is trashed, anonymised or
+    /// deactivated, a token that an account event revoked, or a session
+    /// scope that the route does not accept.
+    Unauthorized,
 }
 
 impl ErrorCode {
@@ -77,7 +85,8 @@ impl ErrorCode {
     pub const fn status(self) -> u16 {
         match self {
             Self::NotFound => 404,
-            Self::InvalidCredentials => 401,
+            // ADR 0021 §4: 401 is "no valid session"; a failed sign-in is one.
+            Self::InvalidCredentials | Self::Unauthorized => 401,
             // ADR 0021 §4 has no row for it; 413 with the JSON envelope
             // follows ADR 0015 §6, whose upload limit answers it (D74).
             Self::BodyTooLarge => 413,
@@ -117,6 +126,9 @@ impl ErrorCode {
             Self::ContentTooLarge => "The content is larger than the limit",
             Self::ContentTooDeep => "The content nests elements deeper than the limit",
             Self::ContentNotNormalisable => "The content did not reach a fixed point",
+            // Not Loco's "You do not have permission to access this
+            // resource": that reads as a 403, and a 401 means "sign in".
+            Self::Unauthorized => "There is no valid admin session; sign in again",
         }
     }
 }
@@ -217,6 +229,7 @@ mod tests {
                 422,
                 "content_not_normalisable",
             ),
+            (ErrorCode::Unauthorized, 401, "unauthorized"),
         ] {
             assert_eq!(code.status(), status, "{code:?}");
             assert_eq!(serde_json::to_value(code).expect("serializes"), json!(wire));
@@ -246,10 +259,19 @@ mod tests {
     }
 
     #[test]
+    fn the_session_envelope_serializes_exactly() {
+        assert_eq!(
+            serde_json::to_string(&ErrorEnvelope::new(ErrorCode::Unauthorized))
+                .expect("serializes"),
+            r#"{"error":"unauthorized","description":"There is no valid admin session; sign in again","field":null,"params":{}}"#
+        );
+    }
+
+    #[test]
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");

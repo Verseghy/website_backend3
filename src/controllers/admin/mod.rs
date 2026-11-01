@@ -12,6 +12,11 @@
 //! `Routes::layer` wraps only the handlers that the group already holds. The
 //! route table of ADR 0007 §4 later replaces this list.
 //!
+//! A handler that needs a signed-in account takes [`session::AdminSession`],
+//! which answers `401 unauthorized` itself when the session does not hold
+//! (ADR 0006 §1), and never Loco's `JWT` or `JWTWithUser`, which skip those
+//! checks.
+//!
 //! A handler that takes a JSON body takes it as
 //! `Result<Json<T>, JsonRejection>` and answers a refused body with
 //! [`json_rejection_response`], so every admin endpoint refuses a body that
@@ -32,6 +37,7 @@ use crate::{
 };
 
 pub mod auth;
+pub mod session;
 
 /// Every route of the admin API, each answering with `Cache-Control:
 /// no-store`.
@@ -40,6 +46,7 @@ pub fn routes() -> Routes {
     Routes::new()
         .prefix(ADMIN_API_PREFIX)
         .add("/auth/login", post(auth::login))
+        .add("/auth/me", get(auth::me))
         // Last, so that it wraps every handler above. `overriding`: no
         // handler may make an admin response cacheable.
         .layer(SetResponseHeaderLayer::overriding(
@@ -205,6 +212,7 @@ mod tests {
             ErrorCode::InvalidCredentials,
             ErrorCode::InvalidBody,
             ErrorCode::BodyTooLarge,
+            ErrorCode::Unauthorized,
         ] {
             let response = error_response(code);
             assert_eq!(response.status().as_u16(), code.status(), "{code:?}");
