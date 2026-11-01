@@ -34,3 +34,11 @@ expected outputs with a table gained those attributes. `canonical-shapes`
 became every editor.md §3.7 shape with its styles: the shapes it held got
 their `style` values back, and the shapes it lacked (the styled `span` and
 `ul`, the blockquote, and the YouTube and Padlet embeds) were added.
+
+The canonical style writer and the structural pass's two style rules did so
+too (editor.md §3.1, §7.5). Every `img` that had no `style` now carries its
+four locked declarations, so `image-src-rejected` and `upper-case-markup`
+gained them:
+`style="display: block; height: auto; margin: 0 auto; max-width: 100%"`.
+Nothing else changed: every style in the other outputs was already sorted
+and written in full.

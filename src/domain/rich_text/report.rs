@@ -23,8 +23,12 @@
 //! while it runs ([`RemovalRule::IframeContentRemoved`],
 //! [`RemovalRule::ImageWithoutSrcRemoved`],
 //! [`RemovalRule::NestedSubSupUnwrapped`],
-//! [`RemovalRule::NestedLinkUnwrapped`]), and the fixed-point loop merges the
-//! reports of every pass into one.
+//! [`RemovalRule::NestedLinkUnwrapped`],
+//! [`RemovalRule::NestedFontSizeRemoved`]), and the fixed-point loop merges
+//! the reports of every pass into one. Adding missing locked declarations is
+//! not a removal and is not recorded: neither the forced `table` and `tbody`
+//! styles that ammonia appends nor the image style that the structural pass
+//! gives an `img` without one.
 
 use std::collections::BTreeMap;
 
@@ -66,6 +70,11 @@ pub enum RemovalRule {
     /// A `style` attribute was kept, but some of its declarations were
     /// removed.
     StyleDeclarationRejected,
+    /// A `style` attribute was dropped because the string the grammar wrote
+    /// broke the alphabet guard of editor.md §3.1 rule 6. The grammar never
+    /// writes such a string, so this is a bug, which the write path logs as
+    /// an error.
+    StyleOutsideAlphabet,
     /// An image's `src` was removed (editor.md §3.6).
     ImageSrcRejected,
     /// An embed's `src` was removed (editor.md §3.6).
@@ -82,6 +91,10 @@ pub enum RemovalRule {
     /// A `sub` or `sup` inside another `sub` or `sup` was unwrapped (the
     /// structural pass, editor.md §7.5).
     NestedSubSupUnwrapped,
+    /// The `font-size` of a `span` inside another `span` with a `font-size`
+    /// was removed, so that sizes cannot compound (the structural pass,
+    /// editor.md §7.5).
+    NestedFontSizeRemoved,
     /// An `a` inside another `a`, with no table cell between them, was
     /// unwrapped: its content stays in the outer link (the structural pass,
     /// editor.md §7.5, ADR 0037).
@@ -102,12 +115,14 @@ impl RemovalRule {
             Self::ValueCanonicalised => "value_canonicalised",
             Self::StyleRejected => "style_rejected",
             Self::StyleDeclarationRejected => "style_declaration_rejected",
+            Self::StyleOutsideAlphabet => "style_outside_alphabet",
             Self::ImageSrcRejected => "image_src_rejected",
             Self::EmbedSrcRejected => "embed_src_rejected",
             Self::LinkHrefRejected => "link_href_rejected",
             Self::IframeContentRemoved => "iframe_content_removed",
             Self::ImageWithoutSrcRemoved => "image_without_src_removed",
             Self::NestedSubSupUnwrapped => "nested_sub_sup_unwrapped",
+            Self::NestedFontSizeRemoved => "nested_font_size_removed",
             Self::NestedLinkUnwrapped => "nested_link_unwrapped",
         }
     }
@@ -395,12 +410,14 @@ mod tests {
             (ValueCanonicalised, "value_canonicalised"),
             (StyleRejected, "style_rejected"),
             (StyleDeclarationRejected, "style_declaration_rejected"),
+            (StyleOutsideAlphabet, "style_outside_alphabet"),
             (ImageSrcRejected, "image_src_rejected"),
             (EmbedSrcRejected, "embed_src_rejected"),
             (LinkHrefRejected, "link_href_rejected"),
             (IframeContentRemoved, "iframe_content_removed"),
             (ImageWithoutSrcRemoved, "image_without_src_removed"),
             (NestedSubSupUnwrapped, "nested_sub_sup_unwrapped"),
+            (NestedFontSizeRemoved, "nested_font_size_removed"),
             (NestedLinkUnwrapped, "nested_link_unwrapped"),
         ];
         for (rule, name) in names {
@@ -574,6 +591,7 @@ mod tests {
         // The forced table and tbody styles are classified by the grammar too:
         // a rejected declaration there is a removal, another spelling of the
         // forced value a re-spelling, and the forced value itself nothing.
+        // A sized cell gains its `box-sizing`, which is a re-spelling too.
         let report = report(
             r#"<p style="color: red">a</p><span style="color: red; font-family: x">b</span><span style="COLOR: red">c</span>
                <span style="color: #ff0000">d</span><ul style="list-style-type: disc"><li>e</li></ul>
@@ -597,6 +615,10 @@ mod tests {
                 ),
                 (
                     entry(RemovalRule::ValueCanonicalised, "table", Some("style")),
+                    1
+                ),
+                (
+                    entry(RemovalRule::ValueCanonicalised, "td", Some("style")),
                     1
                 ),
                 (entry(RemovalRule::StyleRejected, "p", Some("style")), 1),

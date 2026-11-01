@@ -72,7 +72,8 @@ const URLS: &[&str] = &[
     "tel:+3612345678", "#top", "",
 ];
 
-/// The CSS pool of §13.6.
+/// The CSS pool of §13.6, and inputs that reach the canonical writer's
+/// rules (editor.md §3.1) and the nested-size rule of §7.5.
 #[rustfmt::skip]
 const STYLES: &[&str] = &[
     "background: url(https://evil.example/x)", "background-image: URL(\"x\")", "u\\rl(x)",
@@ -82,6 +83,9 @@ const STYLES: &[&str] = &[
     "width: 15.0pt", "width: 100%px", "color: windowtext", "color: rgb(1, 2, 3)",
     "color: hsl(1, 2%, 3%)", "color: whitesmoke", "font-family: Árvíztűrő", "color: re\0d",
     "text-align: center", "border-collapse: collapse; max-width: fit-content",
+    // The canonical writer: shorthands, sizes that nest, and `box-sizing`.
+    "border: thin solid; border-top: none; width: 96pt", "border-width: 1px 2px; border-style: solid",
+    "background: yellow; font-size: 2em", "font-size: 3em", "box-sizing: content-box",
 ];
 
 /// Other attribute values: the forced and enumerated values, their case

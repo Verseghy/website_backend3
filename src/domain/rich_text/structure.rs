@@ -32,12 +32,22 @@
 //!   forced attributes left (§7.4), so two sanitiser instances write the
 //!   same bytes.
 //!
-//! Two rules of editor.md §7.5 are style rules and are not here yet: the
-//! one that drops `font-size` from a `span` inside a sized `span`, and the
-//! one that gives an `img` without a `style` its locked declarations. Until
-//! they are, a nested span keeps its `font-size`, and an `img` without a
-//! `style` keeps none: the CSS grammar ([`super::css`]) sees one `style` at
-//! a time, and ammonia calls it only for attributes that exist.
+//! Two more rules of editor.md §7.5 are style rules that the CSS grammar
+//! ([`super::css`]) cannot apply, because it sees one `style` at a time and
+//! ammonia calls it only for attributes that exist:
+//!
+//! - it drops the `font-size` of a `span` that has an ancestor `span` with
+//!   a `font-size`, so the per-element `em` bound of 0.5 to 3 cannot
+//!   compound (ten nested `3em` spans would be about 59,049 em); the
+//!   grammar has already written the span's `style` canonically, so
+//!   removing one declaration keeps it canonical, and a `style` left empty
+//!   is removed (ADR 0013 §5 lists this rule);
+//! - it gives an `img` without a `style` what the grammar writes for an
+//!   empty one, the four always-present locked declarations of editor.md
+//!   §3.3, and nothing else. That is the output the grammar already gives an
+//!   `img` with an empty `style`, so the rule decides nothing new (editor.md
+//!   §7.5 says why it needs no amending ADR), and as nothing is removed it
+//!   records nothing.
 //!
 //! It also asserts the invariants the public sites' sink chain relies on: no
 //! `table` inside a `p`, and every element and attribute is in content-v1,
@@ -115,6 +125,12 @@
 //!    `sup` for the walk to unwrap.
 //! 3. The third application therefore returns its input.
 //!
+//! The two style rules change only attribute values, which no rule of the
+//! tree builder reads, so they do not change the argument: each application
+//! applies them to the tree it parsed, the second application leaves no
+//! nested size and no image without a `style`, and the third parses the
+//! same tree and finds nothing to change.
+//!
 //! This is a sketch over the rules that content-v1's elements reach, not a
 //! proof over every rule of the tree builder. The proptests check it over
 //! tag soup and over nesting deeper than the adoption agency's eight rounds,
@@ -125,10 +141,11 @@
 use std::io;
 
 use html5ever::serialize::{HtmlSerializer, SerializeOpts, Serializer};
-use html5ever::{QualName, ns};
+use html5ever::{QualName, local_name, ns};
 use scraper::{Html, Node};
 
-use super::policy::element_rule;
+use super::css::{self, canonical};
+use super::policy::{ElementRule, element_rule};
 use super::report::{RemovalReport, RemovalRule, parse_like_ammonia};
 
 /// An invariant of editor.md §7.5 that the input of the structural pass
@@ -165,6 +182,8 @@ pub enum Violation {
 /// An element that a rule of the walk looks for among the ancestors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Counted {
+    /// A `span` that keeps a `font-size`: one inside another loses it.
+    SizedSpan,
     /// A `p`: no `table` may be inside one.
     Paragraph,
     /// A `sub` or `sup`: one inside another is unwrapped.
@@ -199,6 +218,7 @@ impl Counted {
 #[derive(Debug)]
 struct Open {
     paragraphs: usize,
+    sized_spans: usize,
     scripts: usize,
     /// The open links outside every cell, then one count per open cell.
     /// Never empty.
@@ -209,6 +229,7 @@ impl Default for Open {
     fn default() -> Self {
         Self {
             paragraphs: 0,
+            sized_spans: 0,
             scripts: 0,
             links: vec![0],
         }
@@ -220,6 +241,7 @@ impl Open {
     fn enter(&mut self, kind: Counted) {
         match kind {
             Counted::Paragraph => self.paragraphs += 1,
+            Counted::SizedSpan => self.sized_spans += 1,
             Counted::Script => self.scripts += 1,
             Counted::Link => *self.innermost_links() += 1,
             Counted::Cell => self.links.push(0),
@@ -230,6 +252,7 @@ impl Open {
     fn leave(&mut self, kind: Counted) {
         match kind {
             Counted::Paragraph => self.paragraphs -= 1,
+            Counted::SizedSpan => self.sized_spans -= 1,
             Counted::Script => self.scripts -= 1,
             Counted::Link => *self.innermost_links() -= 1,
             Counted::Cell => {
@@ -244,6 +267,7 @@ impl Open {
     fn inside(&self, kind: Counted) -> bool {
         match kind {
             Counted::Paragraph => self.paragraphs > 0,
+            Counted::SizedSpan => self.sized_spans > 0,
             Counted::Script => self.scripts > 0,
             Counted::Link => self.links.last().is_some_and(|&links| links > 0),
             Counted::Cell => self.links.len() > 1,
@@ -286,8 +310,9 @@ enum Step<N> {
 /// - `report`: the report of the current sanitiser run; the pass adds its
 ///   [`RemovalRule::IframeContentRemoved`],
 ///   [`RemovalRule::ImageWithoutSrcRemoved`],
-///   [`RemovalRule::NestedSubSupUnwrapped`] and
-///   [`RemovalRule::NestedLinkUnwrapped`] entries.
+///   [`RemovalRule::NestedSubSupUnwrapped`],
+///   [`RemovalRule::NestedLinkUnwrapped`] and
+///   [`RemovalRule::NestedFontSizeRemoved`] entries.
 ///
 /// Its output may still change once more when it is applied to it; the
 /// output of that second application is a fixed point (see "How the output
@@ -314,6 +339,9 @@ fn walk(parsed: &Html, capacity: usize, report: &mut RemovalReport) -> Result<St
         .map(Step::Enter)
         .collect();
     let mut open = Open::default();
+    // What the grammar writes for an image with an empty `style`.
+    let image_style = css::sanitize_style("img", "").css;
+    let style_name = QualName::new(None, ns!(), local_name!("style"));
     while let Some(step) = stack.pop() {
         let node = match step {
             Step::Exit { name, counted } => {
@@ -348,18 +376,8 @@ fn walk(parsed: &Html, capacity: usize, report: &mut RemovalReport) -> Result<St
             .ok_or_else(|| Violation::ElementOutsidePolicy {
                 element: tag.to_owned(),
             })?;
-        for (name, _) in &element.attrs {
-            if name.ns != ns!() || rule.attribute(&name.local).is_none() {
-                return Err(Violation::AttributeOutsidePolicy {
-                    element: tag.to_owned(),
-                    attribute: match &name.prefix {
-                        Some(prefix) => format!("{prefix}:{}", name.local),
-                        None => name.local.to_string(),
-                    },
-                });
-            }
-        }
-        let counted = Counted::of(tag);
+        check_attributes(tag, element, rule)?;
+        let mut counted = Counted::of(tag);
         if let Some(rule) = counted.and_then(|kind| open.unwraps(kind)) {
             // The children take the element's place; they stay inside the
             // outer element of the same kind, so the counter is unchanged.
@@ -377,15 +395,17 @@ fn walk(parsed: &Html, capacity: usize, report: &mut RemovalReport) -> Result<St
             }
             _ => {}
         }
-        // The attributes in the order of the element's rule: every one of
-        // them is in it, as checked above.
-        let attributes = rule.attributes.iter().filter_map(|allowed| {
-            element
-                .attrs
-                .iter()
-                .find(|(name, _)| &*name.local == allowed.name)
-                .map(|(name, value)| (name, &**value))
-        });
+        let (restyled, sized) = restyle(
+            tag,
+            element.attr("style"),
+            &open,
+            image_style.as_deref(),
+            report,
+        );
+        if sized {
+            counted = Some(Counted::SizedSpan);
+        }
+        let attributes = ordered_attributes(rule, element, &restyled, &style_name);
         written(serializer.start_elem(element.name.clone(), attributes));
         if tag == "iframe" {
             if node.has_children() {
@@ -406,6 +426,116 @@ fn walk(parsed: &Html, capacity: usize, report: &mut RemovalReport) -> Result<St
     drop(serializer);
     // The serializer writes only `&str` data and ASCII markup.
     Ok(String::from_utf8(out).expect("html5ever's serializer writes UTF-8"))
+}
+
+/// Checks that every attribute of `element` is one that its content-v1
+/// `rule` lists, in no namespace.
+///
+/// - `tag`: the element's tag name, for the error.
+/// - `element`: the element.
+/// - `rule`: the element's rule in the policy.
+fn check_attributes(
+    tag: &str,
+    element: &scraper::node::Element,
+    rule: &ElementRule,
+) -> Result<(), Violation> {
+    for (name, _) in &element.attrs {
+        if name.ns != ns!() || rule.attribute(&name.local).is_none() {
+            return Err(Violation::AttributeOutsidePolicy {
+                element: tag.to_owned(),
+                attribute: match &name.prefix {
+                    Some(prefix) => format!("{prefix}:{}", name.local),
+                    None => name.local.to_string(),
+                },
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The attributes of `element` in the order of its `rule` (editor.md
+/// §3.2), with the `style` that the style rules decided.
+///
+/// - `rule`: the element's rule; [`check_attributes`] has checked that it
+///   lists every attribute the element has.
+/// - `element`: the element.
+/// - `restyled`: what to write as its `style`.
+/// - `style_name`: the name of a `style` attribute, for an element that
+///   had none.
+fn ordered_attributes<'a>(
+    rule: &'a ElementRule,
+    element: &'a scraper::node::Element,
+    restyled: &'a Restyled,
+    style_name: &'a QualName,
+) -> impl Iterator<Item = (&'a QualName, &'a str)> {
+    rule.attributes.iter().filter_map(move |allowed| {
+        if allowed.name == "style" {
+            match restyled {
+                Restyled::Written(value) => return Some((style_name, value.as_str())),
+                Restyled::Removed => return None,
+                Restyled::Kept => {}
+            }
+        }
+        element
+            .attrs
+            .iter()
+            .find(|(name, _)| &*name.local == allowed.name)
+            .map(|(name, value)| (name, &**value))
+    })
+}
+
+/// What the walk writes as an element's `style`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Restyled {
+    /// The `style` as ammonia wrote it, or none if it had none.
+    Kept,
+    /// This value instead.
+    Written(String),
+    /// No `style`.
+    Removed,
+}
+
+/// The two style rules of editor.md §7.5 for one element that the walk
+/// keeps. The first value is what the walk writes as its `style`. The
+/// second is whether the element is a `span` that keeps a `font-size`,
+/// which every `span` inside it then loses.
+///
+/// - `tag`: the element's tag name.
+/// - `style`: its `style`, as ammonia wrote it.
+/// - `open`: the counted ancestors.
+/// - `image_style`: what the grammar writes for an `img` with an empty
+///   `style`.
+/// - `report`: where a dropped `font-size` is recorded.
+fn restyle(
+    tag: &str,
+    style: Option<&str>,
+    open: &Open,
+    image_style: Option<&str>,
+    report: &mut RemovalReport,
+) -> (Restyled, bool) {
+    match (tag, style) {
+        // ammonia calls the grammar only for a `style` that exists, so an
+        // image without one gets what the grammar writes for an empty one:
+        // its always-present locked declarations. Adding them removes
+        // nothing, so the report records nothing, as for the forced table
+        // styles.
+        ("img", None) => (
+            image_style.map_or(Restyled::Removed, |css| Restyled::Written(css.to_owned())),
+            false,
+        ),
+        // The grammar has already written the span's style in its canonical
+        // form, so dropping one declaration keeps it canonical.
+        ("span", Some(style)) if canonical::declares(style, "font-size") => {
+            if open.inside(Counted::SizedSpan) {
+                report.record(RemovalRule::NestedFontSizeRemoved, tag, None);
+                let kept = canonical::without(style, "font-size");
+                (kept.map_or(Restyled::Removed, Restyled::Written), false)
+            } else {
+                (Restyled::Kept, true)
+            }
+        }
+        _ => (Restyled::Kept, false),
+    }
 }
 
 /// The result of one serializer call. The serializer writes into a
@@ -437,6 +567,9 @@ mod tests {
     }
 
     const IFRAME_TAIL: &str = r#"allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin""#;
+    /// The `style` of an `img` that had none (editor.md §7.5).
+    const IMAGE_STYLE: &str =
+        r#"style="display: block; height: auto; margin: 0 auto; max-width: 100%""#;
 
     #[test]
     fn iframe_children_are_removed() {
@@ -465,19 +598,18 @@ mod tests {
 
     #[test]
     fn an_image_without_src_is_removed() {
-        let (output, report) = run(
-            r#"<p>a<img alt="x" width="10">b</p><p><img src="/storage/uploads/a.jpg" alt="y"></p>"#,
-        );
-        assert_eq!(
-            output,
-            r#"<p>ab</p><p><img src="/storage/uploads/a.jpg" alt="y"></p>"#
-        );
+        let kept = format!(r#"<p><img src="/storage/uploads/a.jpg" alt="y" {IMAGE_STYLE}></p>"#);
+        let (output, report) = run(&format!(r#"<p>a<img alt="x" width="10">b</p>{kept}"#));
+        assert_eq!(output, format!("<p>ab</p>{kept}"));
         assert_eq!(
             counts(&report),
             [(RemovalRule::ImageWithoutSrcRemoved, "img".into(), 1)]
         );
         // An empty `src` is a `src`; the URL rule, not this pass, decides it.
-        assert_eq!(rewritten(r#"<img src="">"#), r#"<img src="">"#);
+        assert_eq!(
+            rewritten(&format!(r#"<img src="" {IMAGE_STYLE}>"#)),
+            format!(r#"<img src="" {IMAGE_STYLE}>"#)
+        );
     }
 
     #[test]
@@ -506,6 +638,91 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn a_span_inside_a_sized_span_loses_its_font_size() {
+        let cases = [
+            // The inner size goes; its other declarations stay.
+            (
+                r#"<span style="font-size: 2em"><span style="color: #c00000; font-size: 3em">x</span></span>"#,
+                r#"<span style="font-size: 2em"><span style="color: #c00000">x</span></span>"#,
+                1,
+            ),
+            // A style left empty is removed: never `style=""`.
+            (
+                r#"<span style="font-size: 2em">a<span style="font-size: 3em">b</span></span>"#,
+                r#"<span style="font-size: 2em">a<span>b</span></span>"#,
+                1,
+            ),
+            // Any sized ancestor counts, across other elements and spans
+            // without a size, and every level below it loses its size.
+            (
+                r#"<span style="font-size: 3em"><strong><span style="color: #000000"><span style="font-size: 3em"><em><span style="background-color: #ffff00; font-size: 0.5em">x</span></em></span></span></strong></span>"#,
+                r#"<span style="font-size: 3em"><strong><span style="color: #000000"><span><em><span style="background-color: #ffff00">x</span></em></span></span></strong></span>"#,
+                2,
+            ),
+            // Inside a cell too: the size is inherited there as well.
+            (
+                r#"<span style="font-size: 2em"><table><tbody><tr><td><span style="font-size: 2em">x</span></td></tr></tbody></table></span>"#,
+                r#"<span style="font-size: 2em"><table><tbody><tr><td><span>x</span></td></tr></tbody></table></span>"#,
+                1,
+            ),
+            // Siblings and spans without a sized ancestor keep their size.
+            (
+                r#"<p><span style="font-size: 2em">a</span><span style="font-size: 3em">b</span></p><span style="color: #c00000"><span style="font-size: 0.5em">c</span></span>"#,
+                r#"<p><span style="font-size: 2em">a</span><span style="font-size: 3em">b</span></p><span style="color: #c00000"><span style="font-size: 0.5em">c</span></span>"#,
+                0,
+            ),
+            // Only an ancestor `span` counts: no other element has a
+            // `font-size` in content-v1.
+            (
+                r#"<p style="text-align: center"><span style="font-size: 2em">x</span></p>"#,
+                r#"<p style="text-align: center"><span style="font-size: 2em">x</span></p>"#,
+                0,
+            ),
+        ];
+        for (input, expected, removed) in cases {
+            let (output, report) = run(input);
+            assert_eq!(output, expected, "{input}");
+            assert_eq!(
+                report.count(RemovalRule::NestedFontSizeRemoved),
+                removed,
+                "{input}"
+            );
+            assert_eq!(
+                report.per_rule().len(),
+                usize::from(removed > 0),
+                "{report:?}"
+            );
+            let (again, nothing) = run(&output);
+            assert_eq!(again, output, "a fixed point: {input}");
+            assert!(nothing.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_image_without_a_style_gets_its_locked_declarations() {
+        // The style is the one the grammar writes for an empty `style`, in
+        // its §3.2 place after `height`, and nothing is reported.
+        let (output, report) =
+            run(r#"<p><img height="2" src="/storage/uploads/a.jpg" alt="a"></p>"#);
+        assert_eq!(
+            output,
+            format!(
+                r#"<p><img src="/storage/uploads/a.jpg" alt="a" height="2" {IMAGE_STYLE}></p>"#
+            )
+        );
+        assert!(report.is_empty(), "{report:?}");
+        assert_eq!(
+            Some(IMAGE_STYLE["style=\"".len()..IMAGE_STYLE.len() - 1].to_owned()),
+            css::sanitize_style("img", "").css
+        );
+        // An image with a `style` keeps it as the grammar wrote it, and one
+        // without `src` is removed before the rule could apply.
+        let sized = r#"<img src="/storage/uploads/a.jpg" alt="a" style="display: block; height: auto; margin: 0 auto; max-width: 100%; width: 350px">"#;
+        assert_eq!(rewritten(sized), sized);
+        assert_eq!(rewritten(r#"<p><img alt="a"></p>"#), "<p></p>");
     }
 
     /// `n` applications of [`restructure`] to `html`: the input first, then
@@ -707,8 +924,12 @@ mod tests {
                 ),
             ),
             (
-                r#"<img height="2" alt="a" src="/storage/uploads/a.jpg" width="1">"#,
-                r#"<img src="/storage/uploads/a.jpg" alt="a" width="1" height="2">"#,
+                &format!(
+                    r#"<img {IMAGE_STYLE} height="2" alt="a" src="/storage/uploads/a.jpg" width="1">"#
+                ),
+                &format!(
+                    r#"<img src="/storage/uploads/a.jpg" alt="a" width="1" height="2" {IMAGE_STYLE}>"#
+                ),
             ),
             (
                 r#"<ol type="a" start="5"><li>x</li></ol>"#,
@@ -778,8 +999,12 @@ mod tests {
             "<p>a &amp; b &lt; c &gt; d&nbsp;e \"f\" 'g'</p>"
         );
         assert_eq!(
-            rewritten(r#"<img src="/storage/uploads/a.jpg" alt="&quot;x&quot; &amp; <y>">"#),
-            r#"<img src="/storage/uploads/a.jpg" alt="&quot;x&quot; &amp; &lt;y&gt;">"#
+            rewritten(&format!(
+                r#"<img src="/storage/uploads/a.jpg" alt="&quot;x&quot; &amp; <y>" {IMAGE_STYLE}>"#
+            )),
+            format!(
+                r#"<img src="/storage/uploads/a.jpg" alt="&quot;x&quot; &amp; &lt;y&gt;" {IMAGE_STYLE}>"#
+            )
         );
         assert_eq!(rewritten("a<br>b<hr>"), "a<br>b<hr>");
         assert_eq!(rewritten(""), "");
@@ -864,6 +1089,8 @@ mod tests {
         fn the_output_keeps_the_invariants_and_settles(parts in prop::collection::vec(prop::sample::select(&[
             "<p>", "</p>", "<sub>", "</sub>", "<sup>", "</sup>", "<em>", "</em>", "x", "&amp;",
             "<img alt=\"a\">", "<img alt=\"a\" src=\"/storage/uploads/a.jpg\" width=\"1\">",
+            "<img src=\"/storage/uploads/b.jpg\" alt=\"b\" style=\"display: block; height: auto; margin: 0 auto; max-width: 100%; width: 9px\">",
+            "<span style=\"font-size: 2em\">", "<span style=\"color: #c00000; font-size: 0.5em\">", "<span>", "</span>",
             "<iframe height=\"1\" src=\"https://padlet.com/embed/k\">", "</iframe>",
             "<a rel=\"noopener noreferrer\" href=\"/x\">", "</a>", "<table>", "<tr>", "<td rowspan=\"2\" colspan=\"2\">", "</td>", "<th>", "</th>", "</table>",
             "<ol type=\"a\" start=\"2\">", "<li>", "</ol>", "<br>", "<h2>", "</h2>",
@@ -940,6 +1167,24 @@ mod tests {
             }
             if tag == "img" {
                 prop_assert!(element.attr("src").is_some(), "{}", output);
+                // Every image carries its locked declarations, in the
+                // grammar's canonical string.
+                let style = element.attr("style");
+                prop_assert!(style.is_some(), "{}", output);
+                let style = style.unwrap_or_default();
+                let canonical = css::sanitize_style("img", style).css;
+                prop_assert_eq!(canonical.as_deref(), Some(style), "{}", output);
+            }
+            // The `em` factors along a path multiply, so at most one span on
+            // it keeps a size (editor.md §13.6, P0).
+            if tag == "span"
+                && element
+                    .attr("style")
+                    .is_some_and(|style| canonical::declares(style, "font-size"))
+            {
+                let nested = node.ancestors().any(|a| matches!(a.value(), Node::Element(e)
+                    if e.name() == "span" && e.attr("style").is_some_and(|style| canonical::declares(style, "font-size"))));
+                prop_assert!(!nested, "{}", output);
             }
             if matches!(tag, "sub" | "sup") {
                 let nested = node.ancestors().any(

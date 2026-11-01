@@ -1,5 +1,6 @@
-//! The sanitiser's own CSS grammar for `style` attributes (ADR 0013 §5,
-//! editor.md §3.3, §3.4 and §7.3).
+//! The sanitiser's own CSS grammar for `style` attributes, and the
+//! canonical style string it writes (ADR 0013 §5, editor.md §3.1, §3.3,
+//! §3.4 and §7.3).
 //!
 //! Inline styles reach readers untouched on both public sites, so this
 //! grammar, not the sites' sanitisers, decides what readers see (editor.md
@@ -8,7 +9,7 @@
 //! for every element and keeps `https:` `url()` values. `style` goes through
 //! ammonia's attribute filter instead, which calls [`sanitize_style`].
 //!
-//! The work is split in three:
+//! The work is split in four:
 //!
 //! - [`declarations`] reads the attribute into declarations with the
 //!   cssparser tokenizer and refuses every token no grammar can use
@@ -17,54 +18,64 @@
 //! - [`grammar`] holds the per-element table of editor.md §3.3 as data and
 //!   reads each value into a typed [`grammar::Value`];
 //! - [`values`] reads and writes the value types: lengths in px, sizes in
-//!   em, percentages and colours, each in one spelling.
+//!   em, percentages and colours, each in one spelling;
+//! - [`canonical`] resolves the accepted declarations with CSS's cascade
+//!   and writes the canonical style string of editor.md §3.1: shorthands
+//!   expanded into the four cell sides and `background-color`, every side a
+//!   full triple or `none`, the locked declarations added, `box-sizing`
+//!   exactly when a cell has a size, sorted by property, and checked
+//!   against the alphabet of rule 6.
 //!
-//! [`sanitize_style`] puts them together: it keeps the declarations the
-//! element allows, lets the last valid occurrence of a property win, adds
-//! the locked declarations that are always present, and writes `prop: value`
-//! pairs joined with `; `.
+//! [`sanitize_style`] puts them together. The admin's `canonicalStyle`
+//! (TypeScript) is the same rules written twice; [`vectors`] generates
+//! `css-vectors.jsonl`, the cases both must agree on (editor.md §3.9,
+//! §13.6).
 //!
 //! ammonia calls the filter only for attributes that exist. The wholly
 //! locked styles of `table` and `tbody` are therefore forced attributes in
 //! the policy ([`super::policy::TABLE_STYLE`]), which ammonia adds when they
 //! are missing. An `img` without a `style` attribute never reaches this
-//! module and keeps no style. Its locked declarations are added by a rule of
-//! the structural pass ([`super::structure`]), which sees whole elements
-//! (editor.md §7.5, "Give an `img` without a `style` its locked
-//! declarations"). The pass does not have that rule yet; the sanitiser test
-//! `an_image_without_a_style_keeps_none_until_its_structural_rule` pins the
-//! gap until it does. The other tree-level style rule of §7.5, which drops
-//! `font-size` from a `span` inside a sized `span`, is not there yet either.
-//!
-//! The canonical style string of editor.md §3.1 is completed by the writer
-//! that follows this grammar: it expands the input-only shorthands into the
-//! four cell sides and `background-color`, writes every side as its full
-//! triple, sorts the declarations, adds or removes the cell `box-sizing`,
-//! and runs the alphabet guard. Until then the declarations are written in
-//! source order, because sorting before the shorthands are expanded could
-//! change which declaration wins the cascade.
+//! module; the structural pass ([`super::structure`]) gives it the style
+//! this module writes for an empty one, its locked declarations (editor.md
+//! §7.5, "Give an `img` without a `style` its locked declarations"). The
+//! structural pass also drops the `font-size` of a `span` inside a sized
+//! `span`, which needs the ancestors that this module never sees; it uses
+//! [`canonical::declares`] and [`canonical::without`] on the strings
+//! written here.
 
+pub mod canonical;
 pub mod declarations;
 pub mod grammar;
 pub mod values;
+pub mod vectors;
 
-use grammar::{Grammar, Presence, Reading, Value};
+use canonical::Cascade;
+use grammar::Reading;
 
 /// The result of filtering one `style` attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Style {
-    /// The declarations to store, or `None` when none is left and the
-    /// attribute is removed (content-v1 never stores `style=""`).
+    /// The canonical style string to store, or `None` when nothing is left
+    /// and the attribute is removed (content-v1 never stores `style=""`).
     pub css: Option<String>,
     /// How many declarations were removed: unreadable, not allowed on the
     /// element, outside their grammar, or after the first
     /// [`declarations::MAX_DECLARATIONS`]. A default that is left out
-    /// (`list-style-type: disc`) and an occurrence that a later one replaces
-    /// are not counted.
+    /// (`list-style-type: disc`), a cell `box-sizing` without a `width` or a
+    /// `height`, and an occurrence that a later one replaces are not
+    /// counted, and neither is a shorthand, which is expanded rather than
+    /// removed.
     pub rejected: usize,
+    /// Whether the written string broke the alphabet guard of editor.md
+    /// §3.1 rule 6 and was dropped. The grammar never writes such a string,
+    /// so this is a bug: the removal report records it as
+    /// [`super::report::RemovalRule::StyleOutsideAlphabet`], and the write
+    /// path logs it as an error.
+    pub outside_alphabet: bool,
 }
 
-/// Filters the `style` attribute of one element.
+/// Filters the `style` attribute of one element into its canonical style
+/// string.
 ///
 /// - `element`: the tag name, as the HTML parser reports it. An element
 ///   without a grammar keeps no declaration.
@@ -77,9 +88,10 @@ pub fn sanitize_style(element: &str, style: &str) -> Style {
         return Style {
             css: None,
             rejected: rejected + read.read.len(),
+            outside_alphabet: false,
         };
     };
-    let mut kept: Vec<(&'static str, Value)> = Vec::new();
+    let mut cascade = Cascade::default();
     for declaration in &read.read {
         let Some(rule) = rules.property(&declaration.name) else {
             rejected += 1;
@@ -89,31 +101,31 @@ pub fn sanitize_style(element: &str, style: &str) -> Style {
             // As in a browser, a declaration that is not valid leaves an
             // earlier valid one of the same property in force.
             Reading::Rejected => rejected += 1,
-            reading => {
-                // The last occurrence wins and keeps its own position, so the
-                // order of shorthands and longhands, and with it the cascade,
-                // stays as written.
-                kept.retain(|(name, _)| *name != rule.name);
-                if let Reading::Accepted(value) = reading {
-                    kept.push((rule.name, value));
-                }
-            }
+            Reading::Default => cascade.unset(rule.name),
+            Reading::Accepted(value) => cascade.set(rule.name, value),
         }
     }
-    for rule in rules.properties {
-        if let (Presence::Always, Grammar::Locked(value)) = (rule.presence, rule.grammar)
-            && !kept.iter().any(|(name, _)| *name == rule.name)
-        {
-            kept.push((rule.name, Value::Locked(value)));
-        }
+    guarded(cascade.write(rules), rejected)
+}
+
+/// Applies the alphabet guard of editor.md §3.1 rule 6 to a written style:
+/// a string outside the alphabet is dropped and flagged.
+///
+/// - `css`: the written style string, or `None`.
+/// - `rejected`: the number of declarations already removed.
+fn guarded(css: Option<String>, rejected: usize) -> Style {
+    match css {
+        Some(css) if !canonical::in_alphabet(&css) => Style {
+            css: None,
+            rejected,
+            outside_alphabet: true,
+        },
+        css => Style {
+            css,
+            rejected,
+            outside_alphabet: false,
+        },
     }
-    let css = (!kept.is_empty()).then(|| {
-        kept.iter()
-            .map(|(name, value)| format!("{name}: {value}"))
-            .collect::<Vec<_>>()
-            .join("; ")
-    });
-    Style { css, rejected }
 }
 
 #[cfg(test)]
@@ -122,11 +134,23 @@ mod tests {
     use crate::domain::rich_text::policy::{
         AttributeRule, ELEMENTS, TABLE_STYLE, TBODY_STYLE, ValueRule,
     };
+    use grammar::{Grammar, Presence, Role};
     use proptest::prelude::*;
 
     fn css(element: &str, style: &str) -> Option<String> {
         sanitize_style(element, style).css
     }
+
+    /// The result of a style that passed the guard.
+    fn kept(css: Option<&str>, rejected: usize) -> Style {
+        Style {
+            css: css.map(str::to_owned),
+            rejected,
+            outside_alphabet: false,
+        }
+    }
+
+    const IMAGE: &str = "display: block; height: auto; margin: 0 auto; max-width: 100%";
 
     /// The canonical shapes of editor.md §3.7 are kept byte for byte.
     #[test]
@@ -155,10 +179,7 @@ mod tests {
         ] {
             assert_eq!(
                 sanitize_style(element, style),
-                Style {
-                    css: Some(style.to_owned()),
-                    rejected: 0
-                },
+                kept(Some(style), 0),
                 "{element}"
             );
         }
@@ -247,10 +268,7 @@ mod tests {
             // always-present locked declarations, if it has any.
             assert_eq!(
                 sanitize_style(element, declaration),
-                Style {
-                    css: css(element, ""),
-                    rejected: 1
-                },
+                kept(css(element, "").as_deref(), 1),
                 "{element} {{ {declaration} }}"
             );
         }
@@ -258,28 +276,27 @@ mod tests {
 
     #[test]
     fn allowed_declarations_survive_beside_rejected_ones() {
-        let style = sanitize_style(
-            "span",
-            "font-family: Calibri; COLOR: Red !important; mso-ansi-language: HU; font-size: 1.5EM",
+        assert_eq!(
+            sanitize_style(
+                "span",
+                "font-family: Calibri; COLOR: Red !important; mso-ansi-language: HU; font-size: 1.5EM",
+            ),
+            kept(Some("color: #ff0000; font-size: 1.5em"), 2)
         );
         assert_eq!(
-            style,
-            Style {
-                css: Some("color: #ff0000; font-size: 1.5em".into()),
-                rejected: 2
-            }
-        );
-        assert_eq!(
-            css(
+            sanitize_style(
                 "td",
                 "width: 96pt; color: red; /* x */; vertical-align: bottom"
             ),
-            Some("width: 128px; vertical-align: bottom".into())
+            kept(
+                Some("box-sizing: content-box; vertical-align: bottom; width: 128px"),
+                2
+            )
         );
     }
 
     #[test]
-    fn the_last_valid_occurrence_wins_in_its_own_place() {
+    fn the_last_valid_occurrence_wins() {
         assert_eq!(
             css("span", "color: red; background-color: blue; color: green"),
             Some("background-color: #0000ff; color: #008000".into())
@@ -287,102 +304,110 @@ mod tests {
         // An invalid later occurrence leaves the earlier one in force.
         assert_eq!(
             sanitize_style("span", "color: red; color: hsl(0, 100%, 50%)"),
-            Style {
-                css: Some("color: #ff0000".into()),
-                rejected: 1
-            }
+            kept(Some("color: #ff0000"), 1)
         );
-        // Shorthands and sides keep their written order.
+        // Shorthands and sides are resolved in their written order before
+        // anything is sorted.
         assert_eq!(
             css(
                 "td",
                 "border-top: 1px solid; border: none; border-top: 2px dashed"
             ),
-            Some("border: none; border-top: 2px dashed".into())
+            Some(
+                "border-bottom: none; border-left: none; border-right: none; border-top: 2px dashed currentcolor"
+                    .into()
+            )
         );
         // A default that comes last removes the earlier value.
         assert_eq!(
             sanitize_style("ul", "list-style-type: circle; list-style-type: disc"),
-            Style {
-                css: None,
-                rejected: 0
-            }
+            kept(None, 0)
         );
     }
 
     #[test]
     fn locked_declarations_are_always_present() {
-        let image = "display: block; height: auto; margin: 0 auto; max-width: 100%";
-        assert_eq!(css("img", ""), Some(image.into()));
+        assert_eq!(css("img", ""), Some(IMAGE.into()));
         assert_eq!(
             css("img", "width: 350px"),
-            Some(format!("width: 350px; {image}"))
+            Some(format!("{IMAGE}; width: 350px"))
         );
         // A legacy fixed height becomes the locked `auto`.
         assert_eq!(
             sanitize_style("img", "height: 495px; width: 350px; float: left"),
-            Style {
-                css: Some(format!("width: 350px; {image}")),
-                rejected: 2
-            }
+            kept(Some(&format!("{IMAGE}; width: 350px")), 2)
         );
         assert_eq!(
             css("img", "MARGIN: 0PX AUTO; display: BLOCK"),
-            Some("margin: 0 auto; display: block; height: auto; max-width: 100%".into())
+            Some(IMAGE.into())
         );
         assert_eq!(css("table", "width: 100%"), Some(TABLE_STYLE.into()));
         assert_eq!(css("table", ""), Some(TABLE_STYLE.into()));
         assert_eq!(css("tbody", "display: table"), Some(TBODY_STYLE.into()));
         // Locked declarations that are not always present stay optional.
         assert_eq!(css("iframe", "height: 608px"), Some("height: 608px".into()));
-        assert_eq!(css("td", "width: 10px"), Some("width: 10px".into()));
+        assert_eq!(css("iframe", ""), None);
+    }
+
+    /// `box-sizing` is present exactly when `width` or `height` is
+    /// (editor.md §3.3); a dropped one is not a rejected declaration.
+    #[test]
+    fn the_cell_box_sizing_follows_its_size() {
+        for cell in ["td", "th"] {
+            assert_eq!(
+                sanitize_style(cell, "width: 10px"),
+                kept(Some("box-sizing: content-box; width: 10px"), 0)
+            );
+            assert_eq!(
+                sanitize_style(cell, "height: 10px; box-sizing: content-box"),
+                kept(Some("box-sizing: content-box; height: 10px"), 0)
+            );
+            assert_eq!(
+                sanitize_style(cell, "box-sizing: content-box"),
+                kept(None, 0)
+            );
+            assert_eq!(
+                sanitize_style(cell, "box-sizing: content-box; width: 0"),
+                kept(None, 1)
+            );
+            assert_eq!(
+                sanitize_style(cell, "box-sizing: border-box; height: 1px"),
+                kept(Some("box-sizing: content-box; height: 1px"), 1)
+            );
+        }
+    }
+
+    /// The shorthands are expanded, not counted as removed.
+    #[test]
+    fn shorthands_are_expanded() {
+        assert_eq!(
+            sanitize_style("td", "border: thin solid windowtext; background: silver"),
+            kept(
+                Some(
+                    "background-color: #c0c0c0; border-bottom: 1px solid #000000; border-left: 1px solid #000000; \
+                     border-right: 1px solid #000000; border-top: 1px solid #000000"
+                ),
+                0
+            )
+        );
+        assert_eq!(
+            sanitize_style("span", "BACKGROUND: Yellow"),
+            kept(Some("background-color: #ffff00"), 0)
+        );
     }
 
     #[test]
     fn nothing_left_means_no_attribute() {
-        assert_eq!(
-            sanitize_style("p", ""),
-            Style {
-                css: None,
-                rejected: 0
-            }
-        );
-        assert_eq!(
-            sanitize_style("p", " ; ;"),
-            Style {
-                css: None,
-                rejected: 0
-            }
-        );
-        assert_eq!(
-            sanitize_style("p", "color: red; x"),
-            Style {
-                css: None,
-                rejected: 2
-            }
-        );
-        assert_eq!(
-            sanitize_style("ul", "list-style-type: disc"),
-            Style {
-                css: None,
-                rejected: 0
-            }
-        );
+        assert_eq!(sanitize_style("p", ""), kept(None, 0));
+        assert_eq!(sanitize_style("p", " ; ;"), kept(None, 0));
+        assert_eq!(sanitize_style("p", "color: red; x"), kept(None, 2));
+        assert_eq!(sanitize_style("ul", "list-style-type: disc"), kept(None, 0));
         // Elements without a grammar keep nothing.
         assert_eq!(
             sanitize_style("li", "text-align: center; color: red"),
-            Style {
-                css: None,
-                rejected: 2
-            }
+            kept(None, 2)
         );
-        assert_eq!(
-            sanitize_style("div", "x"),
-            Style {
-                css: None,
-                rejected: 1
-            }
-        );
+        assert_eq!(sanitize_style("div", "x"), kept(None, 1));
     }
 
     #[test]
@@ -393,17 +418,28 @@ mod tests {
             .join("; ");
         assert_eq!(
             sanitize_style("p", &many),
-            Style {
-                css: Some("text-align: left".into()),
-                rejected: 8
-            }
+            kept(Some("text-align: left"), 8)
         );
     }
 
-    /// The characters editor.md §3.1 rule 6 allows in a stored style.
-    fn in_alphabet(css: &str) -> bool {
-        css.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b" #.%:;/-".contains(&b))
+    #[test]
+    fn the_alphabet_guard_drops_and_flags() {
+        assert_eq!(
+            guarded(Some("color: #ff0000".into()), 1),
+            kept(Some("color: #ff0000"), 1)
+        );
+        assert_eq!(guarded(None, 2), kept(None, 2));
+        for outside in ["color: RED", "width: 1px; x: url(y)", "a: b*c", "a: é"] {
+            assert_eq!(
+                guarded(Some(outside.into()), 3),
+                Style {
+                    css: None,
+                    rejected: 3,
+                    outside_alphabet: true
+                },
+                "{outside}"
+            );
+        }
     }
 
     const ELEMENT_POOL: &[&str] = &[
@@ -414,21 +450,24 @@ mod tests {
     const PROPERTY_POOL: &[&str] = &[
         "color", "COLOR", "background", "background-color", "font-size", "font-family", "text-align",
         "vertical-align", "white-space", "width", "height", "max-width", "box-sizing", "border",
-        "border-top", "border-left", "border-width", "border-style", "border-color", "display",
-        "margin", "aspect-ratio", "list-style-type", "border-collapse", "padding", "--x", "-webkit-x",
+        "border-top", "border-right", "border-bottom", "border-left", "border-width", "border-style",
+        "border-color", "display", "margin", "aspect-ratio", "list-style-type", "border-collapse",
+        "padding", "--x", "-webkit-x",
     ];
 
-    /// The CSS pool of editor.md §13.6 (P1), plus the spellings of the
-    /// accepted values.
+    /// The CSS pool of editor.md §13.6 (P1 and P1c), plus the spellings of
+    /// the accepted values.
     #[rustfmt::skip]
     const VALUE_POOL: &[&str] = &[
-        "red", "#C00000", "#c008", "windowtext", "transparent", "currentcolor", "rgb(1, 2, 3)",
-        "rgba(1, 2, 3, .5)", "hsl(0, 100%, 50%)", "1px", ".5pt", "15.0pt", "100%", "100%px", "1e30px",
-        "-1px", "0", "1.25em", "3em", "auto", "none", "solid", "thin", "medium", "center", "nowrap",
-        "block", "collapse", "fit-content", "table-row-group", "content-box", "circle", "disc", "16 / 9",
-        "0 auto", "url(x)", "url(\"https://evil.example/x\")", "u\\72l(x)", "expression(alert(1))",
-        "var(--x)", "calc(1px + 1px)", "attr(x)", "env(x)", "!important", "/* c */", "\"x\"", "'x'",
-        "(", ")", "[", "}", "@import", "é", "\u{0}",
+        "red", "whitesmoke", "#C00000", "#c008", "windowtext", "transparent", "currentcolor",
+        "rgb(1, 2, 3)", "rgba(1, 2, 3, .5)", "rgb(300, 0, 0)", "hsl(0, 100%, 50%)", "1px", ".5pt",
+        "15.0pt", "1.0cm", "0.75in", "100%", "100%px", "1e30px", "-1px", "-0.5em", "0", "1.25em",
+        "3em", "auto", "none", "hidden", "solid", "dashed", "double", "thin", "medium", "thick",
+        "center", "nowrap", "block", "collapse", "fit-content", "table-row-group", "content-box",
+        "circle", "disc", "16 / 9", "16/9", "0 auto", "url(x)", "URL(x)", "url( x )",
+        "url(\"https://evil.example/x\")", "u\\72l(x)", "expression(alert(1))", "var(--x)",
+        "calc(1px + 1px)", "attr(x)", "env(x)", "!important", "/* c */", "\"x\"", "'x'", "(", ")",
+        "[", "]", "{", "}", "@import", "é", "\u{0}",
     ];
 
     fn arb_style() -> impl Strategy<Value = String> {
@@ -449,18 +488,23 @@ mod tests {
     }
 
     proptest! {
+        // P1c (editor.md §13.6): `css(e, css(e, s)) == css(e, s)`, with
+        // nothing removed the second time.
         #[test]
-        fn filtering_twice_changes_nothing(element in prop::sample::select(ELEMENT_POOL), style in arb_style()) {
+        fn p1c_canonicalising_twice_changes_nothing(element in prop::sample::select(ELEMENT_POOL), style in arb_style()) {
             let once = sanitize_style(element, &style);
+            prop_assert!(!once.outside_alphabet);
             if let Some(css) = &once.css {
-                prop_assert_eq!(sanitize_style(element, css), Style { css: Some(css.clone()), rejected: 0 }, "{}", style);
+                prop_assert_eq!(sanitize_style(element, css), kept(Some(css), 0), "{}", style);
             }
         }
 
+        // P1c: the output stays in the alphabet of editor.md §3.1 rule 6,
+        // and is never empty or `;`-terminated.
         #[test]
-        fn the_output_stays_in_the_alphabet(element in prop::sample::select(ELEMENT_POOL), style in arb_style()) {
+        fn p1c_the_output_stays_in_the_alphabet(element in prop::sample::select(ELEMENT_POOL), style in arb_style()) {
             if let Some(css) = sanitize_style(element, &style).css {
-                prop_assert!(in_alphabet(&css), "{} -> {}", style, css);
+                prop_assert!(canonical::in_alphabet(&css), "{} -> {}", style, css);
                 prop_assert!(!css.is_empty() && !css.ends_with(';'));
             }
         }
@@ -468,23 +512,33 @@ mod tests {
         #[test]
         fn arbitrary_input_is_filtered_safely(element in prop::sample::select(ELEMENT_POOL), style in any::<String>()) {
             let once = sanitize_style(element, &style);
+            prop_assert!(!once.outside_alphabet);
             if let Some(css) = once.css {
-                prop_assert!(in_alphabet(&css), "{:?} -> {}", style, css);
+                prop_assert!(canonical::in_alphabet(&css), "{:?} -> {}", style, css);
                 prop_assert_eq!(sanitize_style(element, &css).css, Some(css.clone()));
             }
         }
 
+        // Every stored declaration is a stored property of the element,
+        // once, in sorted order; and when every declaration was removed,
+        // what is left is what the element has without any input.
         #[test]
         fn every_declaration_is_kept_or_counted(element in prop::sample::select(ELEMENT_POOL), style in arb_style()) {
             let read = declarations::read(&style);
             let total = read.read.len() + read.unreadable;
             let filtered = sanitize_style(element, &style);
-            let kept = filtered.css.as_deref().map_or(0, |css| css.split("; ").count());
             prop_assert!(filtered.rejected <= total);
-            // Each kept declaration came from the input or is a locked one
-            // that is always present.
-            let always = grammar::element_style(element).map_or(0, |rules| rules.properties.iter().filter(|p| p.presence == Presence::Always).count());
-            prop_assert!(kept <= total - filtered.rejected + always, "{} -> {:?}", style, filtered);
+            if filtered.rejected == total {
+                prop_assert_eq!(&filtered.css, &css(element, ""), "{}", style);
+            }
+            if let Some(css) = &filtered.css {
+                let rules = grammar::element_style(element).expect("only an element with a grammar keeps a style");
+                let names: Vec<&str> = css.split("; ").map(|d| d.split_once(": ").expect("prop: value").0).collect();
+                prop_assert!(names.is_sorted() && names.windows(2).all(|pair| pair[0] != pair[1]), "{}", css);
+                for name in names {
+                    prop_assert!(rules.property(name).is_some_and(|rule| rule.role == Role::Stored), "{}", css);
+                }
+            }
         }
     }
 }

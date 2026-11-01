@@ -85,18 +85,34 @@ pub fn decide<'a>(
 ///
 /// The rule is [`RemovalRule::StyleRejected`] when no declaration is left
 /// because some were removed, [`RemovalRule::DefaultValueOmitted`] when none
-/// is left because the attribute was empty or held only defaults,
-/// [`RemovalRule::StyleDeclarationRejected`] when some declarations were
-/// removed and others kept, and [`RemovalRule::ValueCanonicalised`] when
-/// every declaration was kept but the value was re-spelled. The report and
-/// the filter both call this, so they cannot disagree. A forced style never
-/// reaches it: see [`forced_style_rule`].
+/// is left because the attribute was empty or held only defaults (or a cell
+/// `box-sizing` without a size), [`RemovalRule::StyleDeclarationRejected`]
+/// when some declarations were removed and others kept, and
+/// [`RemovalRule::ValueCanonicalised`] when every declaration was kept but
+/// the value was re-spelled: re-sorted, a shorthand expanded, a value
+/// written in its one spelling. [`RemovalRule::StyleOutsideAlphabet`] marks
+/// a written string that the alphabet guard dropped, which is a bug. The
+/// report and the filter both call this, so they cannot disagree. A forced
+/// style never reaches it: see [`forced_style_rule`].
 ///
 /// - `element`: the tag name, as the HTML parser reports it.
 /// - `value`: the `style` value, after character references are decoded.
 #[must_use]
 pub fn decide_style<'a>(element: &str, value: &'a str) -> (Decision<'a>, Option<RemovalRule>) {
-    let style = css::sanitize_style(element, value);
+    style_decision(css::sanitize_style(element, value), value)
+}
+
+/// The decision and the report rule for one filtered `style`, as
+/// [`decide_style`] describes them. It is apart from the filtering so that
+/// the alphabet guard's case, which no input reaches, is tested too.
+///
+/// - `style`: what the CSS grammar made of the attribute.
+/// - `value`: the attribute value it was made from.
+fn style_decision(style: css::Style, value: &str) -> (Decision<'_>, Option<RemovalRule>) {
+    if style.outside_alphabet {
+        let rule = RemovalRule::StyleOutsideAlphabet;
+        return (Decision::Drop(rule), Some(rule));
+    }
     match style.css {
         None => {
             let rule = if style.rejected > 0 {
@@ -144,8 +160,9 @@ pub fn forced_style_rule(element: &str, value: &str, forced: &str) -> Option<Rem
     if css::sanitize_style(element, value).rejected > 0 {
         Some(RemovalRule::StyleDeclarationRejected)
     } else {
-        // Compared with the forced value, not with the grammar's output: the
-        // grammar keeps the source order, ammonia writes the one spelling.
+        // Compared with the forced value, which ammonia writes whatever the
+        // input held: an input that is not that value byte for byte (an
+        // empty style, another order, another case) was re-spelled.
         (value != forced).then_some(RemovalRule::ValueCanonicalised)
     }
 }
@@ -319,7 +336,14 @@ mod tests {
 
     #[test]
     fn styles_go_through_the_css_grammar() {
-        assert_eq!(run("td", "style", "width: 10px"), kept("width: 10px"));
+        assert_eq!(
+            run("td", "style", "box-sizing: content-box; width: 10px"),
+            kept("box-sizing: content-box; width: 10px")
+        );
+        assert_eq!(
+            run("td", "style", "width: 10px"),
+            Decision::Keep(Cow::Owned("box-sizing: content-box; width: 10px".into()))
+        );
         assert_eq!(
             run("span", "style", "COLOR: red"),
             Decision::Keep(Cow::Owned("color: #ff0000".into()))
@@ -363,8 +387,53 @@ mod tests {
             "the locked declarations are added"
         );
         assert_eq!(
+            rule("td", "border: 1px solid #000000"),
+            Some(RemovalRule::ValueCanonicalised),
+            "a shorthand is expanded, not removed"
+        );
+        assert_eq!(
+            rule("td", "width: 10px; box-sizing: content-box"),
+            Some(RemovalRule::ValueCanonicalised),
+            "re-sorted"
+        );
+        assert_eq!(
+            rule("td", "box-sizing: content-box"),
+            Some(RemovalRule::DefaultValueOmitted),
+            "a box-sizing without a size changes nothing"
+        );
+        assert_eq!(
             decide_style("span", "color: #ff0000; font-family: Calibri").0,
             Decision::Keep(Cow::Owned("color: #ff0000".into()))
+        );
+    }
+
+    /// The alphabet guard's flag drops the attribute under its own rule,
+    /// whatever else the grammar counted. No input reaches it (the
+    /// grammar's proptests check that), so the decision is fed by hand.
+    #[test]
+    fn a_style_outside_the_alphabet_is_dropped_under_its_own_rule() {
+        let flagged = |rejected| css::Style {
+            css: None,
+            rejected,
+            outside_alphabet: true,
+        };
+        for rejected in [0, 2] {
+            assert_eq!(
+                style_decision(flagged(rejected), "color: red"),
+                (
+                    Decision::Drop(RemovalRule::StyleOutsideAlphabet),
+                    Some(RemovalRule::StyleOutsideAlphabet)
+                )
+            );
+        }
+        let fine = css::Style {
+            css: Some("color: #ff0000".into()),
+            rejected: 0,
+            outside_alphabet: false,
+        };
+        assert_eq!(
+            style_decision(fine, "color: #ff0000"),
+            (Decision::Keep(Cow::Borrowed("color: #ff0000")), None)
         );
     }
 

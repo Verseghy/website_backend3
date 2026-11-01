@@ -82,6 +82,12 @@ pub enum Presence {
     /// Always: a locked declaration that the sanitiser adds when the input
     /// lacks it (editor.md §3.3, "always present").
     Always,
+    /// Exactly when the element's stored style has a `width` or a `height`:
+    /// a locked declaration that the canonical writer adds then, whether the
+    /// input had it or not, and removes otherwise (the cell `box-sizing`,
+    /// editor.md §3.3). Without a size it changes nothing on either public
+    /// site, so a dropped one is not counted as rejected.
+    WhenSized,
 }
 
 /// What happens to an accepted declaration.
@@ -90,7 +96,10 @@ pub enum Role {
     /// It is stored.
     Stored,
     /// It is input only: a shorthand that the canonical writer expands into
-    /// the stored properties (editor.md §3.1 rule 1, §3.3 "input only").
+    /// the stored properties (editor.md §3.1 rule 1, §3.3 "input only"):
+    /// `border`, `border-width`, `border-style` and `border-color` into the
+    /// four cell sides, and a single-colour `background` into
+    /// `background-color` ([`super::canonical::Cascade`]).
     InputOnly,
 }
 
@@ -156,6 +165,13 @@ impl PropertyRule {
         }
     }
 
+    const fn when_sized(self) -> Self {
+        Self {
+            presence: Presence::WhenSized,
+            ..self
+        }
+    }
+
     const fn provisional(self, reason: Provisional) -> Self {
         Self {
             provisional: Some(reason),
@@ -190,6 +206,21 @@ impl ElementStyle {
 pub const BORDER_STYLES: &[&str] = &[
     "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset", "none", "hidden",
 ];
+
+/// CSS's initial border width, which `border` and `border-<side>` give
+/// every side they set without naming a width: the width of the CSS
+/// keyword `medium`, 3 px (CSS Backgrounds 3 §3.3 and §3.4), which is what
+/// a browser draws for `border: solid`.
+///
+/// It is a constant of its own, not the `medium` row of
+/// [`BORDER_WIDTH_KEYWORDS`]. That row belongs to the provisional Excel
+/// border-weight map, which the Windows captures may change (editor.md §3.3,
+/// §16 item 1). A browser draws an omitted width the same whatever that map
+/// says, so changing the keyword's width and changing this default are two
+/// separate decisions. Only the provisional `border` and `border-<side>`
+/// rows use this constant. A side that no declaration set gets the page's
+/// width of 0 instead ([`Side::UNSET`](super::canonical::Side::UNSET)).
+pub const BORDER_WIDTH_INITIAL: Hundredths = Hundredths::whole(3);
 
 /// The border-width keywords and their widths (editor.md §3.1 rule 2).
 /// Provisional: [`Provisional::ExcelBorderWeights`].
@@ -268,7 +299,7 @@ const CELL: &[PropertyRule] = &[
     rule("height", px(1, 2000)),
     // Present exactly when `width` or `height` is: the canonical writer
     // adds and removes it (editor.md §3.3).
-    locked("box-sizing", "content-box"),
+    locked("box-sizing", "content-box").when_sized(),
     rule("text-align", keywords(ALIGNMENTS)).provisional(GENERAL),
     rule("background-color", COLOUR),
     // A single-colour `background` only.
@@ -928,6 +959,30 @@ mod tests {
                 "table max-width"
             ]
         );
+        assert_eq!(
+            rows(|p| p.presence == Presence::WhenSized),
+            cell(&["box-sizing"])
+        );
+        // The writer looks for these two names to decide a size-dependent
+        // declaration; every element with one stores both.
+        for style in ELEMENT_STYLES {
+            if style
+                .properties
+                .iter()
+                .any(|p| p.presence == Presence::WhenSized)
+            {
+                assert!(style.property("width").is_some() && style.property("height").is_some());
+            }
+        }
+    }
+
+    /// The omitted width is CSS's 3 px, pinned on its own: a change to the
+    /// provisional keyword map must not move it silently (see
+    /// [`BORDER_WIDTH_INITIAL`]).
+    #[test]
+    fn the_initial_border_width_is_css_medium() {
+        assert_eq!(BORDER_WIDTH_INITIAL, Hundredths::whole(3));
+        assert_eq!(BORDER_WIDTH_INITIAL.to_string(), "3");
     }
 
     #[test]
