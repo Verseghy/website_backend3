@@ -46,10 +46,36 @@
 //! school's zone, Europe/Budapest (ADR 0010 points 4 and 10). It reuses this
 //! file's scanners for comments and literals.
 //!
+//! A sixth check is ADR 0011's ("What must be true in code and tests"): a
+//! public-API module never reads rows itself, only through live-row
+//! finders, so a trashed row cannot reach `/api/v1`. The public modules are
+//! everything under `src/controllers/v1/` and `src/dtos/v1/`. They may not
+//! name Sea-ORM's entities, columns, query traits or finders
+//! ([`DIRECT_READS`], and `::find(`), nor raw SQL. A model function can read
+//! rows only through the connection or transaction it takes as an argument
+//! (ADR 0008 rules 2 and 4), so the check sorts the functions of
+//! `src/models/` by their signatures ([`CONNECTION_TYPES`]). Every function
+//! a public module calls through `crate::models` (by path, by a name a
+//! `use` of it brought in, with or without a turbofish) must be a live-row
+//! finder, a model function whose name has the word `live`, such as
+//! `users::Model::find_live_by_email`, or a model function that takes no
+//! connection and so reads no rows, such as `serve_content` (ADR 0013) and
+//! the read counter (public-api.md §15). A method call (`post.labels(db)`)
+//! must not use the name of a model function that takes a connection and
+//! is not a live-row finder; the scan cannot see the receiver's type, so it
+//! goes by the name. A glob import from `crate::models` is refused, because
+//! it would hide the names. On the models' side, every function whose name
+//! has the word `live` must filter the trash in its body:
+//! `DeletedAt.is_null()` in code, `deleted_at IS NULL` in its SQL, or a
+//! call of another live-row finder. What a finder that reads several tables
+//! filters on each is beyond a text check; the soft-deleted twins of the
+//! public fixtures (`tests/support/fixtures.rs`) catch that.
+//!
 //! The scan is a text check, so a determined bypass is possible (ADR 0008,
 //! Consequences); it exists to catch honest mistakes early.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -123,21 +149,36 @@ enum Token {
 /// any number of `#`, byte strings, escapes, and lifetimes (which look like
 /// character literals but are not).
 fn strip(source: &str) -> String {
+    blank(source, false)
+}
+
+/// Like [`strip`], but keeps string and character literals, so that the SQL
+/// text of a query can be read. Both keep every character's position.
+fn strip_comments(source: &str) -> String {
+    blank(source, true)
+}
+
+/// Replaces comments, and literals unless `keep_literals`, with spaces.
+fn blank(source: &str, keep_literals: bool) -> String {
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
     let mut i = 0;
     while i < chars.len() {
-        let end = match (chars[i], chars.get(i + 1)) {
-            ('/', Some('/')) => Some(line_comment_end(&chars, i)),
-            ('/', Some('*')) => Some(block_comment_end(&chars, i)),
-            ('"', _) => Some(string_end(&chars, i)),
-            ('\'', _) => char_literal_end(&chars, i),
-            ('r' | 'b', _) => raw_string_end(&chars, i),
-            _ => None,
+        let (end, literal) = match (chars[i], chars.get(i + 1)) {
+            ('/', Some('/')) => (Some(line_comment_end(&chars, i)), false),
+            ('/', Some('*')) => (Some(block_comment_end(&chars, i)), false),
+            ('"', _) => (Some(string_end(&chars, i)), true),
+            ('\'', _) => (char_literal_end(&chars, i), true),
+            ('r' | 'b', _) => (raw_string_end(&chars, i), true),
+            _ => (None, false),
         };
         if let Some(end) = end {
             for &skipped in &chars[i..end] {
-                out.push(if skipped == '\n' { '\n' } else { ' ' });
+                out.push(if skipped == '\n' || (literal && keep_literals) {
+                    skipped
+                } else {
+                    ' '
+                });
             }
             i = end;
         } else {
@@ -1343,5 +1384,855 @@ fn scanner_flags_each_rule() {
             "use super::super::super::x;\n#[cfg(test)] mod t {}"
         ),
         Vec::<String>::new()
+    );
+}
+
+// ADR 0011: the public API reads only through live-row finders.
+
+/// The directories below `src/` that hold the public read API's modules.
+const PUBLIC_API_DIRS: &[&str] = &["controllers/v1", "dtos/v1"];
+
+/// Names that let a module read rows itself: Sea-ORM's crate, the generated
+/// entities and their types, the query traits, the entity and relation
+/// finders, the raw-SQL entry points, and sqlx. `Entity::find()` is caught
+/// through `Entity`, and any `<Type>::find(` by [`public_api_report`]
+/// itself, which leaves an iterator's `.find(` alone.
+const DIRECT_READS: &[&str] = &[
+    "sea_orm",
+    "sqlx",
+    "_entities",
+    "Entity",
+    "Column",
+    "ActiveModel",
+    "EntityTrait",
+    "ModelTrait",
+    "QueryFilter",
+    "QuerySelect",
+    "QueryOrder",
+    "QueryTrait",
+    "PaginatorTrait",
+    "find_by_id",
+    "find_related",
+    "find_also_related",
+    "find_with_related",
+    "find_linked",
+    "find_also_linked",
+    "find_with_linked",
+    "find_by_statement",
+    "from_raw_sql",
+    "into_partial_model",
+    "Statement",
+    "query_one",
+    "query_all",
+    "query_one_raw",
+    "query_all_raw",
+    "execute",
+    "execute_raw",
+    "execute_unprepared",
+];
+
+/// Whether `name` is a live-row finder's: one of its snake-case words is
+/// `live`.
+fn is_live_finder(name: &str) -> bool {
+    name.split('_').any(|word| word == "live")
+}
+
+/// The types through which a model function reaches the database. ADR 0008
+/// rules 2 and 4 make a model function take its connection or transaction
+/// as an argument, so a function whose signature names none of these reads
+/// no rows: `serve_content` (ADR 0013), which takes the cache and the
+/// metrics family, or the read counter (public-api.md §15), which takes its
+/// in-memory counts. `AppContext` is listed too, although rule 2 keeps it
+/// out of models, because it carries the pool.
+const CONNECTION_TYPES: &[&str] = &[
+    "ConnectionTrait",
+    "DatabaseConnection",
+    "DatabaseTransaction",
+    "DbConn",
+    "TransactionTrait",
+    "StreamTrait",
+    "AppContext",
+];
+
+/// The functions that `src/models/` defines, outside the generated
+/// `_entities/`, by name.
+#[derive(Debug, Default)]
+struct ModelFunctions {
+    /// The functions whose name lacks the word `live` and whose signature
+    /// names a [`CONNECTION_TYPES`] type, so that they can read rows: the
+    /// name and the file (below `src/`) of the first such definition.
+    reading: BTreeMap<String, String>,
+    /// Every function name defined there.
+    defined: BTreeSet<String>,
+}
+
+/// The function definitions of the model files `files` (each a path below
+/// `src/` and its source), as [`ModelFunctions`]. A name that one file
+/// defines with a connection and another without counts as reading: the
+/// scan of the public API knows the name only.
+fn model_functions(files: &[(PathBuf, String)]) -> ModelFunctions {
+    let mut functions = ModelFunctions::default();
+    for (relative, source) in files {
+        let tokens = tokenize(&strip(source));
+        for (index, token) in tokens.iter().enumerate() {
+            if ident(Some(token)) != Some("fn") {
+                continue;
+            }
+            let Some(name) = ident(tokens.get(index + 1)) else {
+                continue;
+            };
+            functions.defined.insert(name.to_owned());
+            // The signature: from the name to the body's `{`, or to the `;`
+            // of a declaration without one. Generic bounds and `where`
+            // clauses hold no braces.
+            let signature = tokens[index..]
+                .iter()
+                .take_while(|token| !matches!(token, Token::Punct('{' | ';')));
+            let takes_connection = signature
+                .filter_map(|token| ident(Some(token)))
+                .any(|word| CONNECTION_TYPES.contains(&word));
+            if takes_connection && !is_live_finder(name) {
+                functions
+                    .reading
+                    .entry(name.to_owned())
+                    .or_insert_with(|| format!("src/{}", relative.display()));
+            }
+        }
+    }
+    functions
+}
+
+/// One leaf of a `use` tree: the name it brings into scope, the full path
+/// it stands for, and whether it is a glob (`*`, with an empty name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UseLeaf {
+    /// The name in scope: the last segment, or the `as` name.
+    local: String,
+    /// The segments of the path, `self` resolved to its module.
+    path: Vec<String>,
+    /// Whether the leaf is `*`.
+    glob: bool,
+}
+
+impl UseLeaf {
+    /// Whether the leaf reaches into `crate::models` (or a `super::`
+    /// path to it): one of its segments is `models`.
+    fn reaches_models(&self) -> bool {
+        self.path.iter().any(|segment| segment == "models")
+    }
+}
+
+/// Every leaf of every `use` statement in `tokens`, in order.
+fn use_leaves(tokens: &[Token]) -> Vec<UseLeaf> {
+    let mut leaves = Vec::new();
+    for (start, token) in tokens.iter().enumerate() {
+        if ident(Some(token)) != Some("use") {
+            continue;
+        }
+        let end = tokens[start..]
+            .iter()
+            .position(|token| token == &Token::Punct(';'))
+            .map_or(tokens.len(), |length| start + length);
+        use_tree(&tokens[start + 1..end], 0, &[], &mut leaves);
+    }
+    leaves
+}
+
+/// Reads one use tree of `tokens` from `start`, below the path `prefix`,
+/// into `leaves`, and returns the position after it. The grammar is
+/// Rust's: a path, then `::{...}` with trees separated by commas, `::*`,
+/// or `as name`. Anything else ends the tree, so an unexpected token
+/// cannot stall the scan.
+fn use_tree(tokens: &[Token], start: usize, prefix: &[String], leaves: &mut Vec<UseLeaf>) -> usize {
+    let mut path = prefix.to_vec();
+    let mut index = start;
+    loop {
+        match tokens.get(index) {
+            Some(Token::PathSep) => index += 1,
+            Some(Token::Punct('*')) => {
+                leaves.push(UseLeaf {
+                    local: String::new(),
+                    path,
+                    glob: true,
+                });
+                return index + 1;
+            }
+            Some(Token::Punct('{')) => {
+                index += 1;
+                loop {
+                    match tokens.get(index) {
+                        None => return index,
+                        Some(Token::Punct('}')) => return index + 1,
+                        Some(Token::Punct(',')) => index += 1,
+                        Some(_) => {
+                            let next = use_tree(tokens, index, &path, leaves);
+                            // A tree that consumed nothing is malformed;
+                            // skip its token rather than loop on it.
+                            index = if next == index { index + 1 } else { next };
+                        }
+                    }
+                }
+            }
+            Some(Token::Ident(name)) => {
+                path.push(name.clone());
+                index += 1;
+                if tokens.get(index) == Some(&Token::PathSep) {
+                    continue;
+                }
+                // `module::{self}` stands for the module itself.
+                if path.last().is_some_and(|last| last == "self") {
+                    path.pop();
+                }
+                let renamed = ident(tokens.get(index)) == Some("as");
+                let local = if renamed {
+                    ident(tokens.get(index + 1)).unwrap_or_default().to_owned()
+                } else {
+                    path.last().cloned().unwrap_or_default()
+                };
+                leaves.push(UseLeaf {
+                    local,
+                    path,
+                    glob: false,
+                });
+                return if renamed { index + 2 } else { index };
+            }
+            _ => return index,
+        }
+    }
+}
+
+/// Whether the identifier at `tokens[index]` is called: `(` follows it,
+/// or a turbofish (`::<...>`) and then `(`.
+fn is_called(tokens: &[Token], index: usize) -> bool {
+    match tokens.get(index + 1) {
+        Some(Token::Punct('(')) => true,
+        Some(Token::PathSep) if tokens.get(index + 2) == Some(&Token::Punct('<')) => {
+            let mut depth = 0usize;
+            for position in index + 2..tokens.len() {
+                match tokens[position] {
+                    Token::Punct('<') => depth += 1,
+                    // The `>` of `->` (in `Fn() -> T`) closes nothing.
+                    Token::Punct('>') if tokens[position - 1] != Token::Punct('-') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return tokens.get(position + 1) == Some(&Token::Punct('('));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// What one public-API file breaks of the live-row rule, one line each.
+///
+/// `models` are the functions of `src/models/`. A call by path that goes
+/// through `crate::models` (a `models` or `Model` segment, or a name that a
+/// `use` of it brought in) must name a live-row finder or a model function
+/// that takes no connection; a method call (`.name(`), whose receiver a
+/// text check cannot type, must not use the name of a model function that
+/// takes a connection and is not a live-row finder.
+fn public_api_report(relative: &Path, source: &str, models: &ModelFunctions) -> Vec<String> {
+    let tokens = tokenize(&strip(source));
+    let imports: Vec<UseLeaf> = use_leaves(&tokens)
+        .into_iter()
+        .filter(UseLeaf::reaches_models)
+        .collect();
+    let mut found = Vec::new();
+    if imports.iter().any(|leaf| leaf.glob) {
+        found
+            .push("imports from `crate::models` with a glob; name each live-row finder".to_owned());
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        let Token::Ident(name) = token else { continue };
+        let before = index.checked_sub(1).and_then(|before| tokens.get(before));
+        let called = is_called(&tokens, index);
+        if DIRECT_READS.contains(&name.as_str()) {
+            found.push(format!("names `{name}`"));
+        }
+        if name == "find" && before == Some(&Token::PathSep) && called {
+            found.push("calls an entity's `::find()`".to_owned());
+        }
+        if !called || !name.starts_with(char::is_lowercase) || is_live_finder(name) {
+            continue;
+        }
+        if before == Some(&Token::Punct('.')) {
+            if let Some(file) = models.reading.get(name) {
+                found.push(format!(
+                    "calls the method `.{name}(`, the name of a model function in {file} that \
+                     takes a database connection and is not a live-row finder (the scan cannot \
+                     see the receiver's type: if it is not a model, rename the model function)"
+                ));
+            }
+            continue;
+        }
+        // The path that ends in this call, first segment first.
+        let mut segments = vec![name.as_str()];
+        let mut cursor = index;
+        while cursor >= 2 && tokens[cursor - 1] == Token::PathSep {
+            match ident(tokens.get(cursor - 2)) {
+                Some(segment) => segments.insert(0, segment),
+                None => break,
+            }
+            cursor -= 2;
+        }
+        let through_models = segments[..segments.len() - 1]
+            .iter()
+            .any(|segment| *segment == "models" || *segment == "Model")
+            || imports.iter().any(|leaf| leaf.local == segments[0]);
+        if !through_models {
+            continue;
+        }
+        let call = segments.join("::");
+        if models.reading.contains_key(name) {
+            found.push(format!(
+                "calls `{call}`, which takes a database connection but is not a live-row finder"
+            ));
+        } else if !models.defined.contains(name) {
+            found.push(format!(
+                "calls `{call}` through `crate::models`, but src/models defines no `{name}`; \
+                 call a live-row finder, or a model function that takes no database connection"
+            ));
+        }
+    }
+    found
+        .into_iter()
+        .map(|finding| format!("src/{}: {finding}", relative.display()))
+        .collect()
+}
+
+/// Whether `tokens` filter the trash in code: `DeletedAt.is_null()`, also
+/// as `Expr::col(Column::DeletedAt).is_null()` with closing parentheses in
+/// between. `DeletedAt.is_not_null()` reads the trash and does not count.
+fn filters_trash_in_code(tokens: &[Token]) -> bool {
+    tokens.iter().enumerate().any(|(index, token)| {
+        if ident(Some(token)) != Some("DeletedAt") {
+            return false;
+        }
+        let mut cursor = index + 1;
+        while tokens.get(cursor) == Some(&Token::Punct(')')) {
+            cursor += 1;
+        }
+        tokens.get(cursor) == Some(&Token::Punct('.'))
+            && ident(tokens.get(cursor + 1)) == Some("is_null")
+            && tokens.get(cursor + 2) == Some(&Token::Punct('('))
+    })
+}
+
+/// Whether the SQL in `text` (code with its literals kept) filters the
+/// trash: `deleted_at IS NULL`, in any letter case, with any white space,
+/// a table qualifier or the column quoted. `IS NOT NULL` does not count.
+fn filters_trash_in_sql(text: &str) -> bool {
+    let words: Vec<String> = text
+        .replace('"', " ")
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words.windows(3).any(|window| {
+        (window[0] == "deleted_at" || window[0].ends_with(".deleted_at"))
+            && window[1] == "is"
+            && window[2].starts_with("null")
+    })
+}
+
+/// The live-row finders of one model file that do not filter the trash, one
+/// line each.
+fn live_finder_report(relative: &Path, source: &str) -> Vec<String> {
+    let code: Vec<char> = strip(source).chars().collect();
+    let text: Vec<char> = strip_comments(source).chars().collect();
+    let tokens = tokenize(&strip(source));
+    let mut found = Vec::new();
+    let mut search_from = 0;
+    for (index, token) in tokens.iter().enumerate() {
+        if ident(Some(token)) != Some("fn") {
+            continue;
+        }
+        let Some(name) = ident(tokens.get(index + 1)).filter(|name| is_live_finder(name)) else {
+            continue;
+        };
+        // The character range of this function's body in the stripped code:
+        // from the first `{` after its name, unless a `;` ends a bodyless
+        // declaration first, to the matching `}`.
+        let Some(at) = find_word(&code, "fn", name, search_from) else {
+            continue;
+        };
+        search_from = at + 1;
+        let Some(open) = (at..code.len()).find(|&i| code[i] == '{' || code[i] == ';') else {
+            continue;
+        };
+        if code[open] == ';' {
+            continue;
+        }
+        let mut level = 0usize;
+        let mut close = code.len();
+        for (offset, &c) in code[open..].iter().enumerate() {
+            match c {
+                '{' => level += 1,
+                '}' => {
+                    level -= 1;
+                    if level == 0 {
+                        close = open + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body_text: String = text[open..close].iter().collect();
+        let body_code: String = code[open..close].iter().collect();
+        let body = tokenize(&body_code);
+        // Only a call counts: a local variable called `live` filters nothing.
+        let calls_live = body.iter().enumerate().any(|(position, token)| {
+            ident(Some(token)).is_some_and(|other| other != name && is_live_finder(other))
+                && is_called(&body, position)
+        });
+        if !(filters_trash_in_code(&body) || filters_trash_in_sql(&body_text) || calls_live) {
+            found.push(format!(
+                "src/{}: `{name}` is named as a live-row finder but does not filter the trash: \
+                 add `deleted_at IS NULL` (Column::DeletedAt.is_null()) or call another live-row \
+                 finder",
+                relative.display()
+            ));
+        }
+    }
+    found
+}
+
+/// The character index of `fn <name>` in `code` from `from` on, the two
+/// words separated by white space only.
+fn find_word(code: &[char], keyword: &str, name: &str, from: usize) -> Option<usize> {
+    let pattern: Vec<char> = keyword.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    (from..code.len()).find(|&start| {
+        if !code[start..].starts_with(&pattern)
+            || start
+                .checked_sub(1)
+                .is_some_and(|before| code[before].is_alphanumeric() || code[before] == '_')
+        {
+            return false;
+        }
+        let mut cursor = start + pattern.len();
+        let gap = cursor;
+        while code.get(cursor).is_some_and(|c| c.is_whitespace()) {
+            cursor += 1;
+        }
+        cursor > gap
+            && code[cursor..].starts_with(&name)
+            && !code
+                .get(cursor + name.len())
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+    })
+}
+
+/// Every Rust file of `src/models/` outside the generated `_entities/`, as
+/// its path below `src/` and its source.
+fn model_sources() -> Vec<(PathBuf, String)> {
+    let src = src_dir();
+    let mut files = Vec::new();
+    rust_files(&src.join("models"), &mut files);
+    files
+        .into_iter()
+        .filter(|file| {
+            !file
+                .components()
+                .any(|part| part.as_os_str() == "_entities")
+        })
+        .map(|file| {
+            let source = fs::read_to_string(&file).expect("read source");
+            (
+                file.strip_prefix(&src).expect("below src/").to_path_buf(),
+                source,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_public_api_reads_only_through_live_row_finders() {
+    let src = src_dir();
+    let mut files = Vec::new();
+    for dir in PUBLIC_API_DIRS {
+        rust_files(&src.join(dir), &mut files);
+    }
+    assert!(
+        !files.is_empty(),
+        "no public-API modules in {PUBLIC_API_DIRS:?}"
+    );
+    let models = model_functions(&model_sources());
+    // Without model functions the method-call rule would check nothing.
+    assert!(
+        !models.reading.is_empty(),
+        "no model function in src/models/ takes a connection: {models:?}"
+    );
+    let report: Vec<String> = files
+        .iter()
+        .flat_map(|file| {
+            let relative = file.strip_prefix(&src).expect("below src/");
+            public_api_report(
+                relative,
+                &fs::read_to_string(file).expect("read source"),
+                &models,
+            )
+        })
+        .collect();
+    assert!(
+        report.is_empty(),
+        "A public /api/v1 module reads rows only through a model's live-row finder, a function \
+         whose name has the word `live` and which filters `deleted_at IS NULL`; it may also call \
+         a model function that takes no database connection (ADR 0011 §3, recipe 2 step 4 of \
+         .claude/skills/backend3/SKILL.md):\n{}",
+        report.join("\n")
+    );
+}
+
+#[test]
+fn every_live_row_finder_filters_the_trash() {
+    let sources = model_sources();
+    assert!(!sources.is_empty(), "src/models/ has no Rust files");
+    let report: Vec<String> = sources
+        .iter()
+        .flat_map(|(relative, source)| live_finder_report(relative, source))
+        .collect();
+    assert!(
+        report.is_empty(),
+        "ADR 0011 §3: a live-row finder filters the trash:\n{}",
+        report.join("\n")
+    );
+}
+
+/// A model file for the scanner tests: functions that take a connection
+/// in each way a signature can name one, a live-row finder, and functions
+/// that take none, as `serve_content` and the read counter will.
+const SAMPLE_MODELS: &str = r"
+    impl Model {
+        pub async fn find_by_pid<C: ConnectionTrait>(db: &C, pid: &str) -> ModelResult<Self> {}
+        pub async fn labels(&self, db: &DatabaseConnection) -> Result<Vec<labels::Model>> {}
+        pub async fn list<C>(db: &C) -> Result<Vec<Self>> where C: ConnectionTrait {}
+        pub async fn page(db: &DatabaseTransaction) -> Result<Vec<Self>> {}
+        pub async fn everything(db: &impl ConnectionTrait) -> Result<Vec<Self>> {}
+        pub async fn find_live_by_id(db: &impl ConnectionTrait, id: i64) -> Result<Self> {}
+        pub fn display_name(&self) -> String {}
+    }
+    pub async fn stats(db: &DatabaseConnection) -> Result<Stats> {}
+    pub fn serve_content(cache: &Cache, resanitized: &Counter, row: &Row) -> Served {}
+    pub fn record(counts: &ReadCounts, post: i64) {}
+";
+
+/// What [`public_api_report`] finds in `source`, without the file name,
+/// with the model functions of [`SAMPLE_MODELS`].
+fn public_findings(source: &str) -> Vec<String> {
+    let models = model_functions(&[(PathBuf::from("models/posts.rs"), SAMPLE_MODELS.to_owned())]);
+    public_api_report(Path::new("controllers/v1/x.rs"), source, &models)
+        .into_iter()
+        .map(|line| {
+            line.trim_start_matches("src/controllers/v1/x.rs: ")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn model_functions_are_sorted_by_whether_they_take_a_connection() {
+    let models = model_functions(&[(PathBuf::from("models/posts.rs"), SAMPLE_MODELS.to_owned())]);
+    assert_eq!(
+        models.reading.keys().collect::<Vec<_>>(),
+        [
+            "everything",
+            "find_by_pid",
+            "labels",
+            "list",
+            "page",
+            "stats"
+        ]
+    );
+    assert_eq!(models.reading["labels"], "src/models/posts.rs");
+    for name in ["find_live_by_id", "display_name", "serve_content", "record"] {
+        assert!(models.defined.contains(name), "{name}");
+        assert!(!models.reading.contains_key(name), "{name}");
+    }
+}
+
+#[test]
+fn use_trees_are_read_leaf_by_leaf() {
+    let leaves = use_leaves(&tokenize(
+        "use crate::{dtos::v1::posts::Post, models::{posts::{self, Model as P}, labels::*}};\n\
+         use super::super::models as m; pub use std::fmt;",
+    ));
+    let view: Vec<(&str, String, bool)> = leaves
+        .iter()
+        .map(|leaf| (leaf.local.as_str(), leaf.path.join("::"), leaf.glob))
+        .collect();
+    assert_eq!(
+        view,
+        [
+            ("Post", "crate::dtos::v1::posts::Post".to_owned(), false),
+            ("posts", "crate::models::posts".to_owned(), false),
+            ("P", "crate::models::posts::Model".to_owned(), false),
+            ("", "crate::models::labels".to_owned(), true),
+            ("m", "super::super::models".to_owned(), false),
+            ("fmt", "std::fmt".to_owned(), false),
+        ]
+    );
+    let from_models: Vec<&str> = leaves
+        .iter()
+        .filter(|leaf| leaf.reaches_models())
+        .map(|leaf| leaf.local.as_str())
+        .collect();
+    assert_eq!(from_models, ["posts", "P", "", "m"]);
+    // A malformed tree ends the scan of its statement, not the test.
+    assert_eq!(use_leaves(&tokenize("use crate::{a, , ::b, 1};")).len(), 2);
+}
+
+#[test]
+fn calls_are_found_with_and_without_a_turbofish() {
+    let calls = |source: &str| -> Vec<String> {
+        let tokens = tokenize(source);
+        tokens
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| is_called(&tokens, *index))
+            .filter_map(|(_, token)| ident(Some(token)).map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(
+        calls("a(); b::<C>(x); c::<Vec<u8>>(); d::<fn() -> u8>(); e::<C>; f; g::h()"),
+        // `fn(` counts as a call too; the scan skips names that no model
+        // function can have.
+        ["a", "b", "c", "d", "fn", "h"]
+    );
+}
+
+#[test]
+fn live_row_scanner_flags_each_direct_read() {
+    for (source, expected) in [
+        (
+            "let _ = posts::Entity::find();",
+            vec!["names `Entity`", "calls an entity's `::find()`"],
+        ),
+        (
+            "let _ = Posts::find().all(db);",
+            vec!["calls an entity's `::find()`"],
+        ),
+        ("let _ = Posts::find_by_id(1);", vec!["names `find_by_id`"]),
+        (
+            "let _ = post.find_related(Labels);",
+            vec!["names `find_related`"],
+        ),
+        (
+            "db.query_all_raw(Statement::from_string(b, s))",
+            vec!["names `query_all_raw`", "names `Statement`"],
+        ),
+        (
+            "use crate::models::_entities::posts;",
+            vec!["names `_entities`"],
+        ),
+        (
+            "use sea_orm::QueryFilter;",
+            vec!["names `sea_orm`", "names `QueryFilter`"],
+        ),
+        (
+            ".filter(Column::DeletedAt.is_null())",
+            vec!["names `Column`"],
+        ),
+    ] {
+        assert_eq!(public_findings(source), expected, "{source}");
+    }
+}
+
+#[test]
+fn live_row_scanner_flags_each_model_call_that_may_read_the_trash() {
+    for (source, expected) in [
+        (
+            "crate::models::users::Model::find_by_pid(db, pid)",
+            vec![
+                "calls `crate::models::users::Model::find_by_pid`, which takes a database \
+                 connection but is not a live-row finder",
+            ],
+        ),
+        (
+            "use crate::models::users;\nusers::Model::find_by_pid(db, pid)",
+            vec![
+                "calls `users::Model::find_by_pid`, which takes a database connection but is \
+                 not a live-row finder",
+            ],
+        ),
+        (
+            "use crate::models::{posts::{self, Model as Post}, labels};\n\
+             Post::page(db); posts::list(db); labels::Model::everything(db)",
+            vec![
+                "calls `Post::page`, which takes a database connection but is not a live-row \
+                 finder",
+                "calls `posts::list`, which takes a database connection but is not a live-row \
+                 finder",
+                "calls `labels::Model::everything`, which takes a database connection but is \
+                 not a live-row finder",
+            ],
+        ),
+        (
+            "use super::super::models::job_queue::stats;\nstats(db)",
+            vec!["calls `stats`, which takes a database connection but is not a live-row finder"],
+        ),
+        (
+            "use crate::models as m;\nm::posts::Model::page(db)",
+            vec![
+                "calls `m::posts::Model::page`, which takes a database connection but is not \
+                 a live-row finder",
+            ],
+        ),
+        (
+            "posts::Model::list::<DatabaseConnection>(db)",
+            vec![
+                "calls `posts::Model::list`, which takes a database connection but is not a \
+                 live-row finder",
+            ],
+        ),
+        (
+            "let post = posts::Model::find_live_by_id(db, 1).await?;\n\
+             let labels = post.labels(db).await?; let more = post.labels::<C>(db);",
+            vec![
+                "calls the method `.labels(`, the name of a model function in \
+                 src/models/posts.rs that takes a database connection and is not a live-row \
+                 finder (the scan cannot see the receiver's type: if it is not a model, rename \
+                 the model function)",
+                "calls the method `.labels(`, the name of a model function in \
+                 src/models/posts.rs that takes a database connection and is not a live-row \
+                 finder (the scan cannot see the receiver's type: if it is not a model, rename \
+                 the model function)",
+            ],
+        ),
+        (
+            "use crate::models::posts;\nposts::Model::lookup(db)",
+            vec![
+                "calls `posts::Model::lookup` through `crate::models`, but src/models defines \
+                 no `lookup`; call a live-row finder, or a model function that takes no \
+                 database connection",
+            ],
+        ),
+        (
+            "use crate::models::posts::*;",
+            vec!["imports from `crate::models` with a glob; name each live-row finder"],
+        ),
+        (
+            "use crate::{dtos::v1::*, models::{labels, posts::*}};",
+            vec!["imports from `crate::models` with a glob; name each live-row finder"],
+        ),
+    ] {
+        assert_eq!(public_findings(source), expected, "{source}");
+    }
+}
+
+#[test]
+fn live_row_scanner_accepts_live_finders_and_other_code() {
+    let source = r#"
+        //! Mentions Entity::find() and query_all_raw in prose.
+        use crate::models::{posts, users::{self, Model as User}, content, read_counts::record};
+        use crate::{dtos::v1::posts::Post, models::labels};
+        use crate::dtos::v1::*;
+        use crate::dtos::v1::error::{Error, ErrorCode};
+        /* Statement::from_string in a comment */
+        async fn show(db: &C, id: i64) -> Response {
+            let _ = "Entity::find() in a string";
+            let post = posts::Model::live_page(db, 20).await?;
+            let user = users::Model::find_live_by_email(db, "a").await?;
+            let other = User::live_by_id(db, 1).await?;
+            let _ = crate::models::labels::Model::list_live_for_post(db, &post).await?;
+            let _ = labels::Model::list_live::<C>(db).await?;
+            let body = content::serve_content(&cache, &resanitized, &post);
+            record(&counts, post.id);
+            let name = post.display_name();
+            let first = items.iter().find(|item| item.id == id);
+            let summary = PostSummary::from(&post);
+            let detail = Post::from(&post);
+            let digits = "5".parse::<u8>();
+            let _ = Error::new(ErrorCode::NotFound);
+            let _ = v1_params::id(&raw).map_err(Error::from);
+            let _ = format!("{}", posts::Model::TABLE);
+            first.map(Item::from)
+        }
+        impl From<&posts::Model> for PostSummary { fn from(m: &posts::Model) -> Self { todo!() } }
+    "#;
+    assert_eq!(public_findings(source), Vec::<String>::new());
+}
+
+/// What [`live_finder_report`] finds in a model file `source`.
+fn finder_findings(source: &str) -> Vec<String> {
+    live_finder_report(Path::new("models/x.rs"), source)
+}
+
+/// The report line of [`live_finder_report`] for the finder `name`.
+fn unfiltered(name: &str) -> String {
+    format!(
+        "src/models/x.rs: `{name}` is named as a live-row finder but does not filter the \
+         trash: add `deleted_at IS NULL` (Column::DeletedAt.is_null()) or call another live-row \
+         finder"
+    )
+}
+
+#[test]
+fn live_finder_scanner_requires_a_trash_filter() {
+    let accepted = r##"
+        impl Model {
+            pub async fn find_live_by_email<C>(db: &C, email: &str) -> ModelResult<Self>
+            where
+                C: ConnectionTrait,
+            {
+                Entity::find().filter(Column::DeletedAt.is_null()).one(db).await
+            }
+            pub async fn live_count(db: &C) -> Result<i64> {
+                let sql = "SELECT count(*) FROM posts WHERE deleted_at IS NULL";
+                query(db, sql).await
+            }
+            pub async fn live_joined(db: &C) -> Result<i64> {
+                let sql = r#"SELECT 1 FROM posts p WHERE p."deleted_at"
+                             is null"#;
+                query(db, sql).await
+            }
+            pub async fn live_by_expr(db: &C) -> Result<Vec<Self>> {
+                Entity::find().filter(Expr::col((Posts, Column::DeletedAt)).is_null()).all(db).await
+            }
+            pub async fn live_page(db: &C) -> Result<Vec<Self>> {
+                Self::live_rows().all(db).await
+            }
+            pub async fn list_live<C>(db: &C) -> Result<Vec<Self>> {
+                Self::live_rows_of::<C>(db).all(db).await
+            }
+            fn live_rows() -> Select<Entity> { Entity::find().filter(Column::DeletedAt.is_null()) }
+            fn find_by_pid(db: &C) -> Result<Self> { Entity::find().one(db) }
+        }
+        trait Live { fn live() -> Select<Self>; }
+    "##;
+    assert_eq!(finder_findings(accepted), Vec::<String>::new());
+    let flagged = r#"
+        impl Model {
+            pub async fn live_page(db: &C) -> Result<Vec<Self>> {
+                // deleted_at is forgotten here
+                Entity::find().all(db).await
+            }
+            fn alive() {}
+            pub fn list_live(db: &C) -> Select<Entity> { Entity::find() }
+            pub async fn live_trash(db: &C) -> Result<Vec<Self>> {
+                Entity::find().filter(Column::DeletedAt.is_not_null()).all(db).await
+            }
+            pub async fn live_sql_trash(db: &C) -> Result<i64> {
+                query(db, "SELECT count(*) FROM posts WHERE deleted_at IS NOT NULL").await
+            }
+            pub async fn find_live_rows(db: &C) -> Result<Vec<Self>> {
+                let live = Entity::find();
+                live.all(db).await
+            }
+        }
+    "#;
+    assert_eq!(
+        finder_findings(flagged),
+        [
+            unfiltered("live_page"),
+            unfiltered("list_live"),
+            unfiltered("live_trash"),
+            unfiltered("live_sql_trash"),
+            unfiltered("find_live_rows"),
+        ]
     );
 }

@@ -827,7 +827,7 @@ Operational endpoints (`/_ping`, `/_health`, `/_readiness`, `/metrics`) are not 
 
 ## 8. Errors
 
-Every `4xx` and `5xx` body under `/api/v1` is `application/json` in the `Error` shape (6.15), produced through Loco's `ErrorDetail` (DEC-11). User input never causes a `500`.
+Every `4xx` and `5xx` body under `/api/v1` is `application/json` in the `Error` shape (6.15), produced through Loco's `ErrorDetail` (DEC-11), except the `405` below, which keeps axum's empty body. User input never causes a `500`.
 
 | HTTP | `error` | When | Example `description` |
 |---|---|---|---|
@@ -1061,7 +1061,7 @@ The maintainer chose new tests written from this specification as the proof that
 
 - Tests assert parsed JSON values, field by field or with an insta snapshot of backend3's own output. They never compare against backend2 output.
 - Every list test asserts the full order, not only membership.
-- Every response body is also validated against the component schema that the OpenAPI document declares for it ([ADR 0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md)).
+- Every response body is also validated against the component schema that the OpenAPI document declares for it ([ADR 0005](adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md)). The check reads the document as `GET /api/v1/openapi.json` serves it and validates with an independent JSON Schema 2020-12 validator, the `jsonschema` crate, as the spike did with Ajv ([openapi-spike.md](openapi-spike.md), P4); `tests/support/openapi_schema.rs` holds it.
 - Time-dependent tests inject "now"; none reads the wall clock.
 - Tests that check headers assert `Content-Type`, `Cache-Control`, `ETag` presence, `Access-Control-Allow-Origin` and, for the admin paths, its absence.
 - The test harness refuses any database that is not local ([ADR 0024](adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md)).
@@ -1069,7 +1069,9 @@ The maintainer chose new tests written from this specification as the proof that
 
 ### 16.3 Global tests
 
-Beyond the per-endpoint lists of section 7, these apply to every endpoint: the trailing-slash form answers the same; `POST` answers `405` and `OPTIONS` the CORS preflight of 2.1 (`tests/requests/public_router.rs` checks both for every route); unknown query parameters are ignored; the first of a repeated parameter wins; every field of every schema is present in every response; CORS header on success and on error; JSON error envelope on every `4xx`; `If-None-Match` with the returned `ETag` gives `304` with an empty body; user input never produces `500` (a property test feeds random strings to every parameter).
+Beyond the per-endpoint lists of section 7, these apply to every endpoint: the trailing-slash form answers the same; `POST` answers `405` and `OPTIONS` the CORS preflight of 2.1 (`tests/requests/public_router.rs` checks both for every route); unknown query parameters are ignored; the first of a repeated parameter wins; every field of every schema is present in every response; CORS header on success and on error; JSON error envelope on every `4xx` except the `405` of section 8, whose body is axum's empty one; `If-None-Match` with the returned `ETag` gives `304` with an empty body; user input never produces `500` (a property test feeds random strings to every parameter).
+
+`tests/requests/public_global.rs` runs these for every `/api/v1` route of Loco's route table. Each route registers its samples in `tests/support/public_samples.rs`: a value for every path parameter, and for every query parameter that its OpenAPI operation documents an accepted value, a value that is answered differently and a value with a space; the suite fails for a route without samples. It loads the fixtures the samples name (17.1) at a fixed instant, sends the requests of `tests/support/public_rules.rs` and checks every answer, then feeds random strings to every parameter and to an unknown one. It also fails for samples that would let a broken route pass: a base request that does not get the route's cacheable `200`, a `200` that lists no row with a soft-deleted twin, and values that the route answers alike, so that every route's `200`, twins and `304` are checked. An optional parameter that changes the answer, such as the preview `token` of 7.3, stays out of the base request and is checked on the row it is accepted on. `tests/requests/public_harness.rs` runs the same checks against probe routes that each break one rule, so a check that stops finding its fault fails there.
 
 ### 16.4 Checks on the rehearsal import
 
@@ -1094,6 +1096,8 @@ All fixture content is invented. Counts in the "Production" column are aggregate
 ### 17.1 Seed fixtures (written into backend3's schema)
 
 These are shapes the new schema allows. The endpoint specification tests (16.1) load them.
+
+Each fixture is registered under its name in this section's tables in `tests/support/fixtures.rs`, whose module documentation gives the rules: a fixture writes its rows directly, through the models, never through `/api/admin`, with explicit ids; and for every row of a trashable public type it also writes a soft-deleted twin, the same row again in the trash, as [ADR 0011](adr/0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md) asks of every public row type. A twin's id is its row's id plus a fixed offset that no live row reaches, so the global tests (16.3) find a twin in any answer without knowing its type, and every endpoint test asserts that its twins are absent.
 
 **Posts, authors, labels**
 

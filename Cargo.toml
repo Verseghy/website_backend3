@@ -301,6 +301,20 @@ insta = "1"
 # encoded names that a URL type would normalise first. axum-test already
 # builds these features, so the graph gains no crate.
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+# The response-shape check of the /api/v1 request tests (ADR 0005 §4,
+# public-api.md §16.2): every body is validated against the component schema
+# that the served OpenAPI document declares for it
+# (tests/support/openapi_schema.rs). An independent JSON Schema 2020-12
+# validator, the dialect of OpenAPI 3.1 schemas, as Ajv was for the spike
+# (docs/design/openapi-spike.md, P4), rather than a hand-written check of
+# what the schema is meant to say. Default features off: they fetch remote
+# `$ref`s over HTTP (reqwest with an aws-lc-rs TLS stack) and from files,
+# which the document never needs (its references are all local) and a test
+# must never do; `idna` only adds the `idn-*` formats, which no public
+# schema uses. MIT, like most of the 21 crates it adds to Cargo.lock; each
+# has a licence that deny.toml allows. Test-only: none of it is built into
+# backend3-cli or the image.
+jsonschema = { version = "0.60", default-features = false }
 
 [package]
 name = "backend3"
@@ -398,6 +412,7 @@ axum-test = { workspace = true }
 futures-util = { workspace = true }
 insta = { workspace = true }
 hyper-util = { workspace = true }
+jsonschema = { workspace = true }
 png = { workspace = true }
 # libwebp's animation encoder builds test animations, and its animation
 # decoder plays stored ones back frame by frame to compare them with the
