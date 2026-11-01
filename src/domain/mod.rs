@@ -23,6 +23,7 @@
 pub mod activity;
 pub mod admin_path;
 pub mod api_path;
+pub mod authz;
 pub mod base_url;
 pub mod budapest;
 pub mod cli_guard;

@@ -2,4 +2,7 @@
 
 pub use super::activity_log::Entity as ActivityLog;
 pub use super::revisions::Entity as Revisions;
+pub use super::roles::Entity as Roles;
+pub use super::user_permissions::Entity as UserPermissions;
+pub use super::user_roles::Entity as UserRoles;
 pub use super::users::Entity as Users;

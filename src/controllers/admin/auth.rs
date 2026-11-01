@@ -19,7 +19,9 @@
 //! the credential failures.
 //!
 //! `auth/me` answers the account of the request's admin session
-//! ([`super::session::AdminSession`]) as a [`MeResponse`]. It is one of the
+//! ([`super::session::AdminSession`]) as a [`MeResponse`], with the roles,
+//! effective permissions and admin flag that the extractor read for the
+//! request (ADR 0007 §7). It is one of the
 //! three routes that a `password_change` session may reach (ADR 0006 §4), so
 //! the admin UI can tell such a session to set a new password. Without a
 //! valid session it answers `401 unauthorized`.
@@ -105,8 +107,9 @@ pub async fn login(
         })
 }
 
-/// `GET /api/admin/auth/me`: the account of the request's admin session and
-/// the session's scope.
+/// `GET /api/admin/auth/me`: the account of the request's admin session, the
+/// session's scope, and the account's roles, effective permissions and admin
+/// flag (ADR 0007 §7).
 ///
 /// - `session`: the checked admin session; an `admin` or a `password_change`
 ///   one (ADR 0006 §4). Without one the extractor has already answered
@@ -116,8 +119,8 @@ pub async fn login(
 ///
 /// An internal error (`500`) when the response cannot be built: an account
 /// without an e-mail address or an `mfa` scope, both of which the session
-/// check rules out ([`MeResponse::new`]). A failed account lookup is the
-/// extractor's `500`.
+/// check rules out ([`MeResponse::new`]). A failed lookup of the account or
+/// of its roles and grants is the extractor's `500`.
 // `state` is named because the handler takes no `State`, from which the
 // macro would otherwise infer it; the extractor reads the `AppContext`.
 #[debug_handler(state = AppContext)]
@@ -125,9 +128,17 @@ pub async fn me(session: AdminSession<AdminOrPasswordChange>) -> Result<Response
     // The model-to-DTO conversion happens here, at the controller boundary
     // (ADR 0005, ADR 0008 rule 6): only the allow-listed columns leave the
     // row, so the DTO never sees the password hash or the TOTP secret.
+    // The roles and grants are the ones the extractor read for this
+    // request, so the answer shows a role change at once (ADR 0007 §5).
     let user = session.user;
-    let me =
-        MeResponse::new(user.pid, user.name, user.email, session.scope).map_err(Error::wrap)?;
+    let me = MeResponse::new(
+        user.pid,
+        user.name,
+        user.email,
+        session.scope,
+        &session.grants,
+    )
+    .map_err(Error::wrap)?;
     format::json(me)
 }
 

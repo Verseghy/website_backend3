@@ -39,8 +39,8 @@
 //!   (public-api.md DEC-10, open item O-2), and runs the `/metrics` listener
 //!   of `settings.metrics` next to it ([`serve_until`]).
 //! - `seed` creates the invented account of the development, test and E2E
-//!   seed and refuses every other environment, production and staging
-//!   included (`domain::seed`, ADR 0040).
+//!   seed, with the `admin` role, and refuses every other environment,
+//!   production and staging included (`domain::seed`, ADR 0040).
 //!
 //! The session `TimeZone = UTC` of ADR 0002 ("Session settings") and ADR 0010
 //! rule 9 needs no hook: every connection backend3 opens goes through
@@ -548,14 +548,20 @@ impl Hooks for App {
     /// leave history pointing at nobody. A development database is reset by
     /// recreating it instead (AGENTS.md, "Commands"). Each entity slice adds
     /// only its own tables here.
+    ///
+    /// `user_roles` and `user_permissions` stay with the accounts they
+    /// belong to: emptying them alone would strip every kept account of its
+    /// roles and grants, a state no operation produces. `roles` holds the
+    /// four rows that only its migration writes, which nothing would put
+    /// back (ADR 0007 §3).
     async fn truncate(_ctx: &AppContext) -> Result<()> {
         Ok(())
     }
 
     /// Seeds a local database: `cargo loco db seed` (and `backend3-cli db
     /// seed`, which the E2E job runs) creates the invented account of
-    /// [`seed::SEED_ACCOUNT`] unless an account already has its address
-    /// ([`users::Model::seed_account`]).
+    /// [`seed::SEED_ACCOUNT`], with its `admin` role, unless an account
+    /// already has its address ([`users::Model::seed_account`]).
     ///
     /// - `ctx`: the application context; the hook takes the environment and
     ///   the database from it.

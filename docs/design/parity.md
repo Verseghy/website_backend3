@@ -186,7 +186,7 @@ Source: research: SYNTHESIS §2.11.
 
 | ID | Feature | Disposition | ADR | Notes |
 |---|---|---|---|---|
-| NWS-01 | Newsletter subscriber list (e-mail and token), reachable by URL only | retired | [0019] | The table is not migrated (ADR 0017). The newsletter is removed from the safety-net list (ADR 0011), and `edit newsletter` is not created (ADR 0007; open item in section 23). |
+| NWS-01 | Newsletter subscriber list (e-mail and token), reachable by URL only | retired | [0019] | The table is not migrated (ADR 0017). The newsletter is removed from the safety-net list (ADR 0011), and `edit newsletter` is not created (ADR 0007, confirmed by the maintainer on 2026-10-25; research: DECISIONS R9 (D06)). |
 | NWS-02 | backend1's public subscribe and unsubscribe endpoints, which no frontend ever called | retired | [0019] | Not ported |
 
 ## 10. Authentication (AUTH)
@@ -211,7 +211,7 @@ Source: research: SYNTHESIS §3.1, §3.3.
 
 | ID | Feature | Disposition | ADR | Notes |
 |---|---|---|---|---|
-| RBAC-01 | 4 roles and 9 named permissions, created by migrations | port-with-fix | [0007] | The same roles and 8 of the 9 names, plus `edit pages`, `edit menu`, `manage media` and `view logs`, and the four release-1 permissions: 16 in all. `edit newsletter` and `manage backups` are not created (open item in section 23). Roles are defined in code and migrations. |
+| RBAC-01 | 4 roles and 9 named permissions, created by migrations | port-with-fix | [0007] | The same roles and 8 of the 9 names, plus `edit pages`, `edit menu`, `manage media` and `view logs`, and the four release-1 permissions: 16 in all. `edit newsletter` and `manage backups` are not created (confirmed by the maintainer on 2026-10-25, ADR 0007; research: DECISIONS R9 (D06)). Roles are defined in code and migrations. |
 | RBAC-02 | Users: list (name, e-mail, roles, extra permissions), filters by role and permission, create, edit with role and extra-permission checklists, delete | port-with-fix | [0007], [0006], [0011] | Per-user extra grants are kept. Permissions as ADR 0007 defines them. Account lifecycle in NEW-10. Users follow the safety net. |
 | RBAC-03 | Roles list, read-only, with user counts | port | [0007] | |
 | RBAC-04 | Permissions list, read-only | port | [0007] | |
@@ -395,7 +395,6 @@ These rows depend on something no decision has settled yet. Each is settled in t
 | Item | Rows | How it is settled |
 |---|---|---|
 | Where the user-menu avatar comes from: Gravatar (a third-party request that the admin CSP would have to allow) or initials, which need no request | AUTH-08 | The maintainer decides in the auth slice; ADR 0006 and ADR 0023 record it |
-| `manage backups` and `edit newsletter`: decision 6 lists them, decisions 28 and 30 retire their screens, and the docs do not create them | RBAC-01, NWS-01 | The maintainer confirms in the RBAC slice; ADR 0007 records it |
 
 [0002]: adr/0002-postgresql-as-the-database.md
 [0003]: adr/0003-cut-over-one-rehearsed-flip-then-a-read-only-parallel-run.md

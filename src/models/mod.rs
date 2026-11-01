@@ -16,9 +16,13 @@
 //! - [`revisions`]: the append-only revisions of every admin-editable
 //!   entity, and the save that writes a revision with its activity entry
 //!   (ADR 0011 §4, §7).
+//! - [`roles`]: the four roles that a migration seeds (ADR 0007 §3).
 //! - [`task_lock`]: the advisory lock every task runs under (ADR 0016 §4); a
 //!   model module without an entity.
-//! - [`users`]: the admin accounts (ADR 0006).
+//! - [`user_permissions`]: each account's extra grants (ADR 0007 §3).
+//! - [`user_roles`]: the roles each account holds (ADR 0007 §3).
+//! - [`users`]: the admin accounts (ADR 0006), with the roles and grants
+//!   they hold (`users::Model::grants`).
 
 /// The Sea-ORM entities, generated from the migrated schema by
 /// `cargo loco db entities` (sea-orm-cli). Regenerate them after every
@@ -38,5 +42,8 @@ pub mod activity_log;
 pub mod job_queue;
 pub mod media;
 pub mod revisions;
+pub mod roles;
 pub mod task_lock;
+pub mod user_permissions;
+pub mod user_roles;
 pub mod users;

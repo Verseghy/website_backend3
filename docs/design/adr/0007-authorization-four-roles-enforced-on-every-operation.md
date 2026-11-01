@@ -49,7 +49,7 @@ Permission identifiers stay in English, exactly as in backend1, so imported gran
 | `edit newsletter` | retired, not created | nothing: the newsletter screen is retired and its table is not migrated ([ADR 0019](0019-scope-parity-tracking-retired-features-release-1-additions.md)) | — |
 | `manage backups` | dropped, not created | nothing: the Backups screen is retired (research: DECISIONS 28). Backups run outside backend3, through the runbook ([ADR 0023](0023-operations-hardening-rate-limits-monitoring-backups-secrets.md)) | — |
 
-`view logs` was added in the decision record for backend1's log-file viewer. That screen is retired as a documented parity exception; operators use `oc logs` and the runbook (research: DECISIONS 28). backend3 reuses the name for the global activity log and the global trash of [ADR 0011](0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md) (research: DECISIONS 11). `manage backups` was listed in the same decision, but the later decision to retire the Backups screen leaves it nothing to gate, so backend3 does not create it. Both points reconcile the decision record's permission list with its later decisions to retire screens (research: DECISIONS 6, 28 and 30); the maintainer confirms them in review (see follow-up work).
+`view logs` was added in the decision record for backend1's log-file viewer. That screen is retired as a documented parity exception; operators use `oc logs` and the runbook (research: DECISIONS 28). backend3 reuses the name for the global activity log and the global trash of [ADR 0011](0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md) (research: DECISIONS 11). `manage backups` was listed in the same decision, but the later decision to retire the Backups screen leaves it nothing to gate, so backend3 does not create it. Both points reconcile the decision record's permission list with its later decisions to retire screens (research: DECISIONS 6, 28 and 30); the maintainer confirmed them on 2026-10-25 (see follow-up work).
 
 backend3 therefore has 16 permissions: 8 of backend1's 9 names, 4 new ones for areas backend1 already had, and the 4 that [ADR 0019](0019-scope-parity-tracking-retired-features-release-1-additions.md) names for the release-1 screens. This ADR proposes those four names (see follow-up work).
 
@@ -209,7 +209,7 @@ Follow-up work and what must be true in code and tests:
 - The guards in section 6 each have a test, including "last admin" and "grant only what you hold".
 - Whether ra-core's page components pass `record` to `canAccess` is not verified (research: SYNTHESIS §6.28 U5). backend3's own wrappers pass it explicitly. The posts slice settles the question by reading the ra-core 5.15.5 source.
 - The Hungarian permission labels go into the message file ([ADR 0021](0021-hungarian-only-admin-ui.md)).
-- Points 1-3 below are set by this ADR rather than by the decision record. Build them as written; the maintainer confirms them in review, and a change is an edit to this ADR and to the code mapping. Point 4 is decided (research: DECISIONS 6b):
+- Points 1-3 below are set by this ADR rather than by the decision record. Build them as written; a change is an edit to this ADR and to the code mapping. The maintainer confirmed them on 2026-10-25. Asked "Do you confirm that `edit newsletter` and `manage backups` are not created, and that `view logs` gates both the global activity log and the global trash?", the maintainer answered "Confirm points 1-3 as written" (decision-register item D06; research: DECISIONS R9). `src/domain/authz.rs` and the `user_permissions` CHECK hold the 16 names; `view logs` lets its holder see the global trash, while restoring a row still needs the row's resource permission and purging still needs the `admin` role ([ADR 0011](0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md) §6, "Who"). Point 4 is decided (research: DECISIONS 6b):
   1. `edit newsletter` is not created, because the newsletter screen is retired (research: DECISIONS 30);
   2. `manage backups` is not created, although research: DECISIONS 6 lists it, because the Backups screen is dropped (research: DECISIONS 28);
   3. `view logs` is reused to gate the global activity log and the global trash;
@@ -226,7 +226,7 @@ Follow-up work and what must be true in code and tests:
 
 ## References
 
-- research: DECISIONS 6, 10d, 11, 15d, 26, 28, 29, 30 (2026-10-24)
+- research: DECISIONS 6, 10d, 11, 15d, 26, 28, 29, 30 (2026-10-24); DECISIONS R9, decision-register item D06 (answer of 2026-10-25: follow-up points 1-3 confirmed)
 - research: QUESTIONS Q6, Q26, Q28, Q29, Q30
 - research: SYNTHESIS §2.3 (permission gating per operation), §3.3 (users, roles, permissions), §4.3.8 (auth tables), §6.4 (Loco authentication), §6.21 (ra-core access control), §6.22 (Enterprise boundary), §6.28 (unverified items); gap-03 §6.1
 - website_backend@0dead98:database/migrations/2019_04_02_202025_add_permissions.php and the three later permission migrations named in Context

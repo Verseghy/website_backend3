@@ -13,7 +13,13 @@
 //!
 //! The account is read from the database on every request, never from a
 //! cache (ADR 0016): revocation through `token_version`, deactivation and the
-//! trash work because each request sees the current row (ADR 0006 §2).
+//! trash work because each request sees the current row (ADR 0006 §2). Once
+//! the session holds, the extractor also reads the roles and extra grants
+//! that the account holds ([`users::Model::grants`]), so a role or grant
+//! change applies on the account's next request without ending its sessions
+//! (ADR 0007 §5, "Fresh data"; ADR 0006 §2). A refused session costs no such
+//! read. The permission checks and `/auth/me` work from
+//! [`AdminSession::grants`].
 //!
 //! A route says which scopes it accepts with the type parameter, an
 //! [`AcceptedScopes`] marker: [`AdminSession`] (the default, [`AdminScope`])
@@ -35,7 +41,9 @@
 //! Loco's ERROR-level `controller_error` log line, because an expired session
 //! is routine. Loco still logs a token that fails validation itself, at
 //! ERROR level (loco-rs 1.2.0 `validate_jwt`). Any other error stays Loco's
-//! `500`: a database failure, and an `auth` or `auth.jwt` section that is
+//! `500`: a database failure (also while reading the roles and grants), a
+//! stored role or grant that the code does not know (which the schema rules
+//! out), and an `auth` or `auth.jwt` section that is
 //! missing. An outage must not answer 401, which signs the admin UI out
 //! (ADR 0006, follow-up work). A configured `auth.jwt.secret` that is not
 //! base64 is not one of them: loco-rs 1.2.0 decodes the key inside the
@@ -54,7 +62,10 @@ use loco_rs::{auth::jwt::UserClaims, prelude::*};
 
 use super::error_response;
 use crate::{
-    domain::session::{SessionScope, check_session},
+    domain::{
+        authz::AccountGrants,
+        session::{SessionScope, check_session},
+    },
     dtos::admin::error::ErrorCode,
     models::users,
 };
@@ -115,6 +126,9 @@ pub struct AdminSession<A: AcceptedScopes = AdminScope> {
     pub user: users::Model,
     /// The session's scope, one of `A::SCOPES`.
     pub scope: SessionScope,
+    /// The roles and extra grants that the account holds, read for this
+    /// request after the session check (ADR 0007 §3, §5).
+    pub grants: AccountGrants,
     /// The token's claims as Loco validated them: `pid`, and in its
     /// `claims` map the custom claims, such as the `auth_time` that the
     /// session refresh needs. loco-rs 1.2.0 keeps `exp` private and has no
@@ -135,8 +149,8 @@ where
 {
     type Rejection = Response;
 
-    /// Loads the account through Loco's `JWTWithUser` and checks the
-    /// session.
+    /// Loads the account through Loco's `JWTWithUser`, checks the session,
+    /// and reads the account's roles and extra grants.
     ///
     /// - `parts`: the request's head, where Loco finds the token.
     /// - `state`: the router's state, which holds the [`AppContext`].
@@ -145,7 +159,8 @@ where
     ///
     /// `401 unauthorized` in the admin envelope for every refusal, and for
     /// an `auth.jwt.secret` that is not base64 (the module documentation
-    /// says why); Loco's `500` when the database fails or the `auth.jwt`
+    /// says why); Loco's `500` when the database fails, when a stored role
+    /// or grant is one the code does not know, or when the `auth.jwt`
     /// section is missing.
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         // Evaluated when the compiler instantiates this extractor for `A`:
@@ -161,20 +176,32 @@ where
             auth::JWTWithUser::<users::Model>::from_request_parts(parts, state)
                 .await
                 .map_err(loco_refusal_response)?;
-        match check_session(user.session_state(), &claims.claims, A::SCOPES) {
-            Ok(scope) => Ok(Self {
-                user,
-                scope,
-                claims,
-                accepts: PhantomData,
-            }),
+        let scope = match check_session(user.session_state(), &claims.claims, A::SCOPES) {
+            Ok(scope) => scope,
             Err(refusal) => {
                 // DEBUG: an expired or revoked session is routine, and every
                 // open admin tab of a signed-out account sends one.
                 tracing::debug!(user_id = user.id, %refusal, "admin session refused");
-                Err(error_response(ErrorCode::Unauthorized))
+                return Err(error_response(ErrorCode::Unauthorized));
             }
-        }
+        };
+        // After the check, so a refused session costs no query. A failure
+        // here is a server fault, never a 401, which would sign the admin UI
+        // out: Loco's own answer logs it at ERROR and sends its 500. The
+        // model never answers `EntityNotFound` (Loco's 404) for an account
+        // without roles.
+        let ctx = AppContext::from_ref(state);
+        let grants = user
+            .grants(&ctx.db)
+            .await
+            .map_err(|error| Error::from(error).into_response())?;
+        Ok(Self {
+            user,
+            scope,
+            grants,
+            claims,
+            accepts: PhantomData,
+        })
     }
 }
 
