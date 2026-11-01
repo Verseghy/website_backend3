@@ -31,7 +31,16 @@
 #     RUSTFLAGS stay empty, never `-C target-cpu=native`: the binary must run
 #     on the edge node, not only on the machine that built it.
 #   - No SQLite and no OpenSSL are linked (ADR 0022 sections 2 and 4), so the
-#     rust stage needs only gcc as the linker and C compiler for build scripts.
+#     rust stage needs only gcc as the linker and C compiler for build scripts,
+#     and jq for scripts/crate-notices.sh.
+#   - The image carries the licence notices of the third-party code in the
+#     binary (ADR 0042; research: DECISIONS R23, D115). After the release
+#     build, the rust stage runs scripts/crate-notices.sh, which writes them
+#     with cargo-about from Cargo.lock and fails on a gap; the runtime stage
+#     copies them to /app/licenses/. cargo-about is pinned by version and
+#     SHA-256 like rustup-init, and only the rust stage has it. The required
+#     `cargo-deny check bans licenses sources` job runs the same script on
+#     every PR with the same cargo-about version (check-toolchain.sh rule 5).
 #   - The runtime image runs as an arbitrary non-root UID under the
 #     restricted-v2 SCC: every file is owned by root:0 and world-readable, the
 #     binary is world-executable, and nothing is written at run time except
@@ -98,7 +107,8 @@ RUN VITE_CLIPBOARD_RECORDER=0 VITE_SOURCE_COMMIT="$SOURCE_COMMIT" npm run build 
  && chmod -R a+rX dist
 
 ########################################################################
-# Stage rust: rustup + cargo build --release --locked -> backend3-cli
+# Stage rust: rustup + cargo build --release --locked -> backend3-cli,
+# and the licence notices of its crates -> target/licenses
 ########################################################################
 FROM registry.access.redhat.com/ubi9/ubi@sha256:217dd5692d369799d34d09ffb6f5f3404efebc7900834490fdf9ae92fd6721d4 AS rust
 
@@ -107,6 +117,13 @@ ARG RUST_VERSION
 # https://static.rust-lang.org/rustup/archive/<version>/x86_64-unknown-linux-gnu/rustup-init.sha256
 ARG RUSTUP_VERSION=1.29.2
 ARG RUSTUP_INIT_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+# cargo-about, which writes the crates' licence notices (ADR 0042): its static
+# Linux musl release. Bump both together from
+# https://github.com/EmbarkStudios/cargo-about/releases/download/<version>/cargo-about-<version>-x86_64-unknown-linux-musl.tar.gz.sha256,
+# and the `cargo-about@<version>` that .github/workflows/cargo-deny.yml
+# installs with them (scripts/ci/check-toolchain.sh rule 5 checks it).
+ARG CARGO_ABOUT_VERSION=0.9.3
+ARG CARGO_ABOUT_SHA256=3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
 
 # RUSTUP_TOOLCHAIN overrides rust-toolchain.toml inside the build. The two are
 # equal (the Toolchain CI job checks it); the override keeps rustup from
@@ -118,7 +135,7 @@ ENV RUSTUP_HOME=/opt/rustup \
     RUSTUP_TOOLCHAIN=${RUST_VERSION} \
     CARGO_TERM_COLOR=never
 
-RUN dnf install -y --nodocs --setopt=install_weak_deps=0 gcc \
+RUN dnf install -y --nodocs --setopt=install_weak_deps=0 gcc jq \
  && dnf clean all \
  && rm -rf /var/cache/dnf
 
@@ -133,6 +150,20 @@ RUN dl="$(mktemp -d)" \
  && rustc --version \
  && cargo --version
 
+# The archive holds a directory with the binary and cargo-about's own licence
+# files; only the binary is installed, next to cargo's, and it never reaches
+# the runtime image.
+RUN dl="$(mktemp -d)" \
+ && archive="cargo-about-${CARGO_ABOUT_VERSION}-x86_64-unknown-linux-musl" \
+ && curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+      --output "$dl/$archive.tar.gz" \
+      "https://github.com/EmbarkStudios/cargo-about/releases/download/${CARGO_ABOUT_VERSION}/$archive.tar.gz" \
+ && echo "${CARGO_ABOUT_SHA256}  $dl/$archive.tar.gz" | sha256sum --check --strict - \
+ && tar -xzf "$dl/$archive.tar.gz" -C "$dl" \
+ && install -m 0755 "$dl/$archive/cargo-about" /opt/cargo/bin/cargo-about \
+ && rm -rf "$dl" \
+ && cargo-about --version
+
 WORKDIR /src
 COPY . .
 # The same SOURCE_COMMIT reaches rustc, where App::app_version reads it with
@@ -144,8 +175,17 @@ ARG SOURCE_COMMIT
 RUN SOURCE_COMMIT="$SOURCE_COMMIT" cargo build --release --locked \
  && test -x target/release/backend3-cli
 
+# The licence notices of the crates just linked, from the same Cargo.lock and
+# toolchain (ADR 0042). The script downloads the crates of the other platforms
+# too (cargo metadata reads every package), and fails the build on a gap: a
+# licence it cannot resolve, a clarification in about.toml that no longer
+# holds, a licence file it would replace by the standard text, a NOTICE file
+# it does not carry or a linked crate it leaves out.
+RUN bash scripts/crate-notices.sh --out /src/target/licenses
+
 ########################################################################
-# Stage runtime: ubi-micro with the binary, config/ and admin/dist
+# Stage runtime: ubi-micro with the binary, config/, admin/dist and the
+# licence notices
 ########################################################################
 FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:5be877a2a280ae36eb9ab80ca4efb28bbf77c57abbba38137cdc37a03b8465e6 AS runtime
 
@@ -161,6 +201,9 @@ ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 WORKDIR /app
 COPY --from=rust /src/target/release/backend3-cli /app/backend3-cli
 COPY --from=rust /src/config/ /app/config/
+# crates.html, notices/, COPYRIGHT-library.html and README.txt (ADR 0042); the
+# script made them world-readable, and the rust stage's files are root's.
+COPY --from=rust /src/target/licenses/ /app/licenses/
 # --from keeps the admin stage's owner (UID 1001); --chown makes dist root's,
 # like every other file here, so the runtime user cannot modify it.
 COPY --from=admin --chown=0:0 /opt/app-root/src/admin/dist/ /app/admin/dist/

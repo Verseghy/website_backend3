@@ -3,7 +3,11 @@
 # Two jobs, two contexts:
 #   - "cargo-deny check bans licenses sources" (required): the licence
 #     allow-list compatible with AGPL-3.0-only, the openssl ban and the source
-#     rules of deny.toml. It fails only when the repository changes.
+#     rules of deny.toml. It fails only when the repository changes. A second
+#     step runs scripts/crate-notices.sh, the generation of the binary's
+#     licence notices that the Containerfile's rust stage runs, with its
+#     checks, so a gap fails before master (ADR 0042). A step of this job,
+#     not a job of its own, so no new required context.
 #   - "cargo-deny check advisories" (not required): RustSec advisories. A new
 #     advisory can fail it with no change in the repository, so it must not
 #     block unrelated PRs. The fix for a new advisory is a dedicated PR.
@@ -69,6 +73,17 @@ jobs:
           fallback: none
       - name: cargo deny check bans licenses sources
         run: cargo deny --locked --workspace --all-features check bans licenses sources
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          # The version that the Containerfile pins (ARG CARGO_ABOUT_VERSION;
+          # scripts/ci/check-toolchain.sh rule 5 keeps the two equal). The
+          # action installs the same checksummed Linux musl release binary.
+          tool: cargo-about@0.9.3
+          fallback: none
+      - name: Licence notices of the binary's crates
+        # The same generation and checks as the Containerfile's rust stage
+        # (ADR 0042). The output is thrown away; the image build writes its own.
+        run: bash scripts/crate-notices.sh --out "$RUNNER_TEMP/licenses"
 
   advisories:
     name: cargo-deny check advisories

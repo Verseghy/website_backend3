@@ -21,11 +21,20 @@
 #      digest, and the admin stage's ubi9/nodejs-<major> image matches
 #      admin/.node-version (ADR 0022 section 2: the hub's build nodes cannot run
 #      a UBI 10 / RHEL 10 userland). `FROM <earlier stage>` is allowed.
+#   5. The Containerfile pins cargo-about, which writes the crates' licence
+#      notices in the rust stage (ADR 0042): `ARG CARGO_ABOUT_VERSION=<v>`, an
+#      exact release, and `ARG CARGO_ABOUT_SHA256=<sha256>`. Every
+#      `cargo-about@<v>` that a workflow installs with taiki-e/install-action
+#      names the same version, and at least one workflow installs it (the
+#      required `cargo-deny check bans licenses sources` job runs
+#      scripts/crate-notices.sh), so the PR check runs the cargo-about that
+#      builds the image. Dependabot bumps the action, never the tool's
+#      version, so the two only move together by hand.
 # Rule 4 is the static half of the Containerfile rules, which no other check
 # covers before the post-merge PAC build. ADR 0022 section 3's table named
 # rules 1-3 for this job, without rule 1's legacy-file check; ADR 0029
 # section 3 brings the job's row up to date with all four rules and
-# check-workspace-deps.sh.
+# check-workspace-deps.sh; ADR 0042 adds rule 5 to that row.
 #
 # A toolchain bump changes rust-toolchain.toml and the Containerfile ARG in the
 # same PR; a Node.js bump changes admin/.node-version, the ARG and the image
@@ -56,6 +65,9 @@ problems=()
 RUST_CHANNEL=""
 NODE_MAJOR=""
 declare -A GLOBAL_ARGS=()
+ABOUT_VERSIONS=()
+ABOUT_SUMS=()
+ABOUT_VERSION=""
 
 # problem MESSAGE: record one violation.
 problem() {
@@ -182,6 +194,8 @@ check_containerfile() {
         ((seen_from)) || GLOBAL_ARGS[$name]=$value
         if [[ $name == RUST_VERSION ]]; then rust_defaults+=("$value"); fi
         if [[ $name == NODE_VERSION ]]; then node_defaults+=("$value"); fi
+        if [[ $name == CARGO_ABOUT_VERSION ]]; then ABOUT_VERSIONS+=("$value"); fi
+        if [[ $name == CARGO_ABOUT_SHA256 ]]; then ABOUT_SUMS+=("$value"); fi
         ;;
       FROM)
         seen_from=1
@@ -227,6 +241,70 @@ check_containerfile() {
   fi
 }
 
+# workflow_cargo_about_tools ROOT: print, one per line, every tool entry
+# naming cargo-about that a taiki-e/install-action step of a workflow under
+# ROOT/.github/workflows installs, as "<file>\t<entry>" (for example
+# "cargo-deny.yml\tcargo-about@0.9.3"). The action takes a comma-separated
+# list in `with.tool`. A workflow that yq cannot read prints "!\t<message>":
+# this runs in a process substitution, where problem() would be lost.
+workflow_cargo_about_tools() {
+  local root=$1 file tools tool
+  shopt -s nullglob
+  local -a files=("$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml)
+  shopt -u nullglob
+  for file in "${files[@]}"; do
+    if ! tools=$(yq '.jobs[].steps[]? | select((.uses // "") | test("^taiki-e/install-action@")) | .with.tool // ""' "$file" 2>&1); then
+      printf '!\t%s\n' "${file#"$root"/}: not valid YAML: ${tools//$'\n'/ }"
+      continue
+    fi
+    while IFS= read -r tool; do
+      tool=${tool//[[:space:]]/}
+      [[ $tool == cargo-about || $tool == cargo-about@* ]] && printf '%s\t%s\n' "${file##*/}" "$tool"
+    done < <(tr ',' '\n' <<<"$tools")
+  done
+  return 0
+}
+
+# check_cargo_about ROOT: apply rule 5 to the Containerfile ARGs that
+# check_containerfile collected and to the workflows under ROOT.
+check_cargo_about() {
+  local root=$1 value file tool found=0
+  if ((${#ABOUT_VERSIONS[@]} == 0)); then
+    problem "Containerfile has no 'ARG CARGO_ABOUT_VERSION=<version>' default. The rust stage installs cargo-about for the crates' licence notices (ADR 0042); add it with ARG CARGO_ABOUT_SHA256."
+  fi
+  for value in "${ABOUT_VERSIONS[@]}"; do
+    if ! [[ $value =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      problem "Containerfile ARG CARGO_ABOUT_VERSION is '$value'; pin an exact release, MAJOR.MINOR.PATCH."
+    elif [[ -n $ABOUT_VERSION && $value != "$ABOUT_VERSION" ]]; then
+      problem "Containerfile has two CARGO_ABOUT_VERSION defaults, '$ABOUT_VERSION' and '$value'; keep one."
+    else
+      ABOUT_VERSION=$value
+    fi
+  done
+  if ((${#ABOUT_SUMS[@]} == 0)); then
+    problem "Containerfile has no 'ARG CARGO_ABOUT_SHA256=<sha256>' default; pin the release archive's SHA-256 from its .sha256 file."
+  fi
+  for value in "${ABOUT_SUMS[@]}"; do
+    [[ $value =~ ^[0-9a-f]{64}$ ]] || problem "Containerfile ARG CARGO_ABOUT_SHA256 is '$value', which is not a SHA-256 (64 lower-case hex digits)."
+  done
+  while IFS=$'\t' read -r file tool; do
+    [[ -n $file ]] || continue
+    if [[ $file == "!" ]]; then
+      problem "$tool"
+      continue
+    fi
+    found=1
+    if [[ $tool == cargo-about ]]; then
+      problem "$file installs cargo-about without a version; write cargo-about@${ABOUT_VERSION:-<the CARGO_ABOUT_VERSION of the Containerfile>}."
+    elif [[ -n $ABOUT_VERSION && ${tool#cargo-about@} != "$ABOUT_VERSION" ]]; then
+      problem "$file installs $tool, but the Containerfile's ARG CARGO_ABOUT_VERSION is '$ABOUT_VERSION'. The PR check must run the cargo-about that builds the image; change both in the same PR."
+    fi
+  done < <(workflow_cargo_about_tools "$root")
+  if ((!found)); then
+    problem "no workflow installs cargo-about with taiki-e/install-action; the required 'cargo-deny check bans licenses sources' job runs scripts/crate-notices.sh with cargo-about@${ABOUT_VERSION:-<version>} (ADR 0042)."
+  fi
+}
+
 main() {
   local root=.
   while (($# > 0)); do
@@ -245,13 +323,14 @@ main() {
   read_rust_channel "$root"
   read_node_major "$root"
   check_containerfile "$root"
+  check_cargo_about "$root"
 
   if ((${#problems[@]} == 0)); then
-    echo "Toolchain OK: Rust $RUST_CHANNEL and Node.js $NODE_MAJOR agree across rust-toolchain.toml, admin/.node-version and the Containerfile."
+    echo "Toolchain OK: Rust $RUST_CHANNEL and Node.js $NODE_MAJOR agree across rust-toolchain.toml, admin/.node-version and the Containerfile, and the workflows install the Containerfile's cargo-about $ABOUT_VERSION."
     return 0
   fi
   {
-    echo "Toolchain check failed (ADR 0004 section 2, ADR 0022 sections 2 and 3):"
+    echo "Toolchain check failed (ADR 0004 section 2, ADR 0022 sections 2 and 3, ADR 0042):"
     local p
     for p in "${problems[@]}"; do
       echo "  - $p"

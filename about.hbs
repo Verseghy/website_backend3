@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<!--
+  The template of /app/licenses/crates.html (ADR 0042). cargo-about renders it
+  with about.toml; scripts/crate-notices.sh runs it in the Containerfile's rust
+  stage and in the PR check. Handlebars escapes every {{value}} for HTML, so a
+  licence text can never inject markup; no value here uses the unescaped
+  triple-brace form.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Licence notices of the crates in backend3-cli</title>
+<style>
+  body { font-family: sans-serif; line-height: 1.4; max-width: 60rem; margin: 0 auto; padding: 1rem; }
+  table { border-collapse: collapse; }
+  th, td { border-bottom: 1px solid #ccc; padding: 0.15rem 0.6rem; text-align: left; vertical-align: top; }
+  pre { white-space: pre-wrap; background: #f6f6f6; padding: 0.75rem; overflow-x: auto; }
+  .note { font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Licence notices of the crates in backend3-cli</h1>
+
+<p>
+  <code>/app/backend3-cli</code>, the program of this image, is website_backend3
+  (<a href="https://github.com/Verseghy/website_backend3">source</a>), licensed
+  AGPL-3.0-only. It is built with Rust and links the third-party crates below.
+  This file lists every third-party crate in the binary's dependency graph for
+  <code>x86_64-unknown-linux-gnu</code>, without build scripts' and tests'
+  dependencies, with its version, its licence and the licence text. The
+  procedural macros that run while the binary compiles are listed too.
+  cargo-about wrote this file from <code>Cargo.lock</code> when the image was
+  built. The source of each crate is published on crates.io at the version
+  listed, which the links below open.
+</p>
+<p>
+  Beside this file, in <code>/app/licenses/</code>: <code>README.txt</code>,
+  which lists every file of the directory; <code>notices/</code>, the
+  <code>NOTICE</code> files that crates under the Apache License 2.0 ship, which
+  <code>README.txt</code> lists;
+  and <code>COPYRIGHT-library.html</code>, the notices of the Rust standard
+  library from the toolchain that built the binary. The notices of the npm
+  packages bundled into the admin UI are in
+  <code>/app/admin/dist/licenses.txt</code>.
+</p>
+
+<h2 id="ijg-statement">The Independent JPEG Group</h2>
+<p>This software is based in part on the work of the Independent JPEG Group.</p>
+
+<h2 id="overview">Licences</h2>
+<ul>
+{{#each overview}}
+  <li><a href="#{{id}}">{{name}}</a> ({{id}}): {{count}}</li>
+{{/each}}
+</ul>
+
+<h2 id="crates">Crates</h2>
+<table>
+<thead><tr><th>Crate</th><th>Version</th><th>Licence</th></tr></thead>
+<tbody>
+{{#each crates}}
+<tr><td>{{package.name}}</td><td><a href="https://crates.io/crates/{{package.name}}/{{package.version}}">{{package.version}}</a></td><td>{{license}}</td></tr>
+{{/each}}
+</tbody>
+</table>
+
+<h2 id="texts">Licence texts</h2>
+{{#each licenses}}
+{{#if first_of_kind}}
+<h3 id="{{id}}">{{name}} ({{id}})</h3>
+{{/if}}
+<section id="{{id}}-{{@index}}">
+<p>Used by:
+{{#each used_by}}
+  <a href="https://crates.io/crates/{{crate.name}}/{{crate.version}}">{{crate.name}} {{crate.version}}</a>{{#unless @last}},{{/unless}}
+{{/each}}
+</p>
+{{#if source_path}}
+<p class="note">The text of the crate's own licence file.</p>
+{{else}}
+<p class="note">The standard text of the licence: these crates ship no text of it of their own, so it names no copyright holder.</p>
+{{/if}}
+<pre>{{text}}</pre>
+</section>
+{{/each}}
+</body>
+</html>
