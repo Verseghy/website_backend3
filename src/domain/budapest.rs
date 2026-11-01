@@ -18,6 +18,10 @@
 //!   parses, is refused both ways: PostgreSQL would store `12:34:60` as
 //!   `12:35:00`.
 //! - Near the ends of chrono's range the functions return an error, not panic.
+//! - A calendar day that is to be stored converts through
+//!   [`date_to_stored_midnight`], which refuses every day after
+//!   [`CHRONO_TZ_LAST_CHANGE_YEAR`] (ADR 0041 §2). [`date_to_midnight`]
+//!   converts every day, for bounds that are compared but never stored.
 //!
 //! Since 1984 the clocks change at 02:00 and 03:00, so every day has exactly
 //! one midnight. Under older rules they changed at midnight on a few days of
@@ -25,7 +29,8 @@
 //! two, and [`date_to_midnight`] takes the earlier.
 
 use chrono::{
-    DateTime, MappedLocalTime, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone, Timelike, Utc,
+    DateTime, Datelike, MappedLocalTime, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone,
+    Timelike, Utc,
 };
 use chrono_tz::Tz;
 
@@ -48,10 +53,28 @@ pub const ZONE_NAME: &str = "Europe/Budapest";
 /// New tz data can change Hungary's rules and so the Budapest wall time of a
 /// stored instant (ADR 0010, Consequences). A unit test compares this with
 /// chrono-tz's data, so a bump that brings new data fails until it records the
-/// version and follows ADR 0010's tz-data procedure. PostgreSQL's `AT TIME
-/// ZONE` and the midnight check of point 2 use the database's own tz data,
-/// which comes with the PostgreSQL image and is versioned separately.
+/// version and follows the tz-data procedure of ADR 0041 §3. PostgreSQL's `AT
+/// TIME ZONE` and the midnight check of point 2 use the database's own tz
+/// data, which comes with the PostgreSQL image and is versioned separately;
+/// `tests/tz_parity/mod.rs` compares the Budapest midnights of the two and pins
+/// backend3's in a committed snapshot (ADR 0041 §2).
 pub const TZ_DATA_VERSION: &str = "2025b";
+
+/// The last year in which chrono-tz lists a Budapest clock change: 2099 in
+/// chrono-tz 0.10.4.
+///
+/// chrono-tz turns the tz data's rules into a table of offset changes when it
+/// is built, and for Budapest that table ends with the change of 2099-10-25.
+/// It keeps winter time (`+01:00`) for every later instant, while the tz data
+/// goes on changing the clocks each spring and autumn, and so does
+/// PostgreSQL, which reads the tz data's rules at run time. From 2100 on, a
+/// summer day's midnight from [`date_to_midnight`] is therefore one hour later
+/// than PostgreSQL's, and the check of ADR 0010 point 2 would refuse it. The
+/// tz-data parity test compares the two sides up to the end of this year, and
+/// [`date_to_stored_midnight`] refuses every later day, so backend3 stores
+/// only days that the test compares (ADR 0041 §2). A unit test fails when
+/// chrono-tz's table ends in another year.
+pub const CHRONO_TZ_LAST_CHANGE_YEAR: i32 = 2099;
 
 /// chrono marks a leap second by a nanosecond field of one second or more.
 const LEAP_SECOND_NANOS: u32 = 1_000_000_000;
@@ -77,6 +100,17 @@ pub enum BudapestTimeError {
     /// only).
     #[error("{date} has no Budapest midnight (the clocks skipped 00:00), so it cannot be stored.")]
     NoMidnight {
+        /// The calendar day as given.
+        date: NaiveDate,
+    },
+    /// The day lies after 31 December of [`CHRONO_TZ_LAST_CHANGE_YEAR`],
+    /// where chrono-tz's Budapest table ends, so it is not stored (ADR 0041
+    /// §2). Winter days are refused too, so the bound is one year boundary.
+    #[error(
+        "{date} is after {last}-12-31, the last calendar day that can be stored. Check the year.",
+        last = CHRONO_TZ_LAST_CHANGE_YEAR
+    )]
+    AfterTzTable {
         /// The calendar day as given.
         date: NaiveDate,
     },
@@ -150,7 +184,11 @@ pub fn instant_to_wall(instant: DateTime<Utc>) -> Result<NaiveDateTime, Budapest
 /// Converts a calendar day to the instant of its Budapest midnight, the form in
 /// which every calendar-day column stores it (ADR 0010 point 2).
 ///
-/// - `date`: the calendar day, for example a post's date.
+/// - `date`: the calendar day, for example the first day of a public month.
+///
+/// A day that is to be stored goes through [`date_to_stored_midnight`]
+/// instead; this function converts every year, for bounds that are compared
+/// with stored instants, such as the public month and grid bounds.
 ///
 /// # Errors
 ///
@@ -161,6 +199,31 @@ pub fn date_to_midnight(date: NaiveDate) -> Result<DateTime<Utc>, BudapestTimeEr
         BudapestTimeError::NonexistentWallTime { .. } => BudapestTimeError::NoMidnight { date },
         other => other,
     })
+}
+
+/// Converts a calendar day that is to be stored to the instant of its
+/// Budapest midnight: [`date_to_midnight`], for the days up to 31 December
+/// of [`CHRONO_TZ_LAST_CHANGE_YEAR`] (ADR 0041 §2).
+///
+/// - `date`: the day to store, for example a post's date from the admin
+///   form or a legacy `posts_data.date` in the importer.
+///
+/// chrono-tz's Budapest table ends in that year, and after it chrono-tz
+/// keeps winter time while PostgreSQL goes on applying the summer-time rule,
+/// so the check of ADR 0010 point 2 would refuse the midnight of each later
+/// summer day as a database error. Every later day is refused here instead,
+/// winter days included, so the rule is one year boundary, and the admin
+/// answers it on the field and the importer refuses the row (point 6).
+///
+/// # Errors
+///
+/// [`BudapestTimeError::AfterTzTable`] for a day after that year, and the
+/// errors of [`date_to_midnight`].
+pub fn date_to_stored_midnight(date: NaiveDate) -> Result<DateTime<Utc>, BudapestTimeError> {
+    if date.year() > CHRONO_TZ_LAST_CHANGE_YEAR {
+        return Err(BudapestTimeError::AfterTzTable { date });
+    }
+    date_to_midnight(date)
 }
 
 /// Converts the stored Budapest midnight of a calendar day back to the day.
@@ -213,7 +276,7 @@ fn refuse_leap_second(value: NaiveDateTime) -> Result<(), BudapestTimeError> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Datelike, TimeDelta};
+    use chrono::TimeDelta;
     use proptest::prelude::*;
 
     use super::*;
@@ -237,8 +300,35 @@ mod tests {
         assert_eq!(
             chrono_tz::IANA_TZDB_VERSION,
             TZ_DATA_VERSION,
-            "chrono-tz compiles in other tz data than TZ_DATA_VERSION records: follow ADR 0010's \
-             tz-data procedure, then update TZ_DATA_VERSION and the chrono-tz comment in Cargo.toml"
+            "chrono-tz compiles in other tz data than TZ_DATA_VERSION records: follow the tz-data \
+             procedure of ADR 0041 §3, then update TZ_DATA_VERSION and the chrono-tz comment in \
+             Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn chrono_tz_lists_clock_changes_until_the_recorded_year() {
+        // Mid-July is summer time in every year whose changes chrono-tz
+        // lists, from 1980 on, and winter time after its table ends.
+        let summer_time_in = |year: i32| {
+            let noon = NaiveDate::from_ymd_opt(year, 7, 15)
+                .and_then(|day| day.and_hms_opt(12, 0, 0))
+                .expect("mid-July noon");
+            ZONE.offset_from_utc_datetime(&noon).fix().local_minus_utc() == 7_200
+        };
+        let last = (1980..=crate::domain::date_text::LAST_YEAR).rfind(|&year| summer_time_in(year));
+        assert_eq!(
+            last,
+            Some(CHRONO_TZ_LAST_CHANGE_YEAR),
+            "the last year with Budapest summer time in chrono-tz is no longer \
+             CHRONO_TZ_LAST_CHANGE_YEAR: chrono-tz's table ends in another year, or new tz data \
+             changed Hungary's rules. Follow the tz-data procedure of ADR 0041 §3 and set the \
+             constant, which also moves the end of the parity test in tests/tz_parity/mod.rs"
+        );
+        let without = (1980..=CHRONO_TZ_LAST_CHANGE_YEAR).find(|&year| !summer_time_in(year));
+        assert_eq!(
+            without, None,
+            "a year without summer time: Hungary's rules changed"
         );
     }
 
@@ -328,6 +418,49 @@ mod tests {
         assert!(!is_budapest_midnight(utc("2026-03-28T23:00:00.000001Z")));
         let date = date("1981-03-29");
         assert_eq!(date_to_midnight(date), Err(E::NoMidnight { date }));
+    }
+
+    #[test]
+    fn a_stored_day_ends_with_the_last_year_of_chrono_tzs_table() {
+        let year = CHRONO_TZ_LAST_CHANGE_YEAR;
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("a day");
+        let at = |d: NaiveDate, h| d.and_hms_opt(h, 0, 0).expect("an hour").and_utc();
+        // The last day stored, in winter time, and a summer day of its year.
+        let last = day(year, 12, 31);
+        assert_eq!(date_to_stored_midnight(last), Ok(at(day(year, 12, 30), 23)));
+        let summer = day(year, 7, 1);
+        assert_eq!(
+            date_to_stored_midnight(summer),
+            Ok(at(day(year, 6, 30), 22))
+        );
+        // The first day refused, a winter day after it (on which chrono-tz
+        // and PostgreSQL agree), a summer day and the last year of the forms.
+        for date in [
+            day(year + 1, 1, 1),
+            day(year + 1, 1, 15),
+            day(year + 1, 7, 1),
+            day(9999, 12, 31),
+        ] {
+            assert_eq!(
+                date_to_stored_midnight(date),
+                Err(E::AfterTzTable { date }),
+                "{date}"
+            );
+            assert!(date_to_midnight(date).is_ok(), "{date}");
+        }
+        // The other refusals stay those of date_to_midnight.
+        let skipped = date("1981-03-29");
+        assert_eq!(
+            date_to_stored_midnight(skipped),
+            Err(E::NoMidnight { date: skipped })
+        );
+        let first = day(year + 1, 1, 1);
+        assert_eq!(
+            E::AfterTzTable { date: first }.to_string(),
+            format!(
+                "{first} is after {year}-12-31, the last calendar day that can be stored. Check the year."
+            )
+        );
     }
 
     #[test]
@@ -466,6 +599,19 @@ mod tests {
                 Err(E::OutOfRange { .. }) => prop_assert_eq!(d, NaiveDate::MIN),
                 Err(other) => return Err(unexpected(other, d)),
             }
+        }
+
+        // ADR 0041 §2: a day to be stored converts as date_to_midnight
+        // converts it up to the end of chrono-tz's table, and every later
+        // day is refused.
+        #[test]
+        fn a_stored_day_converts_as_any_day_until_the_table_ends(d in dates()) {
+            let expected = if d.year() > CHRONO_TZ_LAST_CHANGE_YEAR {
+                Err(E::AfterTzTable { date: d })
+            } else {
+                date_to_midnight(d)
+            };
+            prop_assert_eq!(date_to_stored_midnight(d), expected);
         }
 
         #[test]

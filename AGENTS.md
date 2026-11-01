@@ -66,7 +66,7 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 | `src/workers/`, `src/tasks/` | background workers and tasks (ADR 0016); `src/tasks/import_mysql/` is the legacy import (ADR 0017, `docs/design/data-migration.md`), built only with the default Cargo feature `import-mysql`, which also brings its MySQL driver; its pure parts, in `src/domain/import_mysql/`, are built in every build |
 | `migration/` | Sea-ORM migrations (ADR 0009) |
 | `config/` | `development`, `test`, `e2e` and `production` configuration; typed settings under `settings:` |
-| `tests/` | integration, request and architecture tests (`tests/architecture.rs`, with the SQL date lint of ADR 0010 point 10 in `tests/architecture/sql_dates.rs`), the `/storage` media contract suite (`tests/media_contract/`), the schema snapshot (`tests/schema/`, ADR 0009), and the expected DDL of the legacy MySQL database (`tests/fixtures/legacy/schema.sql`), which compose.yaml's MySQL source loads. `tests/support/` also holds the `/api/v1` test harness (public-api.md §16, §17): the named fixtures with their soft-deleted twins (`fixtures.rs`), the response check against the served OpenAPI document (`openapi_schema.rs`), and the route samples (`public_samples.rs`) and rules (`public_rules.rs`) of the global suite `tests/requests/public_global.rs`; recipe 3 of `.claude/skills/backend3/SKILL.md` says what each endpoint adds to them |
+| `tests/` | integration, request and architecture tests (`tests/architecture.rs`, with the SQL date lint of ADR 0010 point 10 in `tests/architecture/sql_dates.rs`), the `/storage` media contract suite (`tests/media_contract/`), the schema snapshot (`tests/schema/`, ADR 0009), the tz-data parity test of backend3's and PostgreSQL's Budapest midnights, with the snapshot of backend3's (`tests/tz_parity/`, ADR 0041), and the expected DDL of the legacy MySQL database (`tests/fixtures/legacy/schema.sql`), which compose.yaml's MySQL source loads. `tests/support/` also holds the `/api/v1` test harness (public-api.md §16, §17): the named fixtures with their soft-deleted twins (`fixtures.rs`), the response check against the served OpenAPI document (`openapi_schema.rs`), and the route samples (`public_samples.rs`) and rules (`public_rules.rs`) of the global suite `tests/requests/public_global.rs`; recipe 3 of `.claude/skills/backend3/SKILL.md` says what each endpoint adds to them |
 | `examples/media_contract.rs` | runs that suite from the command line against a running server (ADR 0015 §3, the co-mount test) |
 | `deploy/media/` | the media server: its nginx configuration, which website_k8s copies byte for byte, and its pinned image (`deploy/media/README.md`, ADR 0015 §1) |
 | `admin/` | the admin UI: an npm project (ADR 0004, ADR 0021) |
@@ -89,8 +89,17 @@ DECISIONS R13). `compose.yaml` passes those arguments in
 `POSTGRES_INITDB_ARGS`, and the CI `Test` job fails unless `template1` reports
 that locale. The minor may differ: production's Argo CD Image Updater follows
 the 18 minor releases by itself, while `compose.yaml` pins its tag and digest
-and nothing bumps them automatically, so a compose bump is a manual change. A
-container keeps the environment it was created with. Run in the checkout that
+and nothing bumps them automatically, so a compose bump is a manual change.
+The image also brings PostgreSQL's tz data, which the tz-data parity test
+compares with backend3's: a compose bump states the image's tz data version
+and passes that test, and before production moves to an image whose tz data
+differs from compose.yaml's, compose.yaml follows it to that tag (ADR 0041
+§3). The test reads the version from the image's tzdata.zi with
+`pg_read_file`, which needs a superuser or a member of `pg_read_server_files`;
+compose's `loco` is the image's bootstrap superuser, so a local database
+with a lesser test role fails that check.
+
+A container keeps the environment it was created with. Run in the checkout that
 created it, `podman-compose up -d postgres` (or `docker compose up -d
 postgres`) sees that `compose.yaml` changed the service and recreates the
 container, so it picks up a change such as the locale arguments on its own;

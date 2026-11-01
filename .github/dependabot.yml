@@ -189,6 +189,9 @@ updates:
       # "0.10"); a new line would be a second tz database and a deliberate PR.
       # Patch releases still arrive as PRs, and one with new tz data fails the
       # tz-data test of src/domain/budapest.rs until it records the version.
+      # Such a PR then follows the two-sided tz-data procedure of ADR 0041 §3:
+      # it states chrono-tz's and compose.yaml's PostgreSQL tz data versions,
+      # and passes the midnight snapshot and the parity test of tests/tz_parity.
       - dependency-name: chrono-tz
         update-types: ["version-update:semver-major"]
       # More crates whose types cross Loco 1.2.0's API (loco-rs@1.2.0:

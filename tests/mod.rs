@@ -26,4 +26,5 @@ mod rich_text;
 mod schema;
 mod support;
 mod tasks;
+mod tz_parity;
 mod workers;
