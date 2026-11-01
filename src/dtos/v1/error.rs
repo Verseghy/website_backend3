@@ -20,6 +20,10 @@
 //! `loco_rs::Error` (`?`), which Loco logs on purpose and answers with the
 //! same bytes as [`ErrorCode::InternalServerError`]'s body.
 //!
+//! A parameter that `crate::domain::v1_params` refuses becomes an [`Error`]
+//! through `From`, so a handler answers it as
+//! `Ok(Error::from(rejection).into_response())`.
+//!
 //! `405` has no code: axum answers it with an empty body, which clients must
 //! not rely on (public-api.md §8).
 
@@ -31,6 +35,8 @@ use axum::{
 use loco_rs::controller::ErrorDetail;
 use serde::Serialize;
 use utoipa::ToSchema;
+
+use crate::domain::v1_params::Rejection;
 
 /// A stable, machine-readable error code. Clients match on this value; the
 /// `description` next to it is free text that may change.
@@ -189,6 +195,21 @@ impl IntoResponse for Error {
     }
 }
 
+/// A parameter that the rules of public-api.md §2.5 refused, as the error
+/// the client gets: the `400` code of the parameter, or `404 not_found` for
+/// a preview token that no stored token can equal (§2.5, §8). The
+/// description is the code's default, which already names the parameter's
+/// rule.
+impl From<Rejection> for Error {
+    fn from(rejection: Rejection) -> Self {
+        Self::new(match rejection {
+            Rejection::Id => ErrorCode::InvalidId,
+            Rejection::Limit => ErrorCode::InvalidLimit,
+            Rejection::Token => ErrorCode::NotFound,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -254,6 +275,29 @@ mod tests {
             serde_json::to_value(&error).expect("serializes"),
             json!({ "error": "invalid_week", "description": "week 53 does not exist in 2025" })
         );
+    }
+
+    #[test]
+    fn every_parameter_rejection_has_the_code_of_section_8() {
+        // public-api.md §2.5: `{id}` and `limit` are `400`s with their own
+        // code; a token that no stored token can equal is a plain `404`.
+        for (rejection, code) in [
+            (Rejection::Id, ErrorCode::InvalidId),
+            (Rejection::Limit, ErrorCode::InvalidLimit),
+            (Rejection::Token, ErrorCode::NotFound),
+        ] {
+            assert_eq!(Error::from(rejection), Error::new(code), "{rejection:?}");
+        }
+        assert_eq!(
+            Error::from(Rejection::Limit).description,
+            "limit must be an integer between 1 and 100"
+        );
+        assert_eq!(
+            Error::from(Rejection::Token).status(),
+            StatusCode::NOT_FOUND
+        );
+        // The table above covers every rejection there is.
+        assert_eq!(Rejection::CHECK_ORDER.len(), 3);
     }
 
     /// The values of header `name` in `response`.

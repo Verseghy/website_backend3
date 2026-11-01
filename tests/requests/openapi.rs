@@ -13,9 +13,13 @@ use std::collections::BTreeSet;
 use axum::http::{Method, StatusCode};
 use backend3::{
     app::App,
-    controllers::v1::openapi::{DOCUMENT_ROUTE, LICENSE, SOURCE_REPOSITORY, document_json},
+    controllers::v1::openapi::{
+        CACHE_CONTROL_HEADER, DOCUMENT_ROUTE, ETAG_HEADER, IF_NONE_MATCH_PARAMETER, LICENSE,
+        NOT_MODIFIED_RESPONSE, SOURCE_REPOSITORY, document_json,
+    },
     domain::{
         api_path::{ApiFamily, api_family},
+        etag::weak_etag,
         route_coverage::{Operation, coverage_gaps, documented_operations},
     },
     dtos::v1::error::ErrorCode,
@@ -57,6 +61,12 @@ async fn the_served_openapi_document_equals_the_snapshot() {
         assert_eq!(response.header("access-control-allow-origin"), "*");
         let document = response.text();
         assert_eq!(document, document_json().expect("the document serializes"));
+        // public-api.md §9: the weak tag of the served text, so a client that
+        // revalidates gets a 304 until the document changes.
+        assert_eq!(
+            response.header("etag").to_str().expect("ASCII"),
+            weak_etag(document.as_bytes())
+        );
         assert_document_snapshot(&document);
     })
     .await;
@@ -148,6 +158,70 @@ async fn the_openapi_document_declares_the_public_error_body() {
             "{body}"
         );
         assert!(body["description"].is_string(), "{body}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_openapi_document_declares_the_caching_headers() {
+    with_server(|request, _ctx| async move {
+        let response = request.get(DOCUMENT_ROUTE).await;
+        let served_tag = response.header("etag").to_str().expect("ASCII").to_owned();
+        let document: Value = response.json();
+        let components = &document["components"];
+        // public-api.md §9: the two headers of every 200, with the values
+        // backend3 sends.
+        let etag = &components["headers"][ETAG_HEADER];
+        assert_eq!(etag["schema"]["type"], "string");
+        let pattern = etag["schema"]["pattern"].as_str().expect("a pattern");
+        assert_eq!(pattern, r#"^W/"[!#-~]+"$"#);
+        assert_eq!(etag["schema"]["examples"], json!([weak_etag(b"[]")]));
+        // The pattern accepts the tag the document itself was served with:
+        // `W/"`, visible ASCII except `"`, and `"`.
+        let opaque = served_tag
+            .strip_prefix("W/\"")
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("a weak tag");
+        assert!(
+            !opaque.is_empty()
+                && opaque
+                    .bytes()
+                    .all(|b| b == b'!' || (b'#'..=b'~').contains(&b)),
+            "{served_tag}"
+        );
+        assert_eq!(
+            components["headers"][CACHE_CONTROL_HEADER]["schema"]["enum"],
+            json!(["no-cache", "no-store"])
+        );
+        // The request header that revalidates.
+        assert_eq!(
+            components["parameters"][IF_NONE_MATCH_PARAMETER],
+            json!({
+                "name": "If-None-Match",
+                "in": "header",
+                "description": components["parameters"][IF_NONE_MATCH_PARAMETER]["description"],
+                "required": false,
+                "schema": { "type": "string" }
+            })
+        );
+        // The 304, which has no content and refers to both headers.
+        let not_modified = &components["responses"][NOT_MODIFIED_RESPONSE];
+        assert!(not_modified.get("content").is_none(), "{not_modified}");
+        assert_eq!(
+            not_modified["headers"],
+            json!({
+                "Cache-Control": { "$ref": "#/components/headers/Cache-Control" },
+                "ETag": { "$ref": "#/components/headers/ETag" }
+            })
+        );
+        for description in [
+            &etag["description"],
+            &components["headers"][CACHE_CONTROL_HEADER]["description"],
+            &components["parameters"][IF_NONE_MATCH_PARAMETER]["description"],
+            &not_modified["description"],
+        ] {
+            assert!(description.as_str().is_some_and(|text| !text.is_empty()));
+        }
     })
     .await;
 }

@@ -1,7 +1,7 @@
 //! The Loco hooks of backend3: how the application loads its configuration,
 //! builds its router and registers workers and tasks.
 //!
-//! Six hooks carry project decisions:
+//! Seven hooks carry project decisions:
 //!
 //! - `after_context` registers the app clock, the one source of "now"
 //!   (ADR 0010 point 7). Handlers, workers and tasks read it with [`clock`]
@@ -23,6 +23,10 @@
 //! - `routes` adds every `/api/v1` route through one builder,
 //!   `controllers::v1::routes`, which puts the CORS layer on those routes
 //!   only, so `/admin` and `/api/admin` never send CORS headers (ADR 0014).
+//! - `middlewares` keeps Loco's default stack and puts
+//!   [`NotModifiedCors`] right outside its `etag` middleware, so a `304`
+//!   under `/api/v1` carries the CORS header that the `etag` middleware drops
+//!   (public-api.md §9, ADR 0014).
 //! - `after_routes` wraps the finished router, middleware stack included, in
 //!   the HTTP request metrics layer.
 //! - `serve` puts [`trim_trailing_slash`] in front of the finished router,
@@ -66,7 +70,10 @@ use loco_rs::{
     bgworker::Queue,
     boot::{BootResult, ServeParams, StartMode, create_app, shutdown_signal},
     config::{Config, QueueConfig},
-    controller::AppRoutes,
+    controller::{
+        AppRoutes,
+        middleware::{self, MiddlewareLayer, MiddlewareStackExt as _},
+    },
     environment::Environment,
     task::Tasks,
 };
@@ -92,6 +99,7 @@ use crate::{
         admin_ui::{self, DistRequirement},
         metrics::{self, HttpMetrics, Metrics, runtime::RuntimeMetrics},
         not_found,
+        v1::caching::NotModifiedCors,
     },
     domain::{
         clock::Clock,
@@ -445,6 +453,22 @@ impl Hooks for App {
         )
         .await?;
         Ok(())
+    }
+
+    /// Loco's default middleware stack, configured by `server.middlewares`,
+    /// with [`NotModifiedCors`] inserted right after `etag`.
+    ///
+    /// Loco applies the stack in order and each entry wraps the router built
+    /// so far, so the entry after `etag` is the layer just outside it and
+    /// sees the `304` that `etag` answers. Every other entry keeps its place,
+    /// so compression, the secure headers and the request id still reach the
+    /// `304` from outside (loco-rs 1.2.0 `controller/app_routes.rs`,
+    /// `controller/middleware/mod.rs`). `tests/requests/public_caching.rs`
+    /// checks the order.
+    fn middlewares(ctx: &AppContext) -> Vec<Box<dyn MiddlewareLayer>> {
+        let mut stack = middleware::default_middleware_stack(ctx);
+        stack.insert_after("etag", Box::new(NotModifiedCors));
+        stack
     }
 
     /// Wraps the router, after Loco's middleware stack, in the HTTP request

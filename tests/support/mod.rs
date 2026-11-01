@@ -1,6 +1,7 @@
 //! Helpers shared by the integration tests.
 
 use std::{
+    collections::BTreeSet,
     io::{self, Read},
     net::{SocketAddr, TcpListener},
     panic::AssertUnwindSafe,
@@ -22,12 +23,20 @@ use axum::{
 use axum_test::{TestResponse, TestServer};
 use backend3::{
     app::{App, set_clock, trim_trailing_slash},
-    domain::{clock::Clock, task_lock_key::task_lock_key},
+    controllers::v1::openapi::DOCUMENT_ROUTE,
+    domain::{
+        api_path::{ApiFamily, api_family},
+        clock::Clock,
+        task_lock_key::task_lock_key,
+    },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::FutureExt;
-use loco_rs::{app::AppContext, testing::prelude::*};
+use loco_rs::{
+    app::{AppContext, Hooks},
+    testing::prelude::*,
+};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
     TransactionTrait, prelude::Uuid,
@@ -472,6 +481,46 @@ pub fn cors_headers(response: &TestResponse) -> Vec<(String, String)> {
 /// - `path`: the path and query to request.
 pub async fn public_get(server: &TestServer, path: &str) -> TestResponse {
     server.get(path).add_header(ORIGIN, SITE_ORIGIN).await
+}
+
+/// Every `/api/v1` path of Loco's route table (`AppRoutes::collect()`, what
+/// `cargo loco routes` prints), with each `{parameter}` segment replaced by
+/// `1`, so that a test of a rule for every public route also checks the
+/// routes a later slice adds.
+///
+/// `1` has the syntax of every path parameter of public-api.md §2.5, so the
+/// request reaches the route. On an empty database its answer may be a
+/// `404`, which carries the same CORS header as a `200`.
+///
+/// - `ctx`: the test's context, whose `App::routes` is read.
+pub fn public_paths(ctx: &AppContext) -> Vec<String> {
+    let paths: BTreeSet<String> = App::routes(ctx)
+        .collect()
+        .into_iter()
+        .filter(|route| api_family(&route.uri) == Some(ApiFamily::V1))
+        .map(|route| sample_path(&route.uri))
+        .collect();
+    // Without this the tests would pass on an empty route table.
+    assert!(paths.contains(DOCUMENT_ROUTE), "{paths:?}");
+    paths.into_iter().collect()
+}
+
+/// `template` with every `{...}` segment replaced by `1`.
+///
+/// - `template`: a route path as Loco's route table writes it, such as
+///   `/api/v1/posts/{id}`.
+pub fn sample_path(template: &str) -> String {
+    template
+        .split('/')
+        .map(|segment| {
+            if segment.starts_with('{') && segment.ends_with('}') {
+                "1"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Asserts the CORS headers of an `/api/v1` response other than a preflight

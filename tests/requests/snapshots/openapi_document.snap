@@ -11,7 +11,7 @@ expression: document
       "name": "AGPL-3.0-only",
       "identifier": "AGPL-3.0-only"
     },
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "paths": {},
   "components": {
@@ -47,6 +47,52 @@ expression: document
           "not_found",
           "internal_server_error"
         ]
+      }
+    },
+    "responses": {
+      "NotModified": {
+        "description": "Not Modified: the `ETag` given in `If-None-Match` is still current, so the stored answer may be used. The body is empty.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/Cache-Control"
+          },
+          "ETag": {
+            "$ref": "#/components/headers/ETag"
+          }
+        }
+      }
+    },
+    "parameters": {
+      "If-None-Match": {
+        "name": "If-None-Match",
+        "in": "header",
+        "description": "The `ETag` of a stored answer. Send it back exactly as it was received: when it equals the `ETag` of the current answer, the answer is `304 Not Modified` without a body. Other forms, such as a list of tags, `*` or the tag without `W/`, may get the full answer.",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "headers": {
+      "Cache-Control": {
+        "schema": {
+          "type": "string",
+          "enum": [
+            "no-cache",
+            "no-store"
+          ]
+        },
+        "description": "`no-cache` on every `200` and `304`: a client may store the answer but revalidates it before every use, so an edit is visible on the next request. `no-store` on a preview and on every error: neither may be stored."
+      },
+      "ETag": {
+        "schema": {
+          "type": "string",
+          "examples": [
+            "W/\"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\""
+          ],
+          "pattern": "^W/\"[!#-~]+\"$"
+        },
+        "description": "A weak validator of the answer's JSON, the same whether the body is sent compressed or not. Clients treat it as opaque and send it back in `If-None-Match` to revalidate a stored answer. Every `200` carries it except a preview (`token` given); an error never does."
       }
     }
   }

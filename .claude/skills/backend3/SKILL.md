@@ -210,7 +210,13 @@ public DTOs and operations that steps 2 and 5 follow.
 3. **Pure parts first** in `src/domain/` (parameter parsing per section 2.5,
    the keyset cursor `src/domain/cursor.rs`, date ranges), with unit tests for
    every documented row and the proptest properties of `public-api.md`
-   section 16.1.
+   section 16.1. The parameters of section 2.5 live in
+   `src/domain/v1_params.rs`: the handler takes the raw query (axum's
+   `RawQuery`) and the path values as strings, decodes the query with
+   `v1_params::Query::parse` and reads each parameter with `Query::first`
+   (the first value wins), then checks them in the order of section 8, path
+   parameters first, returning the first `Rejection`. A new parameter adds
+   its check there and its `Rejection` variant at its place in that order.
 4. **Query on the model** (`posts::Model::list_published(db, filter, cursor, limit)`
    style) using the live-row helper of recipe 2.
 5. **Handler** in `src/controllers/v1/<name>.rs` with `#[utoipa::path(...)]`
@@ -226,9 +232,16 @@ public DTOs and operations that steps 2 and 5 follow.
    `Routes::merge` drops a prefix. If `cargo loco generate controller`
    injected an `.add_route(...)` line into `App::routes`, move it there. A
    client error is a `crate::dtos::v1::error::Error` answered with
-   `Ok(error.into_response())`, never turned into a `loco_rs::Error`, which
-   Loco logs at `ERROR` level; a database failure stays `?` and becomes
-   Loco's `500`. Set `Cache-Control` and the weak `ETag` as section 9 says.
+   `Ok(error.into_response())` (a refused parameter with
+   `Ok(Error::from(rejection).into_response())`), never turned into a
+   `loco_rs::Error`, which Loco logs at `ERROR` level; a database failure
+   stays `?` and becomes Loco's `500`. Answer a `200` with
+   `controllers::v1::caching::cacheable_json` (`no-cache` and the weak
+   `ETag` of section 9, which Loco's `etag` middleware turns into a `304`),
+   or `caching::preview_json` for a preview (`no-store`, no `ETag`); never
+   with `format::json`, which sets neither. The route layers give every
+   error `no-store`, and the OpenAPI document describes the caching headers
+   of every `GET` operation by itself (openapi-spike.md section 3, rule 7).
 6. **Fixtures**: add every fixture that `public-api.md` section 17.1 lists for
    this endpoint, under the name used there, as invented data (never copied
    from production) loaded by the request tests. Check that each shape of the
@@ -241,9 +254,10 @@ public DTOs and operations that steps 2 and 5 follow.
    parsed JSON field by field, the response against its schema, and the
    headers of section 16.2, with the helpers of `tests/support`
    (`public_get`, `assert_public_cors`, `assert_public_not_found`). Every
-   `/api/v1` route in Loco's route table gets the CORS and method checks of
-   `tests/requests/public_router.rs` without further work. Time-dependent
-   tests inject "now" (recipe 7).
+   `/api/v1` route in Loco's route table (`tests/support::public_paths`)
+   gets the CORS and method checks of `tests/requests/public_router.rs` and
+   the caching checks of `tests/requests/public_caching.rs` without further
+   work. Time-dependent tests inject "now" (recipe 7).
 8. **Contract**: review the `.snap.new` the tests write beside
    `tests/requests/snapshots/openapi_document.snap` and accept it (`cargo
    insta review`), bump `info.version`'s minor by hand for an addition, and

@@ -26,26 +26,8 @@ use serde_json::{Value, json};
 
 use crate::support::{
     FIXTURE_ASSET, SITE_ORIGIN, assert_no_cors, assert_public_cors, assert_public_not_found,
-    cors_headers, header_text, public_get, with_server,
+    cors_headers, header_text, public_get, public_paths, sample_path, with_server,
 };
-
-/// Every `/api/v1` path of Loco's route table, with each `{parameter}`
-/// segment replaced by `1`.
-///
-/// `1` has the syntax of every path parameter of public-api.md §2.5, so the
-/// request reaches the route. On an empty database its answer may be a
-/// `404`, which carries the same CORS header as a `200`.
-fn public_paths(ctx: &AppContext) -> Vec<String> {
-    let paths: BTreeSet<String> = App::routes(ctx)
-        .collect()
-        .into_iter()
-        .filter(|route| api_family(&route.uri) == Some(ApiFamily::V1))
-        .map(|route| sample_path(&route.uri))
-        .collect();
-    // Without this the tests would pass on an empty route table.
-    assert!(paths.contains(DOCUMENT_ROUTE), "{paths:?}");
-    paths.into_iter().collect()
-}
 
 /// Every path of Loco's route table outside `/api/v1` (the admin API, the
 /// health routes and the site routes), with each `{parameter}` segment
@@ -70,21 +52,6 @@ fn other_paths(ctx: &AppContext) -> Vec<String> {
         "no /api/admin route in {paths:?}"
     );
     paths.into_iter().collect()
-}
-
-/// `template` with every `{...}` segment replaced by `1`.
-fn sample_path(template: &str) -> String {
-    template
-        .split('/')
-        .map(|segment| {
-            if segment.starts_with('{') && segment.ends_with('}') {
-                "1"
-            } else {
-                segment
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 /// The methods an `Allow` header lists.

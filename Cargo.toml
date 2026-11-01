@@ -124,7 +124,9 @@ serde_path_to_error = "0.1"
 thiserror = "2"
 tracing = "0.1"
 # URI parsing for the database-target guard. sqlx parses connection URIs with
-# this same crate, so the guard sees the host exactly as the driver will.
+# this same crate, so the guard sees the host exactly as the driver will. Its
+# `form_urlencoded` module also decodes the query string of every public
+# request by the WHATWG rules (src/domain/v1_params.rs, public-api.md §2.1).
 url = "2"
 percent-encoding = "2"
 # The server sanitiser (ADR 0013 §5, docs/design/editor.md §7). ammonia is
@@ -169,7 +171,8 @@ cssparser = "0.38"
 #             TOTP_ENCRYPTION_KEY secret.
 #   hmac, sha1 - HMAC-SHA-1, the HOTP function under TOTP (RFC 4226,
 #             RFC 6238).
-#   sha2    - SHA-256 for HKDF.
+#   sha2    - SHA-256 for HKDF, and for the weak ETag of every cacheable
+#             public answer (src/domain/etag.rs, public-api.md §9).
 # sha1 and sha2 need neither `alloc` nor `oid`, their default features.
 aes-gcm = { version = "0.11", default-features = false, features = ["aes"] }
 hkdf = "0.13"

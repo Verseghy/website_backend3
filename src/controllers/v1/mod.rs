@@ -11,6 +11,9 @@
 //!   public `500` body inside the CORS layer, so it carries the CORS header
 //!   too. Loco's global `catch_panic` middleware would answer it outside the
 //!   route layers, without that header.
+//! - **Errors are never stored** (public-api.md §8, §9): every `4xx` and
+//!   `5xx` of a route gets `Cache-Control: no-store` and no `ETag`, also
+//!   the ones that axum and Loco build ([`caching::error_headers`]).
 //!
 //! Methods (public-api.md §2.1): a `GET` route answers `HEAD` too, as axum
 //! does. Any other method gets axum's `405` with `Allow: GET,HEAD` and an
@@ -37,16 +40,20 @@
 //! (`crate::controllers::not_found`), which sets the CORS header itself from
 //! [`ALLOW_ORIGIN`]; and a `304` from Loco's global `etag` middleware, which
 //! builds a new response that keeps only the validator and freshness headers
-//! of the `200`, so the slice that brings the `ETag` of public-api.md §9 must
-//! add the CORS header to it.
+//! of the `200`, so [`caching::NotModifiedCors`] adds the CORS header back
+//! (public-api.md §9).
 //!
 //! Two errors are built by the framework and carry no `Cache-Control`:
 //! axum's `405` and Loco's `500` for a `loco_rs::Error` that a handler
 //! returns with `?`. public-api.md §9 gives every `4xx` and `5xx` `no-store`,
-//! so the slice that brings §9's caching headers must add `no-store` to
-//! them too. backend3's own errors already carry it: the `Error` body, the
-//! panic answer of [`answer_panic`] and the fallback's `404`.
+//! so [`caching::error_headers`], the innermost of [`public_layers`], adds it
+//! to every error of a route and removes any `ETag`. backend3's own errors
+//! carry `no-store` already: the `Error` body, the panic answer of
+//! [`answer_panic`] and the fallback's `404`.
 //!
+//! - [`caching`]: the caching headers of public-api.md §9: the `200`
+//!   helpers with `no-cache` and the weak `ETag` (or `no-store` for a
+//!   preview), the error mapper and the `304` middleware.
 //! - [`openapi`]: the OpenAPI document and `GET /api/v1/openapi.json`
 //!   (ADR 0005 §4).
 //!
@@ -63,6 +70,7 @@ use loco_rs::controller::Routes;
 use tower::{
     ServiceBuilder,
     layer::util::{Identity, Stack},
+    util::MapResponseLayer,
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -71,6 +79,7 @@ use tower_http::{
 
 use crate::dtos::v1::error::{Error, ErrorCode};
 
+pub mod caching;
 pub mod openapi;
 
 /// The `Access-Control-Allow-Origin` value of every `/api/v1` response
@@ -85,9 +94,17 @@ pub const METHODS: [Method; 2] = [Method::GET, Method::HEAD];
 /// layer type can be named.
 pub type PanicHandler = fn(Box<dyn Any + Send + 'static>) -> Response;
 
+/// The error mapper of [`public_layers`] ([`caching::error_headers`]), as a
+/// function pointer so that the layer type can be named.
+pub type ResponseMapper = fn(Response) -> Response;
+
 /// The type of [`public_layers`].
-pub type PublicLayers =
-    ServiceBuilder<Stack<CatchPanicLayer<PanicHandler>, Stack<CorsLayer, Identity>>>;
+pub type PublicLayers = ServiceBuilder<
+    Stack<
+        MapResponseLayer<ResponseMapper>,
+        Stack<CatchPanicLayer<PanicHandler>, Stack<CorsLayer, Identity>>,
+    >,
+>;
 
 /// Every route of `/api/v1`, with [`public_layers`] on each, for
 /// `App::routes`.
@@ -99,15 +116,25 @@ pub fn routes() -> Routes {
         .layer(public_layers())
 }
 
-/// The layers of every `/api/v1` route: [`cors_layer`] outside, so that it
-/// answers a preflight first and adds its header to every answer, then the
-/// panic handler [`answer_panic`], so that its `500` passes through the CORS
-/// layer.
+/// The layers of every `/api/v1` route, from the outside in:
+///
+/// 1. [`cors_layer`], so that it answers a preflight first and adds its
+///    header to every answer;
+/// 2. the panic handler [`answer_panic`], so that its `500` passes through
+///    the CORS layer;
+/// 3. [`caching::error_headers`], next to the handler and to axum's `405`,
+///    whose answers it sees as they are built. The panic answer never passes
+///    it, and needs not: it is an `Error`, which carries `no-store` itself.
+///    Inside the panic handler its response type is axum's `Response`, so
+///    the mapper can be a plain function.
 #[must_use]
 pub fn public_layers() -> PublicLayers {
     ServiceBuilder::new()
         .layer(cors_layer())
         .layer(CatchPanicLayer::custom(answer_panic as PanicHandler))
+        .layer(MapResponseLayer::new(
+            caching::error_headers as ResponseMapper,
+        ))
 }
 
 /// The CORS layer of `/api/v1` (ADR 0014).
@@ -166,7 +193,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{
             Request, StatusCode,
-            header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, VARY},
+            header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, ETAG, VARY},
         },
         routing::get,
     };
@@ -227,13 +254,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_loco_500_gets_cors_and_the_public_body() {
+    async fn a_loco_500_gets_cors_no_store_and_the_public_body() {
         let (status, headers, body) = through_layers(|| -> loco_rs::Result<String> {
             Err(loco_rs::Error::InternalServerError)
         })
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(header(&headers, &ACCESS_CONTROL_ALLOW_ORIGIN), ["*"]);
+        // Loco sets no `Cache-Control`; the error mapper adds `no-store`
+        // (public-api.md §9).
+        assert_eq!(header(&headers, &CACHE_CONTROL), ["no-store"]);
         // Loco's own 500 has the bytes of the public `Error` body.
         assert_eq!(
             body,
@@ -254,6 +284,37 @@ mod tests {
             body,
             br#"{"error":"internal_server_error","description":"Internal Server Error"}"#
         );
+    }
+
+    #[tokio::test]
+    async fn an_error_built_with_caching_headers_loses_them() {
+        // A handler that answered an error through the 200 helper by mistake:
+        // the error still goes out uncached and without a validator.
+        let (status, headers, _) = through_layers(|| {
+            let mut response = caching::cacheable_json_bytes(b"{}".to_vec()).expect("a response");
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            response
+        })
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(header(&headers, &CACHE_CONTROL), ["no-store"]);
+        assert_eq!(header(&headers, &ETAG), [] as [&str; 0]);
+        assert_eq!(header(&headers, &ACCESS_CONTROL_ALLOW_ORIGIN), ["*"]);
+    }
+
+    #[tokio::test]
+    async fn a_cacheable_answer_keeps_its_tag_and_gets_cors() {
+        let (status, headers, body) =
+            through_layers(|| caching::cacheable_json_bytes(b"[]".to_vec())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, &CACHE_CONTROL), ["no-cache"]);
+        assert_eq!(
+            header(&headers, &ETAG),
+            [crate::domain::etag::weak_etag(b"[]").as_str()]
+        );
+        assert_eq!(header(&headers, &VARY), ["accept-encoding"]);
+        assert_eq!(header(&headers, &ACCESS_CONTROL_ALLOW_ORIGIN), ["*"]);
+        assert_eq!(body, b"[]");
     }
 
     #[tokio::test]
