@@ -2772,6 +2772,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4785,6 +4794,7 @@ dependencies = [
  "derive-where",
  "derive_more",
  "futures-util",
+ "ipnetwork",
  "itertools",
  "log",
  "mac_address",
@@ -4879,6 +4889,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "546040c653a705e60ec65ecd3191a809603734bebbc225775916dea9ae409b31"
 dependencies = [
  "chrono",
+ "ipnetwork",
  "ordered-float",
  "rust_decimal",
  "sea-query-derive",
@@ -5361,6 +5372,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "hashlink",
  "indexmap",
+ "ipnetwork",
  "log",
  "memchr",
  "percent-encoding",
@@ -5468,6 +5480,7 @@ dependencies = [
  "hex",
  "hkdf 0.13.0",
  "hmac 0.13.0",
+ "ipnetwork",
  "itoa",
  "log",
  "md-5",
