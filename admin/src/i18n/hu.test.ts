@@ -147,6 +147,11 @@ describe("hu.ts", () => {
     expect(hu.errors.content_not_normalisable).toBe(
       "A szerver nem tudta egységes formára hozni a tartalmat. Kérlek, jelezd ezt a hibát a honlap üzemeltetőjének!"
     )
+    // Every request without a valid admin session (ADR 0006 §1), one message
+    // for every reason: sign in again.
+    expect(hu.errors.unauthorized).toBe(
+      "A munkamenet lejárt vagy érvénytelen. Jelentkezz be újra!"
+    )
   })
 
   it("fills error messages only with the names the server sends for the code", () => {
@@ -166,6 +171,7 @@ describe("hu.ts", () => {
       content_too_large: ["limit", "actual", "measured"],
       content_too_deep: ["limit", "line"],
       content_not_normalisable: ["passes"],
+      unauthorized: [],
     }
     const unknown = Object.entries(hu.errors).flatMap(([code, message]) =>
       placeholders(message)

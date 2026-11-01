@@ -2,9 +2,9 @@
 //! every failed check, then, against PostgreSQL, the two finders, the `pid`
 //! hook, a hash that round-trips through the table, `App::truncate`, which
 //! leaves the accounts alone, sign-in and its cost, the session token, the
-//! `Authenticable` impl, and the stored TOTP secret, which decrypts only for
-//! its own row (ADR 0006 §6). Every account, password and secret is
-//! invented.
+//! session state the admin extractor checks, the `Authenticable` impl, and
+//! the stored TOTP secret, which decrypts only for its own row (ADR 0006
+//! §6). Every account, password and secret is invented.
 
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use backend3::{
     app::App,
     domain::{
         password_hash::DUMMY_PASSWORD_HASH,
+        session::AccountState,
         totp::TotpSecret,
         totp_secret::{self, DecryptError},
     },
@@ -435,6 +436,42 @@ async fn the_session_token_carries_the_adr_claims() {
             user.generate_session_token("not base64!", 7200, auth_time),
             Err(ModelError::Jwt(_))
         ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_session_state_is_the_stored_row_s() {
+    // The columns the admin session check reads (ADR 0006 §1), straight
+    // from each stored state.
+    with_app(|_router, ctx| async move {
+        let live = insert(&ctx.db, "elo@example.test", |new| {
+            new.token_version = ActiveValue::Set(5);
+        })
+        .await;
+        let trashed = insert(&ctx.db, "lomtar@example.test", |new| {
+            new.deleted_at = ActiveValue::Set(Some(instant()));
+        })
+        .await;
+        let inactive = insert(&ctx.db, "inaktiv@example.test", |new| {
+            new.active = ActiveValue::Set(false);
+        })
+        .await;
+        let anonymised = insert(&ctx.db, "anonim@example.test", anonymise).await;
+        let state = |trashed, anonymised, active, token_version| AccountState {
+            trashed,
+            anonymised,
+            active,
+            token_version,
+        };
+        for (user, expected) in [
+            (&live, state(false, false, true, 5)),
+            (&trashed, state(true, false, true, 0)),
+            (&inactive, state(false, false, false, 0)),
+            (&anonymised, state(true, true, false, 0)),
+        ] {
+            assert_eq!(user.session_state(), expected, "{:?}", user.email);
+        }
     })
     .await;
 }

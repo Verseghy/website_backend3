@@ -405,6 +405,9 @@ export const hu = {
       "A tartalomban túl mélyen vannak egymásba ágyazva az elemek (%{line}. sor): legfeljebb %{limit} szint lehet.",
     content_not_normalisable:
       "A szerver nem tudta egységes formára hozni a tartalmat. Kérlek, jelezd ezt a hibát a honlap üzemeltetőjének!",
+    // A request without a valid admin session (ADR 0006 §1), one message for
+    // every reason: sign in again.
+    unauthorized: "A munkamenet lejárt vagy érvénytelen. Jelentkezz be újra!",
   } satisfies Record<ErrorCode, string>,
 } as const satisfies MessageTree
 

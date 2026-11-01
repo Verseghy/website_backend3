@@ -131,6 +131,15 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    and answers a refused body with `controllers::admin::json_rejection_response`:
    `422 invalid_body`, or `413 body_too_large` above the request body limit
    (research: DECISIONS R15 (D74)).
+   A handler for a signed-in account takes
+   `controllers::admin::session::AdminSession`, which loads the account on
+   every request and answers `401 unauthorized` itself when it is trashed,
+   anonymised or inactive, when the token's `tv` is stale, or when the scope
+   is not the route's (ADR 0006 §1). The default accepts only a full
+   `admin` session; `AdminSession<AdminOrPasswordChange>` is for the three
+   routes ADR 0006 §4 opens to a `password_change` session. Never take
+   Loco's `JWT` or `JWTWithUser` in an admin handler: they skip these
+   checks. A request test covers the route's `401` without a session.
 8. **Public endpoint**, if the feature has one: recipe 3.
 9. **Admin screen** under `admin/src/`: resources through backend3's own data
    provider in `admin/src/data-provider/` (never `ra-data-json-server` or

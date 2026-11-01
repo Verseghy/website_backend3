@@ -28,9 +28,10 @@
 //! generated model does; the content write paths set it explicitly.
 //!
 //! Sign-in ([`Model::authenticate`]) and the session token
-//! ([`Model::generate_session_token`]) live here too, and the
-//! [`Authenticable`] impl lets Loco's `JWTWithUser` extractor load the
-//! account a token names (ADR 0006 §1).
+//! ([`Model::generate_session_token`]) live here too. The [`Authenticable`]
+//! impl lets Loco's `JWTWithUser` extractor load the account a token names,
+//! and [`Model::session_state`] hands the admin extractor the columns that
+//! decide whether the session still holds (ADR 0006 §1).
 //!
 //! The entity derives no serde (`[package.metadata.db.entity]` in
 //! `Cargo.toml`), so a [`Model`] can be neither a response nor a request
@@ -47,19 +48,10 @@ pub use super::_entities::users::{self, ActiveModel, Column, Entity, Model};
 use crate::domain::{
     email_address,
     password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind},
+    session::{AUTH_TIME_CLAIM, AccountState, SCOPE_CLAIM, SessionScope, TOKEN_VERSION_CLAIM},
     totp::TotpSecret,
     totp_secret::{self, DecryptError, TotpEncryptionKey},
 };
-
-/// The session-token claim that carries `users.token_version` (ADR 0006 §2).
-pub const TOKEN_VERSION_CLAIM: &str = "tv";
-/// The session-token claim that names what the token may do (ADR 0006 §1).
-pub const SCOPE_CLAIM: &str = "scope";
-/// The session-token claim that holds when the password step succeeded, in
-/// seconds since the Unix epoch like `exp` (ADR 0006 §1).
-pub const AUTH_TIME_CLAIM: &str = "auth_time";
-/// The `scope` of a full admin session (ADR 0006 §1).
-pub const ADMIN_SCOPE: &str = "admin";
 
 /// `lower(email) = lower($1)`: the e-mail comparison of sign-in, written as
 /// the expression of the unique index `users_lower_email_key`.
@@ -315,7 +307,8 @@ impl Model {
     /// The token is Loco's HS512 JWT: Loco's `pid` claim (this account's
     /// UUID) and `exp` (the current time plus `expiration`, which Loco
     /// computes), plus [`TOKEN_VERSION_CLAIM`] with `token_version`,
-    /// [`SCOPE_CLAIM`] with [`ADMIN_SCOPE`] and [`AUTH_TIME_CLAIM`].
+    /// [`SCOPE_CLAIM`] with [`SessionScope::Admin`] and [`AUTH_TIME_CLAIM`]
+    /// (the claim names of [`crate::domain::session`], which checks them).
     ///
     /// # Errors
     ///
@@ -328,9 +321,26 @@ impl Model {
     ) -> ModelResult<String> {
         let mut claims = serde_json::Map::new();
         claims.insert(TOKEN_VERSION_CLAIM.to_owned(), self.token_version.into());
-        claims.insert(SCOPE_CLAIM.to_owned(), ADMIN_SCOPE.into());
+        claims.insert(SCOPE_CLAIM.to_owned(), SessionScope::Admin.claim().into());
         claims.insert(AUTH_TIME_CLAIM.to_owned(), auth_time.timestamp().into());
         Ok(JWT::new(secret).generate_token(expiration, self.pid.to_string(), claims)?)
+    }
+
+    /// The columns of this row that decide whether its sessions still hold,
+    /// for [`crate::domain::session::check_session`] (ADR 0006 §1).
+    ///
+    /// The admin extractor calls it on the row it has just read for the
+    /// request, so the check always sees the stored state: a deactivation, a
+    /// trash or a `token_version` increment applies on the next request
+    /// (ADR 0006 §2, ADR 0016).
+    #[must_use]
+    pub fn session_state(&self) -> AccountState {
+        AccountState {
+            trashed: self.deleted_at.is_some(),
+            anonymised: self.anonymised_at.is_some(),
+            active: self.active,
+            token_version: self.token_version,
+        }
     }
 
     /// Decrypts this account's stored TOTP secret
