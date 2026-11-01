@@ -9,11 +9,14 @@
 //! the volume's `app/public`. Each run publishes on a free loopback port and
 //! uses its own container name, so runs in parallel do not collide. Beyond
 //! [`run`], it checks what only nginx must do: its probe, nothing outside
-//! `/storage`, both logs on stdout, and no alarming log line.
+//! `/storage`, both logs on stdout, no alarming log line, and the loopback
+//! `stub_status` listener of the media exporter ([`stub_status`]).
 //!
 //! It is `#[ignore]`d because it needs a container engine and pulls the
 //! image. The Test job runs it in its own step:
 //! `cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'test(/^media_contract::nginx::/)'`.
+//! [`config`] reads the file itself, without an engine, in every test run:
+//! it shows where the file serves `stub_status`, whatever the request.
 
 use std::{
     fs,
@@ -29,14 +32,22 @@ use axum::http::{Method, StatusCode};
 use super::{HyperTransport, Origin, Server, Transport, fixtures::LINKS, http::Request, run, seed};
 use crate::support::repository_root;
 
+mod config;
+mod stub_status;
+
 /// The pinned image reference (tag and digest), the one source for the CI
 /// run, the docs and `website_k8s`.
 const IMAGE: &str = include_str!("../../deploy/media/image.txt");
 
-/// An arbitrary UID that is not the image's own (1001), with GID 0, as
-/// restricted-v2 assigns them. It stays below 65536 so that rootless podman
-/// can map it.
-const USER: &str = "12345:0";
+/// An arbitrary UID that is not the image's own (1001), as restricted-v2
+/// assigns one; the container runs as `UID:0`, with GID 0. It stays below
+/// 65536 so that rootless podman can map it. The kernel's socket table names
+/// it as the owner of nginx's listeners ([`stub_status`]).
+const UID: u32 = 12345;
+
+/// The media server's port, the one the Service and the Routes reach
+/// (ADR 0015 §1).
+const MEDIA_PORT: u16 = 8080;
 
 /// The engines tried, in order: docker on the CI runner, podman (or its
 /// docker shim) on a workstation.
@@ -74,7 +85,10 @@ async fn the_deployed_config_meets_the_media_contract() {
     let report = run(&transport, &origin, Server::Nginx).await;
     let mut failures = Vec::new();
     failures.extend(outside_storage(&transport, &origin).await);
+    // Before the logs are read, so that its reads would show in them.
+    failures.extend(stub_status::check(&container, &transport).await);
     let (stdout, stderr) = container.logs();
+    failures.extend(stub_status::logged_reads(&stdout));
     let logs = format!("{stdout}{stderr}");
     failures.extend(
         logs.lines()
@@ -213,21 +227,33 @@ fn only_the_refused_fixture_links_may_log_at_crit() {
 }
 
 /// What only the media server must do: answer its probe, and serve nothing
-/// outside `/storage` (backend3 has other routes there).
+/// outside `/storage` (backend3 has other routes there). That includes the
+/// exporter's `stub_status`, which only the loopback listener serves
+/// (research: DECISIONS R15, D93): no common status path, with no `Host`
+/// that names a loopback or a public host, may get the page here
+/// ([`stub_status::public_port_requests`]). nginx picks the server by the
+/// port a connection arrived on; [`config`] covers the requests not sent.
 async fn outside_storage(transport: &HyperTransport, origin: &Origin) -> Vec<String> {
+    let get = |target: &str| Request::new(Method::GET, target);
     let mut failures = Vec::new();
-    for (target, expected, body) in [
-        ("/healthz", StatusCode::OK, Some(b"ok\n".as_slice())),
-        ("/", StatusCode::NOT_FOUND, None),
-        ("/storage", StatusCode::NOT_FOUND, None),
-        ("/sitemap.xml", StatusCode::NOT_FOUND, None),
+    let requests = [
+        (get("/healthz"), StatusCode::OK, Some(b"ok\n".as_slice())),
+        (get("/"), StatusCode::NOT_FOUND, None),
+        (get("/storage"), StatusCode::NOT_FOUND, None),
+        (get("/sitemap.xml"), StatusCode::NOT_FOUND, None),
         (
-            "/srv/media/storage/sitemap.xml",
+            get("/srv/media/storage/sitemap.xml"),
             StatusCode::NOT_FOUND,
             None,
         ),
-    ] {
-        let request = Request::new(Method::GET, target);
+    ]
+    .into_iter()
+    .chain(
+        stub_status::public_port_requests()
+            .into_iter()
+            .map(|request| (request, StatusCode::NOT_FOUND, None)),
+    );
+    for (request, expected, body) in requests {
         match transport.send(origin, &request).await {
             Ok(response) => {
                 if response.status != expected {
@@ -238,6 +264,12 @@ async fn outside_storage(transport: &HyperTransport, origin: &Origin) -> Vec<Str
                 }
                 if body.is_some_and(|body| response.body.as_ref() != body) {
                     failures.push(format!("{request}: body must be {body:?}"));
+                }
+                if stub_status::is_page(&response.body) {
+                    failures.push(format!(
+                        "{request}: the media port {MEDIA_PORT} served the stub_status page, \
+                         which only the loopback listener may serve"
+                    ));
                 }
                 if response.single("access-control-allow-origin") != Some("*") {
                     failures.push(format!(
@@ -307,7 +339,7 @@ impl Container {
             "run".to_owned(),
             "--detach".to_owned(),
             format!("--name={name}"),
-            format!("--user={USER}"),
+            format!("--user={UID}:0"),
             "--read-only".to_owned(),
             "--tmpfs=/tmp:rw,mode=1777,size=16m".to_owned(),
             "--cap-drop=ALL".to_owned(),
@@ -315,7 +347,14 @@ impl Container {
             // The bind mounts are read as they are; no SELinux relabelling of
             // the checkout on a workstation.
             "--security-opt=label=disable".to_owned(),
-            "--publish=127.0.0.1::8080".to_owned(),
+            format!("--publish=127.0.0.1::{MEDIA_PORT}"),
+            // The stub_status port too, only so that the suite can try it
+            // the way a Service or another pod would: docker, and podman's
+            // pasta by default, forward a published port to the container's
+            // own address, which the loopback listener must refuse
+            // ([`stub_status::check`] says what an engine that does not
+            // means).
+            format!("--publish=127.0.0.1::{}", stub_status::PORT),
             format!("--volume={}:/etc/nginx/nginx.conf:ro", config.display()),
             format!("--volume={}:/srv/media/storage:ro", tree.display()),
             // The Deployment's command (deploy/media/README.md): nginx itself,
@@ -346,14 +385,32 @@ impl Container {
         );
     }
 
-    /// The published loopback port as an origin, once `/healthz` answers.
-    async fn wait_until_ready(&self, transport: &HyperTransport) -> Origin {
-        let output = self.engine(&["port", &self.name, "8080/tcp"]);
-        let address = text(&output);
-        let address = address.lines().next().unwrap_or_default().trim();
-        let origin: Origin = format!("http://{address}")
+    /// The host's loopback address and port that the engine published for
+    /// the container's `port`, such as `127.0.0.1:40123`.
+    ///
+    /// - `port`: a container port that [`Container::start`] published.
+    fn published_address(&self, port: u16) -> String {
+        let output = self.engine(&["port", &self.name, &format!("{port}/tcp")]);
+        text(&output)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    }
+
+    /// [`Container::published_address`] as an origin.
+    ///
+    /// - `port`: a container port that [`Container::start`] published.
+    fn published(&self, port: u16) -> Origin {
+        format!("http://{}", self.published_address(port))
             .parse()
-            .unwrap_or_else(|error| panic!("{} port: {error}", self.engine));
+            .unwrap_or_else(|error| panic!("{} port {port}: {error}", self.engine))
+    }
+
+    /// The published media port as an origin, once `/healthz` answers.
+    async fn wait_until_ready(&self, transport: &HyperTransport) -> Origin {
+        let origin = self.published(MEDIA_PORT);
         let deadline = Instant::now() + START_TIMEOUT;
         let probe = Request::new(Method::GET, "/healthz");
         loop {
@@ -378,6 +435,19 @@ impl Container {
             String::from_utf8_lossy(&output.stdout).into_owned(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
         )
+    }
+
+    /// Runs `command` inside the running container, in its network
+    /// namespace, as the container's user; what it printed and its exit
+    /// status, or the engine's own error.
+    ///
+    /// - `command`: the program and its arguments, run without a shell.
+    fn exec(&self, command: &[&str]) -> Output {
+        let args: Vec<&str> = ["exec", self.name.as_str()]
+            .into_iter()
+            .chain(command.iter().copied())
+            .collect();
+        self.engine(&args)
     }
 
     fn engine(&self, args: &[&str]) -> Output {

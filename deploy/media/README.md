@@ -6,7 +6,7 @@ This directory is the only source of its configuration:
 
 | File | What it is |
 |---|---|
-| `nginx.conf` | The complete nginx configuration. It implements the media contract of ADR 0015 §1 and the `/storage` header rows of [ADR 0013](../../docs/design/adr/0013-rich-text-editor-and-html-sanitiser.md) §7. Its comments say why each line is there. |
+| `nginx.conf` | The complete nginx configuration. It implements the media contract of ADR 0015 §1 and the `/storage` header rows of [ADR 0013](../../docs/design/adr/0013-rich-text-editor-and-html-sanitiser.md) §7, and serves `stub_status` to the media exporter on the pod's loopback address ([below](#the-exporters-source-stub_status-on-loopback)). Its comments say why each line is there. |
 | `image.txt` | The image, `registry.access.redhat.com/ubi9/nginx-126`, by tag and digest. The maintainer chose nginx 1.26 over 1.24 on 2026-10-25 (research: DECISIONS R9, D35); the 1.26 stream retires in May 2028. |
 
 The maintainer decided that this repository holds the configuration and that
@@ -17,7 +17,9 @@ The pinned image runs nginx 1.26.3 as user 1001 in group 0 and exposes port
 8080, as the sclorg nginx-container 1.26 README describes for the image
 family (<https://github.com/sclorg/nginx-container/blob/master/1.26/README.md>,
 read 2026-10-25). The configuration does not rely on the image's own user
-or its s2i scripts.
+or its s2i scripts. Its nginx is built with `stub_status` (`nginx -V` in the
+pinned image lists `--with-http_stub_status_module`, read 2026-10-31), and the
+image ships `curl`.
 
 ## The contract suite
 
@@ -46,7 +48,35 @@ The local and CI run starts the image the way restricted-v2 runs it: an
 arbitrary UID with GID 0, no capabilities, no privilege escalation, a
 read-only root filesystem and a tmpfs at `/tmp`. Each run uses a free
 loopback port and its own container name, so parallel runs do not collide.
-It also checks that the access and error logs reach stdout.
+It also checks that the access and error logs reach stdout, and the
+exporter's listener (`tests/media_contract/nginx/stub_status.rs`):
+
+- On port 8080, `/stub_status` and the other usual status paths
+  (`/nginx_status`, `/status`, `/basic_status`, `/storage/stub_status`,
+  `/stub_status/`) are `404`, never the page. That holds with the published
+  address as `Host`, with `localhost`, `127.0.0.1` (each with and without
+  `:8081`) and each of the three hosts, and for an HTTP/1.0 request without
+  `Host`.
+- Inside the container, `GET /stub_status` on `127.0.0.1:8081` answers
+  `200 text/plain` in the layout the exporter reads. The listener serves
+  nothing else and logs no access.
+- The kernel's socket table shows nginx listening on exactly `0.0.0.0:8080`
+  and `127.0.0.1:8081`.
+- A connection to the published 8081 gets no answer. This needs an engine
+  that forwards a published port to the container's own address, as a
+  Service does to the pod's: docker does, and so does podman's pasta by
+  default. An engine that hands host-loopback connections to the
+  container's loopback instead (pasta with `--host-lo-to-ns-lo`) gets the
+  page, and the test then fails with a message that says so.
+
+`tests/media_contract/nginx/config.rs` covers the requests that the running
+server is not sent. It reads `nginx.conf` itself, in every test run and
+without an engine. It requires one `stub_status` directive, inside the
+server whose only `listen` is `127.0.0.1:8081`; exactly two servers, that
+one and the media server on `8080 default_server`, and no `listen`
+elsewhere; no `include` but the image's `mime.types`; and no `*_pass`
+directive, which could proxy port 8080 to the loopback listener. The `check`
+command runs none of these checks.
 
 The suite checks the server itself, never a Route: a router picks its Route
 by the `Host` header that the suite varies. The `check` command speaks plain
@@ -82,6 +112,48 @@ website_k8s owns the manifests. They must keep to what the suite tested:
 | Writable paths | An `emptyDir` at `/tmp` for the pid file and nginx's temp directories. Nothing else is written. |
 | Security | restricted-v2, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, all capabilities dropped ([ADR 0023](../../docs/design/adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) §8). |
 | Port and probe | 8080; `GET /healthz` answers `200 ok`. No Route sends anything but `/storage` here. |
+| Exporter | A second container in the media pod reads `http://127.0.0.1:8081/stub_status` ([below](#the-exporters-source-stub_status-on-loopback)). 8081 is no port of the Service. |
+
+## The exporter's source: `stub_status` on loopback
+
+The media server has a metrics exporter (research: DECISIONS R9, D34), and
+the exporter reads nginx's `stub_status` page. website_k8s copies
+`nginx.conf` byte for byte, so it cannot add that page itself; the
+maintainer decided that this repository adds it, on a listener bound to the
+pod's loopback address (research: DECISIONS R15, D93).
+
+- **Where.** `nginx.conf` ends with a second server that listens on
+  `127.0.0.1:8081` and serves `stub_status` at `/stub_status`, and `404` for
+  every other path. Bound to the loopback address, it takes no connection
+  that arrives on the pod's own address, so no Service, Route or other pod
+  reaches it. Only what runs in the pod's network namespace does: the
+  containers of the media pod, and an `oc port-forward` to the pod, which
+  the container runtime connects to `localhost` in that namespace.
+  restricted-v2 forbids `hostNetwork`, so the namespace is the pod's own,
+  not the node's. On port 8080, `/stub_status` is `404` like every path
+  outside `/storage`, whatever the `Host`: the page stands in the loopback
+  server only, which listens on no other port.
+- **What website_k8s adds.** The exporter container, in the media pod, with
+  its scrape URI set to `http://127.0.0.1:8081/stub_status`. The NGINX
+  Prometheus Exporter takes it as `--nginx.scrape-uri`, whose default,
+  `http://127.0.0.1:8080/stub_status`, is the media port and would only read
+  `404`
+  (<https://github.com/nginx/nginx-prometheus-exporter/blob/main/README.md>,
+  read 2026-10-31). The exporter serves the metrics on a port of its own,
+  which no Route targets, and runs under restricted-v2 like the media
+  container ([ADR 0023](../../docs/design/adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md)
+  §8 and §9). Its image, resources and metrics port are the deploy PR's
+  choice.
+- **Logs.** ADR 0015 §1, Logs, sends the access and error logs to stdout.
+  The listener writes no access-log line, so the exporter's reads do not
+  fill the log, which keeps one line per request to the media port. Errors
+  still go to the error log on stdout.
+- **By hand.** `oc exec <media pod> -c <media container> -- curl --silent http://127.0.0.1:8081/stub_status`
+  prints the page: the image ships `curl`, and `oc exec` runs inside the
+  pod. `oc port-forward pod/<media pod> <port>:8081` reaches it too, for a
+  `curl http://127.0.0.1:<port>/stub_status` on the workstation. Both need
+  the access to the pod that those commands always need. The page counts
+  connections and requests since nginx started; it shows no request detail.
 
 ## How website_k8s copies the configuration
 
