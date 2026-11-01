@@ -64,7 +64,8 @@ database:
 # the sentence
 # "backend3 e2e JWT secret: public and throwaway, used only by the E2E job and
 # its server." Production reads its own from JWT_SECRET
-# and must refuse this value (ADR 0034 §3).
+# and refuses this value at boot (Settings::refuse_published_keys,
+# ADR 0034 §3).
 auth:
   jwt:
     secret: "YmFja2VuZDMgZTJlIEpXVCBzZWNyZXQ6IHB1YmxpYyBhbmQgdGhyb3dhd2F5LCB1c2VkIG9ubHkgYnkgdGhlIEUyRSBqb2IgYW5kIGl0cyBzZXJ2ZXIu"

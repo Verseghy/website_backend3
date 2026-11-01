@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crate::support::{CLI_JWT_SECRET, ConnectionProbe, cli_totp_key, run_cli};
+use crate::support::{ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli};
 
 #[test]
 fn a_png_threshold_of_zero_is_refused_before_connecting() {
@@ -20,13 +20,14 @@ fn a_png_threshold_of_zero_is_refused_before_connecting() {
         );
         // config/production.yaml also requires both keys, so that only the
         // PNG threshold decides the outcome. Production refuses a committed
-        // TOTP key, so that one is made when the test runs (ADR 0034 §3).
+        // key, so both are made when the test runs (ADR 0034 §3).
+        let jwt_secret = cli_jwt_secret();
         let totp_key = cli_totp_key();
         let mut env = vec![
             ("LOCO_ENV", "production"),
             ("DATABASE_URL", url.as_str()),
             ("HOST", "http://localhost"),
-            ("JWT_SECRET", CLI_JWT_SECRET),
+            ("JWT_SECRET", jwt_secret.as_str()),
             ("TOTP_ENCRYPTION_KEY", totp_key.as_str()),
             // The probe never answers the PostgreSQL handshake.
             ("DB_CONNECT_TIMEOUT", "300"),

@@ -20,8 +20,19 @@
 //! encryption key is decoded and checked here, so every command refuses a bad
 //! key at boot instead of the first sign-in failing (ADR 0006 §6); the
 //! settings keep only the derived cipher key, never the configured value.
-//! Production also refuses the public throwaway key of the local
-//! environments ([`Settings::refuse_published_keys`], ADR 0034 §3).
+//!
+//! The admin session's JWT configuration, `auth.jwt`, is Loco's own section
+//! and not part of `settings:`, but it is checked here too, by
+//! [`check_session_jwt`] from the same hook: the secret must be base64 of at
+//! least 64 bytes, the lifetime two hours, and the token read from the
+//! session cookie, then the Bearer header (ADR 0006 §1; D92, research:
+//! DECISIONS R15). Loco decodes the secret only when it signs a token, so
+//! without the check a bad secret would show up as a `500` at the first
+//! correct sign-in.
+//!
+//! Production also refuses every public throwaway key this repository
+//! publishes for the local environments, the TOTP key and the JWT secrets
+//! ([`Settings::refuse_published_keys`], ADR 0034 §3).
 //!
 //! The PNG encoder effort (`settings.image_optimisation.png`, ADR 0033 §5)
 //! is checked here in full, through [`PngEffort::new`], so a value that would
@@ -30,10 +41,21 @@
 
 use std::{net::IpAddr, path::PathBuf};
 
-use loco_rs::environment::Environment;
+use loco_rs::{
+    config::{Auth, JWTLocation, JWTLocationConfig},
+    environment::Environment,
+};
 use serde::{Deserialize, Deserializer, de::Error as _};
 
-use crate::domain::{image_optimise::PngEffort, totp_secret::TotpEncryptionKey};
+use crate::domain::{
+    configured_key::KeyError,
+    image_optimise::PngEffort,
+    session_jwt::{
+        ExpirationError, JwtSecret, LocationsError, TokenLocation, check_expiration,
+        check_locations,
+    },
+    totp_secret::TotpEncryptionKey,
+};
 
 /// The root key of the section in `config/<env>.yaml`.
 pub const SETTINGS_KEY: &str = "settings";
@@ -106,6 +128,68 @@ where
         _ => Err(refuse(
             &"is not a string; write it in quotes, as config/production.yaml does",
         )),
+    }
+}
+
+/// The section that holds the admin session's JWT configuration, for error
+/// messages.
+pub const JWT_KEY: &str = "auth.jwt";
+/// The full key of the session secret, for error messages.
+pub const JWT_SECRET_KEY: &str = "auth.jwt.secret";
+/// The environment variable that `config/production.yaml` reads
+/// [`JWT_SECRET_KEY`] from, named in error messages so the operator knows
+/// which secret to fix.
+pub const JWT_SECRET_ENV: &str = "JWT_SECRET";
+/// The full key of the session token's lifetime, for error messages.
+pub const JWT_EXPIRATION_KEY: &str = "auth.jwt.expiration";
+/// The full key of where Loco reads the session token, for error messages.
+pub const JWT_LOCATION_KEY: &str = "auth.jwt.location";
+
+/// Checks the admin session's JWT configuration, `auth.jwt`, and returns its
+/// decoded secret for [`Settings::refuse_published_keys`] (ADR 0006 §1;
+/// D92, research: DECISIONS R15). `Hooks::load_config` runs it in every
+/// environment, so every command stops before it connects anywhere.
+///
+/// - `auth`: Loco's `auth` section (`Config::auth`), `None` when the
+///   configuration has none.
+///
+/// The checks run in this order, and the first failure is reported: the
+/// section is present; the secret is base64 of at least 64 bytes; the
+/// lifetime is two hours; the token is read from the session cookie, then
+/// the Bearer header, and nowhere else. The secret comes first because in
+/// production it is the one value that comes from the environment; the
+/// other two are fixed in `config/production.yaml`.
+///
+/// # Errors
+///
+/// [`SettingsError::MissingSessionJwt`], [`SettingsError::SessionSecret`],
+/// [`SettingsError::SessionExpiration`] or
+/// [`SettingsError::SessionLocations`]. None of them contains the secret.
+pub fn check_session_jwt(auth: Option<&Auth>) -> Result<JwtSecret, SettingsError> {
+    let jwt = auth
+        .and_then(|auth| auth.jwt.as_ref())
+        .ok_or(SettingsError::MissingSessionJwt)?;
+    let secret = JwtSecret::from_base64(&jwt.secret).map_err(SettingsError::SessionSecret)?;
+    check_expiration(jwt.expiration).map_err(SettingsError::SessionExpiration)?;
+    let locations = jwt.location.as_ref().map(token_locations);
+    check_locations(locations.as_deref()).map_err(SettingsError::SessionLocations)?;
+    Ok(secret)
+}
+
+/// Copies Loco's token locations into the plain values of
+/// [`check_locations`]; a single location is a list of one, as Loco reads
+/// it.
+///
+/// - `config`: the configured `auth.jwt.location`.
+fn token_locations(config: &JWTLocationConfig) -> Vec<TokenLocation> {
+    let copy = |location: &JWTLocation| match location {
+        JWTLocation::Bearer => TokenLocation::Bearer,
+        JWTLocation::Cookie { name } => TokenLocation::Cookie { name: name.clone() },
+        JWTLocation::Query { name } => TokenLocation::Query { name: name.clone() },
+    };
+    match config {
+        JWTLocationConfig::Single(location) => vec![copy(location)],
+        JWTLocationConfig::Multiple(locations) => locations.iter().map(copy).collect(),
     }
 }
 
@@ -233,6 +317,44 @@ pub enum SettingsError {
          (ADR 0006 §6, ADR 0034 §3)"
     )]
     PublishedTotpKey,
+    /// The configuration has no `auth.jwt` section, so no session can be
+    /// signed (ADR 0006 §1).
+    #[error(
+        "the configuration has no `{JWT_KEY}` section; backend3 signs the admin session with it \
+         (ADR 0006 §1; see config/test.yaml for an example)"
+    )]
+    MissingSessionJwt,
+    /// The session secret is not base64 of at least 64 bytes (ADR 0006 §1,
+    /// ADR 0023 §11). The message has the form of the TOTP key's, and like
+    /// it never contains the value.
+    #[error(
+        "invalid configuration at `{JWT_SECRET_KEY}`: the session secret ({JWT_SECRET_ENV} in \
+         production) {0}"
+    )]
+    SessionSecret(KeyError),
+    /// The session lifetime is not two hours (ADR 0006 §1).
+    #[error("invalid configuration at `{JWT_EXPIRATION_KEY}`: {0}")]
+    SessionExpiration(ExpirationError),
+    /// The session token is not read from the session cookie, then the
+    /// Bearer header (ADR 0006 §1).
+    #[error("invalid configuration at `{JWT_LOCATION_KEY}`: {0}")]
+    SessionLocations(LocationsError),
+    /// Production was given one of the public throwaway JWT secrets that
+    /// this repository publishes (ADR 0034 §3). The message names where it
+    /// is published and where the real secret comes from; the name of the
+    /// `backend-secrets` key is the one ADR 0023 §11 gives, not a value.
+    #[error(
+        "refusing to start: {JWT_SECRET_KEY} ({JWT_SECRET_ENV}) is the public throwaway secret \
+         of {published_in}, which production refuses; set {JWT_SECRET_ENV} to the secret from \
+         the secret store (the backend-secrets key backend3-jwt-secret): base64 of at least 64 \
+         random bytes (ADR 0006 §1, ADR 0034 §3)"
+    )]
+    PublishedJwtSecret {
+        /// Where the repository publishes the secret, from
+        /// [`PUBLISHED_JWT_SECRETS`](crate::domain::session_jwt::PUBLISHED_JWT_SECRETS).
+        /// Not named `source`, which thiserror reads as the error's cause.
+        published_in: &'static str,
+    },
 }
 
 impl Settings {
@@ -289,36 +411,52 @@ impl Settings {
         Ok(())
     }
 
-    /// Refuses, in production, the TOTP key that this public repository
-    /// commits for development, test and e2e (ADR 0034 §2 item 3 allows it
-    /// there, §3 refuses it in production). `Hooks::load_config` runs it, so
-    /// every command stops before it connects anywhere.
+    /// Refuses, in production, every key that this public repository
+    /// publishes for development, test and e2e (ADR 0034 §2 item 3 allows
+    /// them there, §3 refuses them in production): the TOTP encryption key
+    /// and the JWT secrets of
+    /// [`PUBLISHED_JWT_SECRETS`](crate::domain::session_jwt::PUBLISHED_JWT_SECRETS).
+    /// `Hooks::load_config` runs it, so every command stops before it
+    /// connects anywhere.
     ///
     /// This is the one refusal of published keys that ADR 0034 §3 asks for.
-    /// The `secret-guards` slice adds the published JWT secrets to it rather
-    /// than adding a second check (ADR 0034 §3, "Who"), and a later slice
-    /// that publishes a throwaway key adds that key here in the same PR.
+    /// A later slice that publishes a throwaway key adds that key here in
+    /// the same PR (ADR 0034 §3, "Who"); `tests/boot/published_keys.rs`
+    /// fails on a committed key that this function does not refuse.
     ///
     /// - `environment`: the Loco environment the configuration was loaded
-    ///   for. Only [`Environment::Production`] refuses the key; staging runs
-    ///   that environment too. The local environments keep it, because a
-    ///   fixed value keeps their runs reproducible and protects nothing.
+    ///   for. Only [`Environment::Production`] refuses the keys; staging runs
+    ///   that environment too. The local environments keep them, because
+    ///   fixed values keep their runs reproducible and protect nothing.
+    /// - `jwt_secret`: the session secret of the same configuration, from
+    ///   [`check_session_jwt`]. It lives in Loco's `auth.jwt` section, which
+    ///   these settings do not hold.
     ///
-    /// The configuration cannot bring the key into production by itself:
-    /// `config/production.yaml` reads `TOTP_ENCRYPTION_KEY` with no default.
-    /// This check stops the one remaining way, the public value copied into
-    /// that variable.
+    /// The configuration cannot bring a published key into production by
+    /// itself: `config/production.yaml` reads `TOTP_ENCRYPTION_KEY` and
+    /// `JWT_SECRET` with no default. This check stops the one remaining way,
+    /// a public value copied into one of those variables. When both are
+    /// published, the TOTP key is reported first.
     ///
     /// # Errors
     ///
-    /// Returns [`SettingsError::PublishedTotpKey`] in production when the
-    /// configured key is the published one. The message names the key and
-    /// the variable, not the value.
-    pub fn refuse_published_keys(&self, environment: &Environment) -> Result<(), SettingsError> {
-        if *environment == Environment::Production
-            && self.admin_auth.totp_encryption_key.is_published_local_key()
-        {
+    /// Returns [`SettingsError::PublishedTotpKey`] or
+    /// [`SettingsError::PublishedJwtSecret`] in production when a configured
+    /// key is a published one. The message names the key and the variable,
+    /// not the value.
+    pub fn refuse_published_keys(
+        &self,
+        environment: &Environment,
+        jwt_secret: &JwtSecret,
+    ) -> Result<(), SettingsError> {
+        if *environment != Environment::Production {
+            return Ok(());
+        }
+        if self.admin_auth.totp_encryption_key.is_published_local_key() {
             return Err(SettingsError::PublishedTotpKey);
+        }
+        if let Some(published_in) = jwt_secret.published_in() {
+            return Err(SettingsError::PublishedJwtSecret { published_in });
         }
         Ok(())
     }
@@ -327,8 +465,13 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT};
+    use crate::domain::{
+        session_cookie::SESSION_COOKIE_NAME,
+        session_jwt::{PUBLISHED_JWT_SECRETS, SESSION_LIFETIME_SECS},
+        totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT},
+    };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use loco_rs::config::JWT as JwtConfig;
     use proptest::prelude::*;
     use serde_json::{Value, json};
     use std::net::Ipv4Addr;
@@ -402,6 +545,46 @@ mod tests {
     /// The settings of a complete section with the TOTP key `key`.
     fn settings_with_totp_key(key: &str) -> Settings {
         Settings::from_section(Some(&with_totp_key(&json!(key)))).expect("valid")
+    }
+
+    /// A session secret that this repository does not publish: a fixed
+    /// input of the comparison alone. A test that starts the production
+    /// configuration uses a secret made when it runs (tests/support
+    /// `cli_jwt_secret`, ADR 0034 §3).
+    fn unpublished_jwt() -> JwtSecret {
+        JwtSecret::from_base64(&STANDARD.encode([0x42_u8; 64])).expect("valid")
+    }
+
+    /// The published JWT secret at `index` of [`PUBLISHED_JWT_SECRETS`].
+    fn published_jwt(index: usize) -> JwtSecret {
+        JwtSecret::from_base64(&STANDARD.encode(PUBLISHED_JWT_SECRETS[index].text)).expect("valid")
+    }
+
+    /// The session cookie, then Bearer: the locations of ADR 0006 §1.
+    fn session_locations() -> JWTLocationConfig {
+        JWTLocationConfig::Multiple(vec![
+            JWTLocation::Cookie {
+                name: SESSION_COOKIE_NAME.to_owned(),
+            },
+            JWTLocation::Bearer,
+        ])
+    }
+
+    /// An `auth` section with the given secret, lifetime and locations.
+    fn auth(secret: &str, expiration: u64, location: Option<JWTLocationConfig>) -> Auth {
+        Auth {
+            jwt: Some(JwtConfig {
+                location,
+                secret: secret.to_owned(),
+                expiration,
+            }),
+        }
+    }
+
+    /// An `auth` section as the committed configurations write it, with
+    /// `secret`.
+    fn session_auth(secret: &str) -> Auth {
+        auth(secret, SESSION_LIFETIME_SECS, Some(session_locations()))
     }
 
     #[test]
@@ -641,7 +824,7 @@ mod tests {
     fn production_refuses_the_published_totp_key() {
         let settings = settings_with_totp_key(PUBLISHED_LOCAL_KEY);
         let error = settings
-            .refuse_published_keys(&Environment::Production)
+            .refuse_published_keys(&Environment::Production, &unpublished_jwt())
             .expect_err("the published key in production");
         assert!(matches!(error, SettingsError::PublishedTotpKey));
         let message = error.to_string();
@@ -667,7 +850,9 @@ mod tests {
             Environment::Any("e2e".to_owned()),
         ] {
             assert!(
-                settings.refuse_published_keys(&environment).is_ok(),
+                settings
+                    .refuse_published_keys(&environment, &published_jwt(0))
+                    .is_ok(),
                 "{environment}"
             );
         }
@@ -692,11 +877,203 @@ mod tests {
             let settings = settings_with_totp_key(&key);
             assert!(
                 settings
-                    .refuse_published_keys(&Environment::Production)
+                    .refuse_published_keys(&Environment::Production, &unpublished_jwt())
                     .is_ok(),
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn production_refuses_every_published_jwt_secret() {
+        let settings = settings_with_totp_key(&STANDARD.encode([0x42_u8; 64]));
+        for (index, published) in PUBLISHED_JWT_SECRETS.iter().enumerate() {
+            let error = settings
+                .refuse_published_keys(&Environment::Production, &published_jwt(index))
+                .expect_err("a published secret in production");
+            assert!(
+                matches!(error, SettingsError::PublishedJwtSecret { published_in } if published_in == published.source),
+                "{error:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "refusing to start: auth.jwt.secret (JWT_SECRET) is the public throwaway \
+                     secret of {}, which production refuses; set JWT_SECRET to the secret from \
+                     the secret store (the backend-secrets key backend3-jwt-secret)",
+                    published.source
+                )),
+                "{message}"
+            );
+            assert!(
+                !message.contains(&STANDARD.encode(published.text)),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_local_environments_keep_every_published_key() {
+        let settings = settings_with_totp_key(PUBLISHED_LOCAL_KEY);
+        for environment in [
+            Environment::Development,
+            Environment::Test,
+            Environment::Any("e2e".to_owned()),
+            Environment::Any("staging".to_owned()),
+        ] {
+            for index in 0..PUBLISHED_JWT_SECRETS.len() {
+                assert!(
+                    settings
+                        .refuse_published_keys(&environment, &published_jwt(index))
+                        .is_ok(),
+                    "{environment}: {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_totp_key_is_reported_first_when_both_are_published() {
+        let settings = settings_with_totp_key(PUBLISHED_LOCAL_KEY);
+        assert!(matches!(
+            settings.refuse_published_keys(&Environment::Production, &published_jwt(1)),
+            Err(SettingsError::PublishedTotpKey)
+        ));
+    }
+
+    #[test]
+    fn the_committed_session_shape_passes_and_yields_its_secret() {
+        let encoded = STANDARD.encode(PUBLISHED_JWT_SECRETS[1].text);
+        let secret = check_session_jwt(Some(&session_auth(&encoded))).expect("valid");
+        assert_eq!(secret, published_jwt(1));
+    }
+
+    #[test]
+    fn a_missing_jwt_section_is_refused() {
+        for auth in [None, Some(Auth { jwt: None })] {
+            let error = check_session_jwt(auth.as_ref()).expect_err("missing");
+            assert!(
+                matches!(error, SettingsError::MissingSessionJwt),
+                "{error:?}"
+            );
+            assert!(
+                error.to_string().contains("no `auth.jwt` section"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_session_secret_names_the_key_and_the_problem_but_not_the_value() {
+        let short = STANDARD.encode([0x5a_u8; 40]);
+        let pasted = "Wrong-Secret-Pasted-Here-0123456789";
+        for (secret, problem) in [
+            ("", "is empty"),
+            (pasted, "is not valid base64"),
+            (short.as_str(), "decodes to 40 bytes"),
+        ] {
+            let error = check_session_jwt(Some(&session_auth(secret))).expect_err("refused");
+            assert!(
+                matches!(error, SettingsError::SessionSecret(_)),
+                "{error:?}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.starts_with(
+                    "invalid configuration at `auth.jwt.secret`: the session secret (JWT_SECRET \
+                     in production) "
+                ),
+                "{message}"
+            );
+            assert!(message.contains(problem), "{message}");
+            if !secret.is_empty() {
+                assert!(!message.contains(secret), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_lifetime_other_than_two_hours_is_refused() {
+        let encoded = STANDARD.encode([0x42_u8; 64]);
+        for expiration in [0, 3600, 604_800] {
+            let auth = auth(&encoded, expiration, Some(session_locations()));
+            let error = check_session_jwt(Some(&auth)).expect_err("refused");
+            assert!(
+                matches!(error, SettingsError::SessionExpiration(ExpirationError { found }) if found == expiration),
+                "{error:?}"
+            );
+            assert!(
+                error.to_string().starts_with(&format!(
+                    "invalid configuration at `auth.jwt.expiration`: is {expiration} seconds"
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_locations_other_than_the_cookie_then_bearer_are_refused() {
+        let encoded = STANDARD.encode([0x42_u8; 64]);
+        let cookie = JWTLocation::Cookie {
+            name: SESSION_COOKIE_NAME.to_owned(),
+        };
+        for (location, found) in [
+            (
+                None,
+                "the Bearer header only, Loco's default when the key is not set",
+            ),
+            (
+                Some(JWTLocationConfig::Single(JWTLocation::Bearer)),
+                "the Bearer header",
+            ),
+            (
+                Some(JWTLocationConfig::Single(cookie.clone())),
+                "the cookie __Host-admin_session",
+            ),
+            (
+                Some(JWTLocationConfig::Multiple(vec![
+                    JWTLocation::Bearer,
+                    cookie,
+                ])),
+                "the Bearer header, then the cookie __Host-admin_session",
+            ),
+            (
+                Some(JWTLocationConfig::Multiple(vec![
+                    JWTLocation::Query {
+                        name: "token".to_owned(),
+                    },
+                    JWTLocation::Bearer,
+                ])),
+                "the query parameter token, then the Bearer header",
+            ),
+        ] {
+            let auth = auth(&encoded, SESSION_LIFETIME_SECS, location);
+            let error = check_session_jwt(Some(&auth)).expect_err("refused");
+            assert!(
+                matches!(error, SettingsError::SessionLocations(_)),
+                "{error:?}"
+            );
+            assert!(
+                error.to_string().starts_with(&format!(
+                    "invalid configuration at `auth.jwt.location`: reads the token from {found};"
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_secret_is_checked_before_the_lifetime_and_the_locations() {
+        let all_wrong = auth("not base64", 0, None);
+        assert!(matches!(
+            check_session_jwt(Some(&all_wrong)),
+            Err(SettingsError::SessionSecret(_))
+        ));
+        let secret_right = auth(&STANDARD.encode([0x42_u8; 64]), 0, None);
+        assert!(matches!(
+            check_session_jwt(Some(&secret_right)),
+            Err(SettingsError::SessionExpiration(_))
+        ));
     }
 
     #[test]
@@ -807,7 +1184,11 @@ mod tests {
             );
             // Any key but the published one starts in production too.
             prop_assume!(bytes != PUBLISHED_LOCAL_KEY_TEXT);
-            prop_assert!(settings.refuse_published_keys(&Environment::Production).is_ok());
+            prop_assert!(
+                settings
+                    .refuse_published_keys(&Environment::Production, &unpublished_jwt())
+                    .is_ok()
+            );
         }
 
         #[test]
@@ -826,6 +1207,22 @@ mod tests {
                     prop_assert!(message.contains(&error.to_string()), "{}", message);
                 }
             }
+        }
+
+        #[test]
+        fn any_session_secret_of_64_bytes_or_more_passes_and_is_its_own(
+            bytes in proptest::collection::vec(any::<u8>(), 64..=160),
+        ) {
+            let encoded = STANDARD.encode(&bytes);
+            let secret = check_session_jwt(Some(&session_auth(&encoded))).expect("valid");
+            prop_assert_eq!(&secret, &JwtSecret::from_base64(&encoded).expect("valid"));
+            prop_assume!(PUBLISHED_JWT_SECRETS.iter().all(|p| p.text != bytes.as_slice()));
+            let settings = settings_with_totp_key(&STANDARD.encode([0x42_u8; 64]));
+            prop_assert!(
+                settings
+                    .refuse_published_keys(&Environment::Production, &secret)
+                    .is_ok()
+            );
         }
 
         #[test]

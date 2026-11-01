@@ -1,11 +1,13 @@
 //! The committed configuration files load and say what the ADRs require.
 //!
-//! These tests read `config/<env>.yaml` the way Loco does. Values that the
-//! files take from the environment through `get_env` (the database URI, for
-//! example) are only checked through the guard, because the CI job may set
-//! them. `config/production.yaml` needs variables without defaults; the CLI
-//! tests in `tests/cli/` and `totp_encryption_key.rs` load it in a child
-//! process.
+//! These tests read `config/<env>.yaml` the way Loco does, as committed: a
+//! personal `config/<env>.local.yaml` that Loco would merge over it is left
+//! out. Values that the files take from the environment through `get_env`
+//! (the database URI, for example) are only checked through the guard,
+//! because the CI job may set them. `config/production.yaml` needs
+//! variables without defaults; the CLI tests in `tests/cli/` and
+//! `totp_encryption_key.rs` load it in a child process. `published_keys.rs`
+//! checks every key value these files hold against the production refusal.
 
 use std::net::Ipv4Addr;
 
@@ -13,21 +15,26 @@ use backend3::{
     app::enforce_database_guard,
     domain::{
         image_optimise::PngEffort,
+        session_jwt::SESSION_LIFETIME_SECS,
         totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT, TotpEncryptionKey},
     },
-    settings::{Settings, SettingsError},
+    settings::{Settings, SettingsError, check_session_jwt},
 };
 use loco_rs::{
     config::{CacheConfig, Config, QueueConfig, WorkerMode},
     environment::Environment,
 };
 
-use crate::support::repository_root;
+use crate::support::{cli_totp_key, load_committed_config, repository_root};
 
+/// The committed `config/<environment>.yaml`, without a developer's
+/// git-ignored `<environment>.local.yaml` merged over it
+/// ([`load_committed_config`]): these tests check what the repository
+/// publishes.
+///
+/// - `environment`: the environment whose file is loaded.
 fn load(environment: &Environment) -> Config {
-    environment
-        .load()
-        .unwrap_or_else(|error| panic!("config/{environment}.yaml: {error}"))
+    load_committed_config(environment)
 }
 
 fn local_environments() -> [Environment; 3] {
@@ -169,17 +176,83 @@ fn local_configs_use_the_published_throwaway_totp_key() {
             settings.admin_auth.totp_encryption_key, expected,
             "{environment}"
         );
+        let config = load(&environment);
+        let jwt_secret = check_session_jwt(config.auth.as_ref())
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
         settings
-            .refuse_published_keys(&environment)
+            .refuse_published_keys(&environment, &jwt_secret)
             .unwrap_or_else(|error| panic!("{environment}: {error}"));
         assert!(
             matches!(
-                settings.refuse_published_keys(&Environment::Production),
+                settings.refuse_published_keys(&Environment::Production, &jwt_secret),
                 Err(SettingsError::PublishedTotpKey)
             ),
             "{environment}: production must refuse this key"
         );
     }
+}
+
+#[test]
+fn local_configs_pass_the_session_check_with_their_own_published_secret() {
+    // ADR 0006 §1 and ADR 0034 §2 item 3: each local environment signs its
+    // sessions with a throwaway secret of its own, published in its file,
+    // which the local environment keeps and production refuses by name
+    // (ADR 0034 §3). The lifetime and the locations are the ones of
+    // ADR 0006 §1, or the check would fail.
+    for environment in local_environments() {
+        let config = load(&environment);
+        let jwt = config.get_jwt_config().expect("auth.jwt");
+        assert_eq!(jwt.expiration, SESSION_LIFETIME_SECS, "{environment}");
+        let secret = check_session_jwt(config.auth.as_ref())
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        let file = format!("config/{environment}.yaml");
+        assert_eq!(secret.published_in(), Some(file.as_str()), "{environment}");
+
+        // With a TOTP key of its own, production still refuses the secret,
+        // and names the file it comes from.
+        let mut section = config.settings.clone().expect("settings");
+        section["admin_auth"]["totp_encryption_key"] = cli_totp_key().into();
+        let settings = Settings::from_section(Some(&section)).expect("settings");
+        settings
+            .refuse_published_keys(&environment, &secret)
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        match settings.refuse_published_keys(&Environment::Production, &secret) {
+            Err(SettingsError::PublishedJwtSecret { published_in }) => {
+                assert_eq!(published_in, file, "{environment}");
+            }
+            other => panic!("{environment}: production must refuse this secret, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn production_reads_the_jwt_secret_from_the_environment_without_a_default() {
+    // As for the TOTP key below: no default (ADR 0023 §11), and the escaping
+    // filters, without which a value with a quote fails as a YAML error that
+    // does not name auth.jwt.secret (tests/cli/session_secret.rs runs it end
+    // to end). The lifetime and the locations are fixed in the file.
+    let source = std::fs::read_to_string(repository_root().join("config/production.yaml"))
+        .expect("config/production.yaml");
+    let lines: Vec<&str> = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("secret:"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            r#"    secret: "<%= get_env(name='JWT_SECRET') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>""#
+        ]
+    );
+    assert!(
+        source.contains(
+            "auth:\n  jwt:\n"
+        ) && source.contains(
+            "    expiration: 7200\n"
+        ) && source.contains(
+            "    location:\n      - from: Cookie\n        name: __Host-admin_session\n      - from: Bearer\n"
+        ),
+        "config/production.yaml: auth.jwt as ADR 0006 §1 fixes it"
+    );
 }
 
 #[test]

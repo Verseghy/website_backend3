@@ -11,9 +11,11 @@
 //!   hand it down (ADR 0023 §9, ADR 0008 rule 3).
 //! - `load_config` runs the database-target guard of ADR 0024 §4 (layer 3)
 //!   and validates the typed settings, including that `settings.metrics.port`
-//!   is not `server.port`. Every Loco entry point calls it before it
-//!   connects anywhere: the test boot helpers, `cargo loco` and the
-//!   `backend3-cli` binary.
+//!   is not `server.port`, and the admin session's `auth.jwt` section
+//!   (ADR 0006 §1). In production it also refuses every public throwaway key
+//!   of the local configurations (ADR 0034 §3). Every Loco entry point calls
+//!   it before it connects anywhere: the test boot helpers, `cargo loco` and
+//!   the `backend3-cli` binary.
 //! - `before_routes` mounts the `/admin` router and the JSON `404` fallback.
 //!   In loco-rs 1.2.0 the router returned here receives Loco's routes and is
 //!   then wrapped by Loco's whole middleware stack, so `/admin` and the
@@ -105,7 +107,9 @@ use crate::{
         clock::Clock,
         database_target::{self, Connection},
     },
-    settings::{METRICS_BINDING_KEY, METRICS_PORT_KEY, MetricsSettings, Settings},
+    settings::{
+        METRICS_BINDING_KEY, METRICS_PORT_KEY, MetricsSettings, Settings, check_session_jwt,
+    },
 };
 
 /// The Loco application.
@@ -402,16 +406,19 @@ impl Hooks for App {
     }
 
     /// Loads the configuration and refuses it before anything connects: the
-    /// database guard, the typed settings, the metrics port, and in
-    /// production the public throwaway TOTP key of the local environments
-    /// (ADR 0034 §3). Every entry point loads its configuration here.
+    /// database guard, the typed settings, the metrics port, the session's
+    /// JWT section (ADR 0006 §1; D92, research: DECISIONS R15), and in
+    /// production the public throwaway keys of the local environments, the
+    /// TOTP key and the JWT secrets (ADR 0034 §3). Every entry point loads
+    /// its configuration here.
     async fn load_config(env: &Environment) -> Result<Config> {
         let config = env.load()?;
         enforce_database_guard(env, &config)?;
         Settings::from_section(config.settings.as_ref())
             .and_then(|settings| {
                 settings.check_server_port(config.server.port)?;
-                settings.refuse_published_keys(env)
+                let jwt_secret = check_session_jwt(config.auth.as_ref())?;
+                settings.refuse_published_keys(env, &jwt_secret)
             })
             .map_err(Error::msg)?;
         Ok(config)

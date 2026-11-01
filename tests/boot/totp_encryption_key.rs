@@ -11,15 +11,15 @@
 //! points at a [`ConnectionProbe`]; the positive control shows that a valid
 //! key gets as far as connecting. Every valid TOTP key here is made when the
 //! test runs ([`cli_totp_key`]), because production refuses a committed key
-//! (ADR 0034 §3). The session secret is [`CLI_JWT_SECRET`], which the
-//! `secret-guards` slice replaces with a run-time key (ADR 0034 §3).
+//! (ADR 0034 §3). So is the session secret ([`cli_jwt_secret`]), for the
+//! same reason.
 
 use std::time::Duration;
 
 use backend3::domain::totp_secret::{PUBLISHED_LOCAL_KEY, TotpEncryptionKey};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use crate::support::{CLI_JWT_SECRET, CliRun, ConnectionProbe, cli_totp_key, run_cli};
+use crate::support::{CliRun, ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -33,13 +33,14 @@ fn db_status_with(totp_key: Option<&str>) -> (CliRun, bool) {
         "postgres://loco:loco@127.0.0.1:{}/backend3_test",
         probe.port()
     );
+    let jwt_secret = cli_jwt_secret();
     let mut env = vec![
         ("LOCO_ENV", "production"),
         ("DATABASE_URL", url.as_str()),
         ("HOST", "http://localhost"),
         // The session secret that config/production.yaml also requires
         // (ADR 0006 §1), so that only the TOTP key decides the outcome.
-        ("JWT_SECRET", CLI_JWT_SECRET),
+        ("JWT_SECRET", jwt_secret.as_str()),
         // The probe never answers the PostgreSQL handshake; give up fast.
         ("DB_CONNECT_TIMEOUT", "300"),
     ];

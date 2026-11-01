@@ -60,13 +60,6 @@ pub const FIXTURE_DIST: &str = "tests/fixtures/admin-dist";
 /// The one hashed asset in the fixture.
 pub const FIXTURE_ASSET: &str = "assets/index-B7xKq2Lm.js";
 
-/// `JWT_SECRET` for the child processes that load config/production.yaml: a
-/// throwaway test value, the base64 of the sentence "backend3 CLI test JWT
-/// secret: public and throwaway, only for child processes.", which ADR 0034
-/// §2 allows. Production must refuse every published key (ADR 0034 §3), so
-/// the `secret-guards` slice replaces it with a key made at run time.
-pub const CLI_JWT_SECRET: &str = "YmFja2VuZDMgQ0xJIHRlc3QgSldUIHNlY3JldDogcHVibGljIGFuZCB0aHJvd2F3YXksIG9ubHkgZm9yIGNoaWxkIHByb2Nlc3Nlcy4=";
-
 /// The bytes of a file in the admin UI fixture.
 pub fn fixture(relative: &str) -> Vec<u8> {
     std::fs::read(repository_root().join(FIXTURE_DIST).join(relative))
@@ -76,6 +69,46 @@ pub fn fixture(relative: &str) -> Vec<u8> {
 /// The package root, which is also the working directory of the tests.
 pub fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Loads `config/<environment>.yaml` alone, as the repository commits it,
+/// with its templates rendered as Loco renders them.
+///
+/// `Environment::load` would deep-merge a developer's git-ignored
+/// `config/<environment>.local.yaml` over the committed file (loco-rs 1.2.0
+/// `Config::from_folder`, `.gitignore`). A test that checks what the
+/// repository publishes (the throwaway keys of ADR 0034 §2, the settings the
+/// ADRs fix) must not see a personal override, so this copies the committed
+/// file into a folder of its own, loads that folder and removes it again.
+///
+/// - `environment`: the environment whose committed file is loaded; its
+///   name is the file's stem (`e2e` for `Environment::Any("e2e")`).
+///
+/// # Panics
+///
+/// When the file is missing or does not load; the message names the file.
+pub fn load_committed_config(
+    environment: &loco_rs::environment::Environment,
+) -> loco_rs::config::Config {
+    let name = format!("{environment}.yaml");
+    let committed = repository_root().join("config").join(&name);
+    // CARGO_TARGET_TMPDIR is cargo's scratch directory for integration
+    // tests, inside the target directory; the UUID keeps parallel tests
+    // apart.
+    let folder =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("committed-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&folder)
+        .unwrap_or_else(|error| panic!("{}: {error}", folder.display()));
+    let loaded = std::fs::copy(&committed, folder.join(&name))
+        .map_err(|error| error.to_string())
+        .and_then(|_| {
+            loco_rs::config::Config::from_folder(environment, &folder)
+                .map_err(|error| error.to_string())
+        });
+    // Removed before the result is checked, so a failing load leaves nothing
+    // behind either.
+    let _ = std::fs::remove_dir_all(&folder);
+    loaded.unwrap_or_else(|error| panic!("config/{name}: {error}"))
 }
 
 /// A TCP listener that never accepts on its own, used to prove whether a
@@ -117,6 +150,8 @@ impl ConnectionProbe {
 pub struct CliRun {
     /// The exit status.
     pub status: ExitStatus,
+    /// Everything the process wrote to stdout.
+    pub stdout: String,
     /// Everything the process wrote to stderr.
     pub stderr: String,
 }
@@ -124,6 +159,11 @@ pub struct CliRun {
 /// Runs the built `backend3-cli` with exactly the given environment (the
 /// test's own environment is not inherited) and the package root as working
 /// directory, and waits at most `timeout`.
+///
+/// Both output streams are read while the process runs, each on a thread of
+/// its own: a child that fills a pipe's buffer (64 KiB on Linux) before it
+/// exits would otherwise block forever, and `doctor --config` prints the
+/// whole configuration.
 pub fn run_cli(env: &[(&str, &str)], args: &[&str], timeout: Duration) -> CliRun {
     let mut child = Command::new(env!("CARGO_BIN_EXE_backend3-cli"))
         .env_clear()
@@ -131,10 +171,12 @@ pub fn run_cli(env: &[(&str, &str)], args: &[&str], timeout: Duration) -> CliRun
         .args(args)
         .current_dir(repository_root())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn backend3-cli");
+    let stdout = read_to_end(child.stdout.take().expect("piped stdout"));
+    let stderr = read_to_end(child.stderr.take().expect("piped stderr"));
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -148,31 +190,55 @@ pub fn run_cli(env: &[(&str, &str)], args: &[&str], timeout: Duration) -> CliRun
         thread::sleep(Duration::from_millis(20));
     };
 
-    let mut stderr = String::new();
-    child
-        .stderr
-        .take()
-        .expect("piped stderr")
-        .read_to_string(&mut stderr)
-        .expect("read stderr");
-    CliRun { status, stderr }
+    CliRun {
+        status,
+        stdout: stdout.join().expect("read stdout"),
+        stderr: stderr.join().expect("read stderr"),
+    }
+}
+
+/// Reads `stream` to its end on a thread of its own, as text (lossily, so a
+/// stray byte cannot fail the test before its assertions run).
+fn read_to_end(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).expect("read the output");
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
 }
 
 /// A `TOTP_ENCRYPTION_KEY` for the child processes that load
-/// config/production.yaml ([`run_cli`]): the base64 of 64 bytes made when
-/// the test runs, a new key on every call.
+/// config/production.yaml ([`run_cli`]): a key made when the test runs
+/// ([`run_time_key`]), a new one on every call. Tests that need a key
+/// production refuses use
+/// `backend3::domain::totp_secret::PUBLISHED_LOCAL_KEY` instead.
+pub fn cli_totp_key() -> String {
+    run_time_key()
+}
+
+/// A `JWT_SECRET` for the child processes that load config/production.yaml
+/// ([`run_cli`]): a secret made when the test runs ([`run_time_key`]), a new
+/// one on every call. Tests that need a secret production refuses take it
+/// from `backend3::domain::session_jwt::PUBLISHED_JWT_SECRETS` or from a
+/// local configuration file instead.
+pub fn cli_jwt_secret() -> String {
+    run_time_key()
+}
+
+/// The base64 of 64 bytes made when the test runs, a new value on every
+/// call: what a test that starts the production configuration sets as a
+/// key.
 ///
 /// ADR 0034 §3: production refuses every key that this repository holds,
 /// and a test that starts the production configuration uses a key that no
 /// committed file holds. A fixed value here would be such a key that
-/// production accepts. Tests that need a key production refuses use
-/// `backend3::domain::totp_secret::PUBLISHED_LOCAL_KEY` instead.
+/// production accepts.
 ///
 /// The bytes are four version 4 UUIDs, from the generator of the uuid crate
 /// that Loco already builds, so the tests need no random crate of their
 /// own. Six bits of each UUID are fixed (version and variant), which leaves
 /// 488 random bits: plenty for a key that only has to be new and unknown.
-pub fn cli_totp_key() -> String {
+fn run_time_key() -> String {
     let bytes: Vec<u8> = (0..4).flat_map(|_| Uuid::new_v4().into_bytes()).collect();
     STANDARD.encode(bytes)
 }

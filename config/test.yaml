@@ -74,7 +74,8 @@ database:
 # the sentence
 # "backend3 test JWT secret: public and throwaway, used only by the Rust test
 # suite." Production reads its own from JWT_SECRET
-# and must refuse this value (ADR 0034 §3).
+# and refuses this value at boot (Settings::refuse_published_keys,
+# ADR 0034 §3).
 auth:
   jwt:
     secret: "YmFja2VuZDMgdGVzdCBKV1Qgc2VjcmV0OiBwdWJsaWMgYW5kIHRocm93YXdheSwgdXNlZCBvbmx5IGJ5IHRoZSBSdXN0IHRlc3Qgc3VpdGUu"
