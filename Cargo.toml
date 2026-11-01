@@ -180,6 +180,13 @@ html5ever = "0.40.1"
 # warns about duplicates. The default features add a command-line binary
 # (`main`) and a parse-error list (`errors`) that backend3 does not use.
 scraper = { version = "0.29", default-features = false }
+# The tree inside `scraper::Html` (its public `tree` field), which the import
+# normaliser edits in place: it unwraps, wraps and moves nodes of the parsed
+# body (src/domain/normalise/, data-migration.md §7.1), and that needs the
+# node ids and the mutable node handles by name. It must be the ego-tree line
+# scraper 0.29 builds ("^0.11.0"), so it adds no crate to the graph; a tree of
+# another line would be a different type from the one scraper parses into.
+ego-tree = "0.11"
 # The CSS tokenizer of the sanitiser's style grammar (editor.md §7.3): the
 # cssparser 0.38 line that ammonia 4.2.4 and scraper 0.29 already require
 # ("^0.38.0"), so it adds no crate to the graph. Only its tokenizer, block
@@ -449,6 +456,7 @@ mime_guess = { workspace = true }
 ammonia = { workspace = true }
 html5ever = { workspace = true }
 scraper = { workspace = true }
+ego-tree = { workspace = true }
 cssparser = { workspace = true }
 ts-rs = { workspace = true }
 utoipa = { workspace = true }

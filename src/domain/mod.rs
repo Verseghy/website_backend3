@@ -37,6 +37,7 @@ pub mod http_metrics;
 pub mod image_optimise;
 pub mod import_mysql;
 pub mod media_rules;
+pub mod normalise;
 pub mod password_hash;
 pub mod proc_stat;
 pub mod revision;
