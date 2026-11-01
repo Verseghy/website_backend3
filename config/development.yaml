@@ -82,7 +82,8 @@ database:
 # the sentence
 # "backend3 development JWT secret: public and throwaway, never valid on any
 # deployment." Production reads its own from JWT_SECRET
-# and must refuse this value (ADR 0034 §3).
+# and refuses this value at boot (Settings::refuse_published_keys,
+# ADR 0034 §3).
 auth:
   jwt:
     secret: "YmFja2VuZDMgZGV2ZWxvcG1lbnQgSldUIHNlY3JldDogcHVibGljIGFuZCB0aHJvd2F3YXksIG5ldmVyIHZhbGlkIG9uIGFueSBkZXBsb3ltZW50Lg=="

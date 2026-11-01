@@ -28,18 +28,21 @@ use aes_gcm::{
     Aes256Gcm, Key, KeyInit as _, Nonce, Tag,
     aead::{AeadInOut as _, inout::InOutBuf},
 };
-use base64::{DecodeError, Engine as _, engine::general_purpose::STANDARD};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-use super::totp::{SECRET_LEN, TotpSecret};
+// The configured key's format is shared with the JWT secret (ADR 0023 §11),
+// so its decoder and its errors live in `configured_key`; they are
+// re-exported here because they are part of this module's API.
+pub use super::configured_key::{CONFIGURED_KEY_MIN_LEN, KeyError};
+use super::{
+    configured_key::decode_configured_key,
+    totp::{SECRET_LEN, TotpSecret},
+};
 
 /// The HKDF info string of the cipher key. Changing it changes the key, so
 /// every stored secret would need re-encrypting.
 pub const KEY_INFO: &[u8] = b"backend3 totp-secret v1";
-
-/// The minimum decoded length of the configured key (ADR 0023 §11).
-pub const CONFIGURED_KEY_MIN_LEN: usize = 64;
 
 /// The length of the GCM nonce.
 pub const NONCE_LEN: usize = 12;
@@ -77,28 +80,6 @@ pub const PUBLISHED_LOCAL_KEY: &str = "YmFja2VuZDMgVE9UUCBlbmNyeXB0aW9uIGtleTogc
 #[derive(Clone)]
 pub struct TotpEncryptionKey([u8; 32]);
 
-/// Why a configured key was refused. No message contains the value.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum KeyError {
-    /// The value is the empty string.
-    #[error("is empty")]
-    Empty,
-    /// The value is not standard base64 with `=` padding.
-    #[error(
-        "is not valid base64 ({reason}); use the standard alphabet with `=` padding, on one line"
-    )]
-    NotBase64 {
-        /// What the decoder found, without the offending character.
-        reason: String,
-    },
-    /// The value decodes to fewer than [`CONFIGURED_KEY_MIN_LEN`] bytes.
-    #[error("decodes to {len} bytes; it must be base64 of at least 64 random bytes")]
-    TooShort {
-        /// The decoded length.
-        len: usize,
-    },
-}
-
 /// Why a stored value did not decrypt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DecryptError {
@@ -118,25 +99,18 @@ impl TotpEncryptionKey {
     /// Decodes the configured key and derives the cipher key.
     ///
     /// - `encoded`: the configured value, which production reads from
-    ///   `TOTP_ENCRYPTION_KEY`. It is decoded with the engine that Loco's
-    ///   JWT uses for `JWT_SECRET` (`STANDARD`, canonical padding; base64
-    ///   0.23 here and 0.22 under jsonwebtoken, which decode alike). Nothing
-    ///   is trimmed: a trailing newline is refused.
+    ///   `TOTP_ENCRYPTION_KEY`. It is decoded as every configured key is
+    ///   ([`decode_configured_key`]): with the engine that Loco's JWT uses
+    ///   for `JWT_SECRET` (`STANDARD`, canonical padding; base64 0.23 here
+    ///   and 0.22 under jsonwebtoken, which decode alike). Nothing is
+    ///   trimmed: a trailing newline is refused.
     ///
     /// # Errors
     ///
     /// [`KeyError::Empty`], [`KeyError::NotBase64`] (whitespace and line
     /// breaks included) or [`KeyError::TooShort`].
     pub fn from_base64(encoded: &str) -> Result<Self, KeyError> {
-        if encoded.is_empty() {
-            return Err(KeyError::Empty);
-        }
-        let configured = STANDARD
-            .decode(encoded)
-            .map_err(|error| KeyError::NotBase64 {
-                reason: decode_error_reason(&error),
-            })?;
-        Self::derive(&configured)
+        Self::derive(&decode_configured_key(encoded)?)
     }
 
     /// Derives the cipher key from the decoded configured key with
@@ -292,22 +266,9 @@ fn hkdf_sha256(input_key: &[u8], info: &[u8]) -> [u8; 32] {
     output
 }
 
-/// Describes a decoding error without the offending character, which may
-/// belong to a wrongly pasted secret.
-///
-/// - `error`: the decoder's error.
-fn decode_error_reason(error: &DecodeError) -> String {
-    match error {
-        DecodeError::InvalidByte(offset, _) | DecodeError::InvalidLastSymbol { offset, .. } => {
-            format!("an unexpected character at position {offset}")
-        }
-        DecodeError::InvalidLength(len) => format!("{len} characters is not a base64 length"),
-        DecodeError::InvalidPadding => "missing or wrong `=` padding".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use proptest::prelude::*;
 
     use super::*;

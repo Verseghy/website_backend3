@@ -12,7 +12,16 @@
 //!
 //! - `db reset` (drops every table, then migrates up);
 //! - `db truncate` (deletes the rows of every table);
-//! - `db seed --reset` / `db seed -r` (a reset before seeding).
+//! - `db seed --reset` / `db seed -r` (a reset before seeding);
+//!
+//! and the one that prints every secret (ADR 0039, amending ADR 0024 §4
+//! layer 3; D92, research: DECISIONS R15):
+//!
+//! - `doctor --config` / `doctor -c`, which prints the whole rendered
+//!   configuration (loco-rs 1.2.0 `cli.rs` prints `Config`'s `Display`, its
+//!   YAML), the database URL with its password, the session secret and the
+//!   TOTP encryption key included. `doctor` without `--config` prints only
+//!   the result of each check and stays allowed.
 //!
 //! `db down` stays allowed so that an operator can roll back one migration;
 //! the agent hook blocks it for agents (ADR 0024 §4, layer 2).
@@ -20,26 +29,33 @@
 //! The environment resolves as Loco resolves it: the value of the global
 //! `-e`/`--environment` option when present, otherwise the ambient
 //! environment (`LOCO_ENV`, `RAILS_ENV`, `NODE_ENV`, then `development`),
-//! which the caller passes in. The parser knows the option grammar of the
-//! loco-rs 1.2.0 CLI for the `db` subcommands (which options take a value)
-//! and errs on the side of refusing: when `-e` appears more than once, any
-//! `production` value counts.
+//! which the caller passes in. `doctor --production` (`-p`) also selects
+//! production, whatever the other two say: loco-rs 1.2.0 reads the flag as a
+//! deprecated `--environment production`. The parser knows the option
+//! grammar of the loco-rs 1.2.0 CLI for the `db` and `doctor` subcommands
+//! (which options take a value, which short flags exist) and errs on the
+//! side of refusing: when `-e` appears more than once, any `production`
+//! value counts, and `--config` or `--production` with an inline value,
+//! which clap refuses, counts as the flag.
 
-/// The environment in which the destructive subcommands are refused.
+/// The environment in which the pre-check refuses its commands.
 pub const PRODUCTION: &str = "production";
 
-/// A subcommand that wipes data.
+/// A subcommand that production refuses: one that wipes data, or the one
+/// that prints every secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DestructiveCommand {
+pub enum RefusedCommand {
     /// `db reset`.
     DbReset,
     /// `db truncate`.
     DbTruncate,
     /// `db seed --reset` or `db seed -r`.
     DbSeedReset,
+    /// `doctor --config` or `doctor -c`.
+    DoctorConfig,
 }
 
-impl DestructiveCommand {
+impl RefusedCommand {
     /// The command as an operator types it.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -47,6 +63,7 @@ impl DestructiveCommand {
             Self::DbReset => "db reset",
             Self::DbTruncate => "db truncate",
             Self::DbSeedReset => "db seed --reset",
+            Self::DoctorConfig => "doctor --config",
         }
     }
 }
@@ -59,14 +76,17 @@ pub enum EnvironmentSource {
     /// The process environment, as `loco_rs::environment::resolve_from_env`
     /// read it.
     Ambient,
+    /// `doctor`'s deprecated `--production` (`-p`) flag, which loco-rs 1.2.0
+    /// turns into the production environment.
+    DoctorProduction,
 }
 
-/// The refusal of a destructive subcommand in production. The `Display`
-/// text is the message the operator sees.
+/// The refusal of a subcommand in production. The `Display` text is the
+/// message the operator sees.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     /// The refused subcommand.
-    pub command: DestructiveCommand,
+    pub command: RefusedCommand,
     /// Where `production` came from.
     pub source: EnvironmentSource,
 }
@@ -76,15 +96,34 @@ impl core::fmt::Display for Refusal {
         let source = match self.source {
             EnvironmentSource::Option => "from --environment",
             EnvironmentSource::Ambient => "from LOCO_ENV, RAILS_ENV or NODE_ENV",
+            EnvironmentSource::DoctorProduction => {
+                "from doctor --production, which Loco reads as --environment production"
+            }
         };
-        write!(
-            formatter,
-            "Refusing to run `{}`: the environment is production ({source}), and this command \
-             deletes data. backend3 never runs `db reset`, `db truncate` or `db seed --reset` in \
-             production (ADR 0024). To roll back one migration, use `db down`; to recover data, \
-             follow the restore procedure in the operator runbook.",
-            self.command.as_str()
-        )
+        let command = self.command.as_str();
+        match self.command {
+            RefusedCommand::DbReset | RefusedCommand::DbTruncate | RefusedCommand::DbSeedReset => {
+                write!(
+                    formatter,
+                    "Refusing to run `{command}`: the environment is production ({source}), and \
+                     this command deletes data. backend3 never runs `db reset`, `db truncate` or \
+                     `db seed --reset` in production (ADR 0024). To roll back one migration, use \
+                     `db down`; to recover data, follow the restore procedure in the operator \
+                     runbook."
+                )
+            }
+            // The message names what the command would print, never a value:
+            // nothing has been loaded yet.
+            RefusedCommand::DoctorConfig => write!(
+                formatter,
+                "Refusing to run `{command}`: the environment is production ({source}), and this \
+                 command prints the whole configuration, the database URL, the session secret and \
+                 the TOTP encryption key included. backend3 never prints its configuration in \
+                 production (ADR 0039). To check the configuration, run `doctor` without \
+                 `--config`: it loads and checks the configuration and the connections without \
+                 printing them."
+            ),
+        }
     }
 }
 
@@ -103,6 +142,10 @@ struct Parsed {
     environments: Vec<String>,
     /// Whether `-r` or `--reset` appeared after `seed`.
     seed_reset: bool,
+    /// Whether `-c` or `--config` appeared after `doctor`.
+    doctor_config: bool,
+    /// Whether `-p` or `--production` appeared after `doctor`.
+    doctor_production: bool,
 }
 
 /// Splits the arguments into positionals, environment values and the seed
@@ -116,6 +159,12 @@ fn parse(args: &[String]) -> Parsed {
         let in_seed = parsed.positionals.len() >= 2
             && parsed.positionals[0] == "db"
             && parsed.positionals[1] == "seed";
+        // `doctor` has no positional arguments, so its flags may follow it
+        // in any order (loco-rs 1.2.0 `Commands::Doctor`).
+        let in_doctor = parsed
+            .positionals
+            .first()
+            .is_some_and(|first| first == "doctor");
 
         if arg == "--" {
             parsed.positionals.extend(args[index..].iter().cloned());
@@ -135,6 +184,10 @@ fn parse(args: &[String]) -> Parsed {
                 parsed.environments.extend(value);
             } else if in_seed && name == "reset" {
                 parsed.seed_reset = true;
+            } else if in_doctor && name == "config" {
+                parsed.doctor_config = true;
+            } else if in_doctor && name == "production" {
+                parsed.doctor_production = true;
             } else if in_seed && inline.is_none() && SEED_VALUE_OPTIONS.contains(&arg) {
                 index += 1;
             }
@@ -158,6 +211,8 @@ fn parse(args: &[String]) -> Parsed {
                         break;
                     }
                     'r' if in_seed => parsed.seed_reset = true,
+                    'c' if in_doctor => parsed.doctor_config = true,
+                    'p' if in_doctor => parsed.doctor_production = true,
                     _ => {}
                 }
             }
@@ -179,7 +234,9 @@ fn parse(args: &[String]) -> Parsed {
 /// # Errors
 ///
 /// Returns a [`Refusal`] when the environment resolves to `production` and
-/// the arguments name `db reset`, `db truncate` or `db seed` with `--reset`.
+/// the arguments name `db reset`, `db truncate`, `db seed` with `--reset`,
+/// or `doctor` with `--config`. For `doctor`, `--production` also makes the
+/// environment `production`, as it does in Loco.
 pub fn check(args: &[String], ambient_environment: &str) -> Result<(), Refusal> {
     let parsed = parse(args);
 
@@ -190,9 +247,10 @@ pub fn check(args: &[String], ambient_environment: &str) -> Result<(), Refusal> 
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["db", "reset", ..] => DestructiveCommand::DbReset,
-        ["db", "truncate", ..] => DestructiveCommand::DbTruncate,
-        ["db", "seed", ..] if parsed.seed_reset => DestructiveCommand::DbSeedReset,
+        ["db", "reset", ..] => RefusedCommand::DbReset,
+        ["db", "truncate", ..] => RefusedCommand::DbTruncate,
+        ["db", "seed", ..] if parsed.seed_reset => RefusedCommand::DbSeedReset,
+        ["doctor", ..] if parsed.doctor_config => RefusedCommand::DoctorConfig,
         _ => return Ok(()),
     };
 
@@ -204,7 +262,14 @@ pub fn check(args: &[String], ambient_environment: &str) -> Result<(), Refusal> 
             .iter()
             .any(|environment| environment == PRODUCTION)
             .then_some(EnvironmentSource::Option)
-    };
+    }
+    // loco-rs 1.2.0 switches `doctor --production` to production after it
+    // has resolved the environment, so the flag wins over both sources.
+    .or_else(|| {
+        parsed
+            .doctor_production
+            .then_some(EnvironmentSource::DoctorProduction)
+    });
 
     match source {
         Some(source) => Err(Refusal { command, source }),
@@ -221,7 +286,7 @@ mod tests {
         line.split_whitespace().map(str::to_owned).collect()
     }
 
-    fn refused(line: &str, ambient: &str) -> Option<DestructiveCommand> {
+    fn refused(line: &str, ambient: &str) -> Option<RefusedCommand> {
         check(&args(line), ambient)
             .err()
             .map(|refusal| refusal.command)
@@ -231,27 +296,27 @@ mod tests {
     fn refuses_the_three_commands_in_ambient_production() {
         assert_eq!(
             refused("db reset", "production"),
-            Some(DestructiveCommand::DbReset)
+            Some(RefusedCommand::DbReset)
         );
         assert_eq!(
             refused("db truncate", "production"),
-            Some(DestructiveCommand::DbTruncate)
+            Some(RefusedCommand::DbTruncate)
         );
         assert_eq!(
             refused("db seed --reset", "production"),
-            Some(DestructiveCommand::DbSeedReset)
+            Some(RefusedCommand::DbSeedReset)
         );
         assert_eq!(
             refused("db seed -r", "production"),
-            Some(DestructiveCommand::DbSeedReset)
+            Some(RefusedCommand::DbSeedReset)
         );
         assert_eq!(
             refused("db seed -dr", "production"),
-            Some(DestructiveCommand::DbSeedReset)
+            Some(RefusedCommand::DbSeedReset)
         );
         assert_eq!(
             refused("db seed --from src/fixtures --reset", "production"),
-            Some(DestructiveCommand::DbSeedReset)
+            Some(RefusedCommand::DbSeedReset)
         );
     }
 
@@ -275,9 +340,124 @@ mod tests {
             "routes",
             "reset",
             "db",
+            // `doctor` without `--config` prints only its checks' results.
+            "doctor",
+            "doctor -p",
+            "doctor --production",
+            // `-ec` gives `-e` the value `c`; it is no `-c` flag.
+            "doctor -ec",
+            // `-c` and `-p` mean other things to other subcommands.
+            "middleware --config",
+            "middleware -c",
+            "scheduler -c config/scheduler.yaml",
+            "start -p 5150",
+            "task config",
+            "config doctor",
         ] {
             assert_eq!(check(&args(line), "production"), Ok(()), "{line}");
         }
+    }
+
+    #[test]
+    fn refuses_doctor_config_in_production_in_every_spelling() {
+        for line in [
+            "doctor --config",
+            "doctor -c",
+            "doctor -cp",
+            "doctor -pc",
+            "doctor -p -c",
+            "doctor --production --config",
+            "doctor -ce production",
+            "doctor --config -e production",
+            "-e production doctor -c",
+            // clap refuses a value for a flag; refusing first costs nothing.
+            "doctor --config=true",
+            "doctor -c=1",
+        ] {
+            assert_eq!(
+                refused(line, "production"),
+                Some(RefusedCommand::DoctorConfig),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_production_selects_production_whatever_the_environment_says() {
+        let source =
+            |line: &str, ambient: &str| check(&args(line), ambient).err().map(|r| r.source);
+        for (line, ambient) in [
+            ("doctor -c -p", "development"),
+            ("doctor -cp", "test"),
+            ("doctor --config --production", "e2e"),
+            ("doctor --production=false --config", "development"),
+            // Loco switches to production after it has read -e.
+            ("-e development doctor -pc", "development"),
+            ("doctor -c -p -e test", "production"),
+        ] {
+            assert_eq!(
+                source(line, ambient),
+                Some(EnvironmentSource::DoctorProduction),
+                "{line}"
+            );
+        }
+        // An -e production or an ambient production is named instead.
+        assert_eq!(
+            source("-e production doctor -c -p", "test"),
+            Some(EnvironmentSource::Option)
+        );
+        assert_eq!(
+            source("doctor -cp", "production"),
+            Some(EnvironmentSource::Ambient)
+        );
+    }
+
+    #[test]
+    fn allows_doctor_config_outside_production() {
+        for ambient in ["development", "test", "e2e", "staging", "Production", ""] {
+            for line in ["doctor --config", "doctor -c", "doctor --config -e test"] {
+                assert_eq!(check(&args(line), ambient), Ok(()), "{ambient}: {line}");
+            }
+        }
+        // An explicit non-production environment overrides an ambient one.
+        assert_eq!(
+            check(&args("-e development doctor -c"), "production"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_doctor_message_says_why_and_what_to_run_instead() {
+        let message = check(&args("doctor --config"), "production")
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            message.starts_with(
+                "Refusing to run `doctor --config`: the environment is production (from \
+                 LOCO_ENV, RAILS_ENV or NODE_ENV), and this command prints the whole \
+                 configuration"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("the database URL, the session secret and the TOTP encryption key"),
+            "{message}"
+        );
+        assert!(message.contains("(ADR 0039)"), "{message}");
+        assert!(
+            message.contains("run `doctor` without `--config`"),
+            "{message}"
+        );
+        assert!(!message.contains("deletes data"), "{message}");
+        let message = check(&args("doctor -cp"), "development")
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            message.contains(
+                "(from doctor --production, which Loco reads as --environment production)"
+            ),
+            "{message}"
+        );
     }
 
     #[test]
@@ -287,7 +467,7 @@ mod tests {
         // and fail-closed.
         assert_eq!(
             refused("-- db reset", "production"),
-            Some(DestructiveCommand::DbReset)
+            Some(RefusedCommand::DbReset)
         );
     }
 
@@ -356,7 +536,7 @@ mod tests {
         // `production` is the value of -e here, so the subcommand is `db reset`.
         assert_eq!(
             refused("-e production db reset", "test"),
-            Some(DestructiveCommand::DbReset)
+            Some(RefusedCommand::DbReset)
         );
         // `db` is the value of -e, so the positionals are `reset` only.
         assert_eq!(check(&args("-e db reset"), "production"), Ok(()));
@@ -385,17 +565,28 @@ mod tests {
 
     #[test]
     fn command_names() {
-        assert_eq!(DestructiveCommand::DbReset.as_str(), "db reset");
-        assert_eq!(DestructiveCommand::DbTruncate.as_str(), "db truncate");
-        assert_eq!(DestructiveCommand::DbSeedReset.as_str(), "db seed --reset");
+        assert_eq!(RefusedCommand::DbReset.as_str(), "db reset");
+        assert_eq!(RefusedCommand::DbTruncate.as_str(), "db truncate");
+        assert_eq!(RefusedCommand::DbSeedReset.as_str(), "db seed --reset");
+        assert_eq!(RefusedCommand::DoctorConfig.as_str(), "doctor --config");
     }
 
     /// Arguments that can never form a refused command or set the
-    /// environment: no `db`, no option starting with `-e` or `--environment`.
+    /// environment: no `db`, no `doctor`, no option starting with `-e` or
+    /// `--environment`.
     fn harmless_arg() -> impl Strategy<Value = String> {
-        "[a-z0-9_.:/-]{0,12}".prop_filter("no db and no -e", |arg| {
-            arg != "db" && !arg.starts_with("-e") && !arg.starts_with("--env") && arg != "--"
+        "[a-z0-9_.:/-]{0,12}".prop_filter("no db, no doctor and no -e", |arg| {
+            arg != "db"
+                && arg != "doctor"
+                && !arg.starts_with("-e")
+                && !arg.starts_with("--env")
+                && arg != "--"
         })
+    }
+
+    /// `doctor --config` in one of its spellings, each without `-p`.
+    fn doctor_config() -> impl Strategy<Value = Vec<&'static str>> {
+        prop_oneof![Just(vec!["doctor", "--config"]), Just(vec!["doctor", "-c"]),]
     }
 
     fn environment_option() -> impl Strategy<Value = Vec<String>> {
@@ -419,12 +610,37 @@ mod tests {
             ambient in "[a-z]{0,12}",
         ) {
             prop_assume!(ambient != PRODUCTION);
-            prop_assume!(!args.iter().any(|arg| arg.contains(PRODUCTION)));
+            // `doctor --production` selects production without naming it.
+            prop_assume!(!args.iter().any(|arg| arg.contains(PRODUCTION) || arg == "doctor"));
             prop_assert_eq!(check(&args, &ambient), Ok(()));
         }
 
         #[test]
-        fn commands_without_db_are_never_refused(
+        fn doctor_production_refuses_doctor_config_from_any_environment(
+            command in doctor_config(),
+            production in prop_oneof![Just("-p"), Just("--production")],
+            ambient in "[a-z]{0,12}",
+            extra in proptest::collection::vec(harmless_arg(), 0..3),
+        ) {
+            let mut args: Vec<String> = command.iter().map(|part| (*part).to_owned()).collect();
+            args.push(production.to_owned());
+            // Harmless arguments after `doctor` change nothing for the
+            // pre-check (clap would refuse most of them).
+            args.extend(extra);
+            let refusal = check(&args, &ambient);
+            prop_assert!(refusal.is_err(), "{args:?}");
+            let refusal = refusal.unwrap_err();
+            prop_assert_eq!(refusal.command, RefusedCommand::DoctorConfig);
+            let expected = if ambient == PRODUCTION {
+                EnvironmentSource::Ambient
+            } else {
+                EnvironmentSource::DoctorProduction
+            };
+            prop_assert_eq!(refusal.source, expected);
+        }
+
+        #[test]
+        fn commands_without_db_or_doctor_are_never_refused(
             args in proptest::collection::vec(harmless_arg(), 0..8),
         ) {
             prop_assert_eq!(check(&args, PRODUCTION), Ok(()));
@@ -436,6 +652,7 @@ mod tests {
                 Just(vec!["db", "reset"]),
                 Just(vec!["db", "truncate"]),
                 Just(vec!["db", "seed", "--reset"]),
+                doctor_config(),
             ],
             option in environment_option(),
             position in 0usize..4,

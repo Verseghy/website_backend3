@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crate::support::{CLI_JWT_SECRET, ConnectionProbe, cli_totp_key, run_cli};
+use crate::support::{ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const NON_LOCAL: &str = "127.0.0.2";
@@ -59,8 +59,8 @@ fn the_probe_address_is_reachable_when_no_guard_applies() {
         probe.port()
     );
     // config/production.yaml requires both keys. Production refuses a
-    // committed TOTP key, so that one is made when the test runs
-    // (ADR 0034 §3).
+    // committed key, so both are made when the test runs (ADR 0034 §3).
+    let jwt_secret = cli_jwt_secret();
     let totp_key = cli_totp_key();
 
     let run = run_cli(
@@ -68,7 +68,7 @@ fn the_probe_address_is_reachable_when_no_guard_applies() {
             ("LOCO_ENV", "production"),
             ("DATABASE_URL", &url),
             ("HOST", "http://localhost"),
-            ("JWT_SECRET", CLI_JWT_SECRET),
+            ("JWT_SECRET", &jwt_secret),
             ("TOTP_ENCRYPTION_KEY", &totp_key),
             ("DB_CONNECT_TIMEOUT", "300"),
         ],

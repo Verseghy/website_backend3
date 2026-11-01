@@ -4,8 +4,9 @@
 //! runs it too (the `loco` cargo alias is `run --`, and this is the package's
 //! `default-run`). Before Loco parses anything, the CLI pre-check of
 //! ADR 0024 §4 (layer 3) refuses `db reset`, `db truncate` and
-//! `db seed --reset` in production, so those commands stop before any
-//! configuration is loaded or any connection is made.
+//! `db seed --reset` in production, and `doctor --config`, which would print
+//! every secret of the configuration (ADR 0039), so those commands stop
+//! before any configuration is loaded or any connection is made.
 
 use std::process::ExitCode;
 
