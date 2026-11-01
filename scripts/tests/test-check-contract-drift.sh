@@ -3,8 +3,10 @@
 #
 # Uses a throwaway git repository with committed bindings and snapshots, then
 # changes them the ways a stale PR would: an edited binding, a new untracked
-# binding, an edited snapshot, an untracked pending snapshot. Changes outside
-# the contract paths must pass. Run from the repository root:
+# binding, an edited snapshot, an untracked pending snapshot, an edited or
+# deleted rich-text manifest file. Changes outside the contract paths, the
+# admin's own rich-text code included, must pass. Run from the repository
+# root:
 #   bash scripts/tests/test-check-contract-drift.sh
 # No network access is needed.
 set -euo pipefail
@@ -56,10 +58,13 @@ git_fixture() {
 # reset_fixture: recreate the repository with a clean committed contract.
 reset_fixture() {
   rm -rf "$REPO"
-  mkdir -p "$REPO/admin/src/bindings" "$REPO/tests/requests/snapshots" "$REPO/src/domain/snapshots" "$REPO/src"
+  mkdir -p "$REPO/admin/src/bindings" "$REPO/admin/src/rich-text" "$REPO/tests/requests/snapshots" "$REPO/src/domain/snapshots" "$REPO/src"
   printf 'export type Label = { id: number };\n' >"$REPO/admin/src/bindings/Label.ts"
   printf -- '---\nsource: tests/requests/openapi.rs\n---\n{"openapi":"3.1.0"}\n' >"$REPO/tests/requests/snapshots/openapi__document.snap"
   printf -- '---\nsource: src/domain/slug.rs\n---\nalma\n' >"$REPO/src/domain/snapshots/slug__basic.snap"
+  printf '{"policy_version": "content-v1"}\n' >"$REPO/admin/src/rich-text/policy.json"
+  printf '{"element":"p","input":"","output":null}\n' >"$REPO/admin/src/rich-text/css-vectors.jsonl"
+  printf 'export {};\n' >"$REPO/admin/src/rich-text/paste-filter.ts"
   printf 'pub fn f() {}\n' >"$REPO/src/lib.rs"
   git_fixture init -q
   git_fixture add -A
@@ -98,6 +103,20 @@ run_case "an edited OpenAPI snapshot fails" 1 --contains "openapi__document.snap
 reset_fixture
 printf 'pending\n' >"$REPO/src/domain/snapshots/slug__basic.snap.new"
 run_case "an untracked pending snapshot fails" 1 --contains "slug__basic.snap.new" -- bash "$SCRIPT" --repo "$REPO"
+
+reset_fixture
+printf '{"policy_version": "content-v2"}\n' >"$REPO/admin/src/rich-text/policy.json"
+run_case "an edited policy.json fails" 1 --contains "admin/src/rich-text/policy.json" -- bash "$SCRIPT" --repo "$REPO"
+run_case "the failure names the manifest task" 1 --contains "cargo loco task rich_text_manifest" -- bash "$SCRIPT" --repo "$REPO"
+
+reset_fixture
+rm "$REPO/admin/src/rich-text/css-vectors.jsonl"
+run_case "a deleted css-vectors.jsonl fails" 1 --contains "admin/src/rich-text/css-vectors.jsonl" -- bash "$SCRIPT" --repo "$REPO"
+
+reset_fixture
+printf 'export const x = 1;\n' >"$REPO/admin/src/rich-text/paste-filter.ts"
+printf 'export {};\n' >"$REPO/admin/src/rich-text/serialize.ts"
+run_case "the admin's own rich-text code is not generated" 0 -- bash "$SCRIPT" --repo "$REPO"
 
 reset_fixture
 run_case "it works from a subdirectory of the repository" 0 -- bash "$SCRIPT" --repo "$REPO/src"

@@ -6,3 +6,4 @@ mod import_feature;
 mod import_mysql;
 #[cfg(feature = "import-mysql")]
 mod import_mysql_source;
+pub mod rich_text_manifest;

@@ -29,7 +29,8 @@ fn fixtures_dir() -> PathBuf {
 }
 
 /// Every fixture as `name -> (input, expected output)`. A missing half of a
-/// pair is an error, so a fixture cannot silently stop being checked.
+/// pair is an error, so a fixture cannot silently stop being checked. The P0
+/// oracle (`oracle.rs`) reads them too.
 pub(super) fn fixtures() -> BTreeMap<String, (String, String)> {
     let dir = fixtures_dir();
     let mut inputs = BTreeMap::new();

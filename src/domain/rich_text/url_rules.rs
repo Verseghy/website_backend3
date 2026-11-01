@@ -22,8 +22,8 @@ use percent_encoding::percent_decode_str;
 use url::{ParseError, Url};
 
 use super::policy::{
-    EmbedQuery, FORBIDDEN_STORAGE_LINK_EXTENSIONS, IMAGE_EXTENSIONS, STORAGE_PATH_PREFIX,
-    SanitizePolicy, URL_SCHEMES,
+    EMBED_ID_ALPHABET, EMBED_SCHEME, EmbedQuery, FORBIDDEN_STORAGE_LINK_EXTENSIONS,
+    IMAGE_EXTENSIONS, STORAGE_PATH_PREFIX, SanitizePolicy, URL_SCHEMES,
 };
 
 /// The base that relative URLs are resolved against. `.invalid` is reserved
@@ -170,7 +170,7 @@ pub fn decoded_segments_are_plain(path: &str) -> bool {
 #[must_use]
 pub fn embed_src(policy: &SanitizePolicy, value: &str) -> Option<String> {
     let url = Url::parse(value).ok()?;
-    let plain = url.scheme() == "https"
+    let plain = url.scheme() == EMBED_SCHEME
         && url.username().is_empty()
         && url.password().is_none()
         && url.port().is_none()
@@ -288,7 +288,7 @@ fn is_embed_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            .all(|b| EMBED_ID_ALPHABET.as_bytes().contains(&b))
 }
 
 /// `start=<digits>`, `list=<id>`, or both in that order.

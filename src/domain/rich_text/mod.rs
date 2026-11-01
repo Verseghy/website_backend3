@@ -25,8 +25,9 @@
 //! the cases of `css-vectors.jsonl` ([`css`]), the ammonia builder, the
 //! structural pass with its tree-level style rules, the depth scan, the
 //! removal report, the checks of an admin write ([`validate`], editor.md
-//! §7.6) and the plain-text copy that search matches against
-//! ([`search_text`], ADR 0020 §2).
+//! §7.6), the plain-text copy that search matches against
+//! ([`search_text`], ADR 0020 §2) and the policy manifest that the admin
+//! imports ([`manifest`], editor.md §3.9).
 //!
 //! Like everything under `src/domain/`, the module is pure (ADR 0008): the
 //! policy comes in as an argument, built once at boot from the settings.
@@ -47,6 +48,7 @@
 pub mod attrs;
 pub mod css;
 pub mod depth;
+pub mod manifest;
 pub mod policy;
 pub mod report;
 pub mod sanitize;

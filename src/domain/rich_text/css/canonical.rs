@@ -103,7 +103,9 @@ impl Side {
     /// `border-width`, `border-style` and `border-color` each change one
     /// part of every side and leave the other two as the page has them, so
     /// `border-style: solid` alone draws no border (see the module
-    /// documentation).
+    /// documentation). The policy manifest exports it as
+    /// `css.border.unset`, and [`Self::INITIAL`] as `css.border.initial`
+    /// (editor.md §3.9).
     pub const UNSET: Self = Self {
         width: Hundredths::ZERO,
         style: "none",
@@ -283,16 +285,19 @@ pub fn four<T: Copy>(values: &[T]) -> Option<[T; 4]> {
     }
 }
 
-/// Whether `css` uses only the characters a stored style may contain:
-/// `a-z`, `0-9`, space and `# . % : ; / -` (editor.md §3.1 rule 6). `/`
-/// exists only for `aspect-ratio: 16 / 9`. A CSS comment needs `*` and
-/// `url(` needs `(`, so neither can pass.
+/// Every character a stored style may contain: `a-z`, `0-9`, space and
+/// `# . % : ; / -` (editor.md §3.1 rule 6). `/` exists only for
+/// `aspect-ratio: 16 / 9`. A CSS comment needs `*` and `url(` needs `(`, so
+/// neither can pass. [`in_alphabet`] checks against it, and the policy
+/// manifest exports it as written here (editor.md §3.9).
+pub const STYLE_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz0123456789 #.%:;/-";
+
+/// Whether `css` uses only the characters of [`STYLE_ALPHABET`].
 ///
 /// - `css`: a written style string.
 #[must_use]
 pub fn in_alphabet(css: &str) -> bool {
-    css.bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b" #.%:;/-".contains(&b))
+    css.bytes().all(|b| STYLE_ALPHABET.as_bytes().contains(&b))
 }
 
 /// The declarations of `css` as `(name, value)` pairs.

@@ -2,6 +2,8 @@
 //!
 //! - **P1**: `S(S(x)) == S(x)` byte for byte, and sanitising an output
 //!   reports nothing.
+//! - **P0**, over the same inputs: every output passes the independent
+//!   oracle of `oracle.rs`, which re-checks it against `policy.json`.
 //! - **P5**: independent `Sanitizer` instances, each with its own hash
 //!   seeds, produce the same bytes and the same report.
 //!
@@ -66,6 +68,12 @@ const URLS: &[&str] = &[
     "https://user@www.youtube.com/embed/x", "https://www.youtube.com:8443/embed/x",
     "https://www.youtube.com/embed/x/extra", "https://www.youtube.com.evil.example/embed/x",
     "https://www.youtube-nocookie.com/embed/VIDEOID?start=30", "https://padlet.com/embed/KEY",
+    // Queries the embed rule refuses: an unknown parameter, the wrong order,
+    // an empty value (editor.md §3.6).
+    "https://www.youtube.com/embed/x?si=x", "https://www.youtube.com/embed/x?list=a&start=1",
+    "https://www.youtube.com/embed/x?start=",
+    // Links into /storage/ that name a directory, which the link rule keeps.
+    "/storage/x.svg/", "/storage/x.svg%2F",
     "/storage/uploads/../../x.jpg", "/storage/uploads/a.jpg", "/storage/uploads/a%2F..%2Fb.jpg",
     "/storage/uploads/%FF.png", "https://verseghy-gimnazium.net/storage/uploads/a.png",
     "https://backend.verseghy-gimnazium.net/storage/x.svg", "/storage/x.html", "mailto:a@example.org",
@@ -212,6 +220,16 @@ proptest! {
     #[test]
     fn sanitising_twice_equals_sanitising_once(input in arb_html()) {
         assert_idempotent(&sanitizer(), &input)?;
+    }
+
+    // P0 over generated input: the independent oracle (`oracle.rs`) finds
+    // every output inside content-v1 as `policy.json` describes it. An input
+    // the sanitiser refuses has no output to check.
+    #[test]
+    fn every_output_passes_the_oracle(input in arb_html()) {
+        if let Ok(output) = sanitizer().sanitize(&input) {
+            super::oracle::assert_content_v1(output.html.as_str()).map_err(TestCaseError::fail)?;
+        }
     }
 
     // P5: instances built one after another get different hash seeds, so

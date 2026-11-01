@@ -248,7 +248,8 @@ jobs:
           shared-key: debug
           save-if: "false"
       - name: Start PostgreSQL (compose.yaml)
-        # The served-document request test boots the app, which needs a database.
+        # The served-document request test boots the app, which needs a
+        # database, and so does the rich-text manifest task's lock.
         run: docker compose up --detach --wait --wait-timeout 120 postgres
       - name: Regenerate the bindings and the OpenAPI snapshot
         # ADR 0005 section 4. ts-rs names its export tests `export_bindings_<type>`
@@ -259,8 +260,20 @@ jobs:
         # it has written in an in-process mutex and merges types that share a
         # file; nextest runs every test in its own process, which defeats that.
         run: cargo test --locked --workspace --all-targets -- export_bindings_ openapi
+      - name: Regenerate the rich-text manifest
+        # docs/design/editor.md §3.9 and §13.6, "Manifest": the task writes
+        # admin/src/rich-text/policy.json and css-vectors.jsonl from the Rust
+        # policy (development configuration, compose's backend3_development
+        # database for its lock); the drift check below fails when either
+        # differs from the committed copy. `cargo run` is the `cargo loco`
+        # alias, with --locked.
+        run: cargo run --locked -- task rich_text_manifest
       - name: Fail on contract drift
         run: bash scripts/ci/check-contract-drift.sh
+      - name: The rich-text tag list holds no forbidden tag
+        # editor.md §3.5: jq reads the committed policy.json with its own
+        # copy of the thirteen forbidden tags.
+        run: bash scripts/ci/check-rich-text-manifest.sh
 
   toolchain:
     name: Toolchain

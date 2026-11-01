@@ -285,7 +285,11 @@ rm -rf target/licenses && bash scripts/crate-notices.sh --out target/licenses  #
 
 A change to `admin/` or to the user flows also runs `npm run e2e` as described
 above. A change to a DTO regenerates `admin/src/bindings/` and the OpenAPI
-snapshot, and commits them (ADR 0005). A migration updates the schema
+snapshot, and commits them (ADR 0005). A change to the rich-text policy
+(`src/domain/rich_text/`) regenerates the admin's copy of it with
+`cargo loco task rich_text_manifest` and commits `admin/src/rich-text/policy.json`
+and `css-vectors.jsonl` (editor.md §3.9); the `Contract` job fails on either
+otherwise. A migration updates the schema
 snapshot, `tests/schema/snapshots/schema.snap`, in the same PR (ADR 0009):
 the test writes a `.snap.new` beside it; read the diff, accept it with
 `cargo insta review` (or rename the file), and commit it with the migration.

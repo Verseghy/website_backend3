@@ -11,8 +11,9 @@
 //! of the same values that Word, Excel and browsers emit.
 //!
 //! Like the tables of [`super::super::policy`], this is policy data: a
-//! change to it is a policy change (editor.md §3), and the manifest of
-//! editor.md §3.9 will export it as written here.
+//! change to it is a policy change (editor.md §3), and the policy manifest
+//! of editor.md §3.9 ([`super::super::manifest`]) exports it as written
+//! here.
 
 use std::fmt;
 
