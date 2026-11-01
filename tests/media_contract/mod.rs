@@ -16,7 +16,11 @@
 //!   configuration over a seeded tree and runs the suite against it.
 //! - `examples/media_contract.rs`: `seed` and `check` from the command line,
 //!   for a pod behind `oc port-forward` (the co-mount test, ADR 0015 §3).
-//! - The fallback router's request tests, once that router exists.
+//! - `tests/requests/storage.rs`: backend3's fallback router, in the
+//!   application router that `App`'s hooks build with
+//!   `settings.media.serve_storage` on, over a real TCP listener. It runs in
+//!   the Test job's ordinary `cargo nextest` steps, since it needs nothing
+//!   but the local PostgreSQL every request test uses.
 //!
 //! The file checks are sent once per host, with the `Host` of each of the
 //! three hosts that route `/storage` (ADR 0015 §2), because ADR 0013 §7
@@ -48,6 +52,13 @@
 //!   merges a 304's headers into the cached PDF (`Probe::revalidate`).
 //! - Each contract header is sent exactly once, and every other
 //!   single-valued header at most once ([`checks::common`]).
+//!
+//! Not probed: a request whose `/storage/` prefix is itself percent-encoded
+//! (`/storage%2Fuploads/...`). nginx decodes the path before it matches its
+//! location and serves the file; the fallback's routing reads the raw path
+//! and gives the application's plain `404`. No URL shape of ADR 0015 has
+//! that form, so the two may differ there (`src/controllers/storage.rs`,
+//! module docs; `tests/requests/storage.rs` pins the fallback's answer).
 
 mod checks;
 mod fixtures;
@@ -61,14 +72,13 @@ use std::fmt;
 
 use axum::http::{Method, StatusCode};
 
-pub use fixtures::seed;
-pub use http::{HyperTransport, Origin, Transport};
+pub use fixtures::{LAST_MODIFIED, seed};
+pub use http::{HyperTransport, Origin, Request, Response, Transport};
 
 use fixtures::{
-    AFTER, BEFORE, DIAKTOLL, DIRECTORIES, DOWNLOAD, ENTITY_IMAGE, FILES, Fixture, HIDDEN,
-    LAST_MODIFIED, MISSING, THROUGH_LINKS,
+    AFTER, BEFORE, DIAKTOLL, DIRECTORIES, DOWNLOAD, ENTITY_IMAGE, FILES, Fixture, HIDDEN, MISSING,
+    THROUGH_LINKS,
 };
-use http::{Request, Response};
 use rules::{lists, storage_target};
 
 /// The hosts whose `/storage` Routes reach the media server (ADR 0015 §2).
@@ -154,6 +164,7 @@ pub async fn run<T: Transport>(transport: &T, origin: &Origin, server: Server) -
     probe.traversal().await;
     probe.links().await;
     probe.ranges().await;
+    probe.if_range().await;
     probe.conditional().await;
     probe.preflight().await;
     probe.methods().await;
@@ -397,19 +408,75 @@ impl<T: Transport> Probe<'_, T> {
 
     /// One satisfiable range: 206 with exactly `expected` from `start`.
     async fn partial(&mut self, fixture: &Fixture, range: &str, expected: &[u8], start: usize) {
-        let request = Self::ranged(fixture, range);
-        let Some(response) = self.send(&request).await else {
+        self.partial_answer(&Self::ranged(fixture, range), fixture, expected, start)
+            .await;
+    }
+
+    /// `request`, a satisfiable range of `fixture`: 206 with exactly
+    /// `expected` from `start`, and the file's headers.
+    async fn partial_answer(
+        &mut self,
+        request: &Request,
+        fixture: &Fixture,
+        expected: &[u8],
+        start: usize,
+    ) {
+        let Some(response) = self.send(request).await else {
             return;
         };
-        if !self.status(&request, &response, StatusCode::PARTIAL_CONTENT) {
+        if !self.status(request, &response, StatusCode::PARTIAL_CONTENT) {
             return;
         }
-        self.body(&request, &response, expected);
+        self.body(request, &response, expected);
         let end = start + expected.len() - 1;
         let content_range = format!("bytes {start}-{end}/{}", fixture.size);
-        self.header(&request, &response, "content-range", &content_range);
-        self.common(&request, &response);
-        self.record(&request, checks::file(&response, fixture, self.server));
+        self.header(request, &response, "content-range", &content_range);
+        self.common(request, &response);
+        self.record(request, checks::file(&response, fixture, self.server));
+    }
+
+    /// `If-Range` (RFC 9110 §13.1.5): a range is served only while the
+    /// validator still names the file. Any other validator gets the whole
+    /// file with 200, so a client that resumes an old copy never splices in
+    /// bytes of a file replaced under the same name (`uploads/` names can
+    /// be, ADR 0015 §1, Caching). Neither answer is a reading of the suite:
+    /// the condition decides whether the request is a single range
+    /// (ADR 0015 §1, Ranges: `206`) or a plain GET (`200`), and RFC 9110
+    /// requires a failed condition to be served as the latter.
+    async fn if_range(&mut self) {
+        let fixture = &DIAKTOLL;
+        let pdf = fixture.body();
+        let range = "bytes=0-99";
+        // The file's exact Last-Modified: unchanged, so the range is served.
+        let current = Self::ranged(fixture, range).header("if-range", LAST_MODIFIED);
+        self.partial_answer(&current, fixture, &pdf[..100], 0).await;
+        // A date before the file's and one after it (the match is exact,
+        // not "not modified since"), and an entity tag no server sent.
+        for validator in [BEFORE, AFTER, "\"0-elavult\""] {
+            let request = Self::ranged(fixture, range).header("if-range", validator);
+            let Some(response) = self.send(&request).await else {
+                continue;
+            };
+            if self.status(&request, &response, StatusCode::OK) {
+                self.body(&request, &response, &pdf);
+                self.whole_file(&request, &response, fixture);
+            }
+        }
+        if self.server == Server::Nginx {
+            // nginx's own ETag names the file as well.
+            let plain = Request::new(Method::GET, storage_target(fixture.path));
+            let Some(tag) = self
+                .send(&plain)
+                .await
+                .and_then(|response| response.single("etag").map(str::to_owned))
+            else {
+                self.failures
+                    .push(format!("{plain}: nginx sent no single ETag"));
+                return;
+            };
+            let request = Self::ranged(fixture, range).header("if-range", &tag);
+            self.partial_answer(&request, fixture, &pdf[..100], 0).await;
+        }
     }
 
     /// A range past the end: 416 with `Content-Range: bytes */<size>`.
@@ -639,6 +706,14 @@ mod tests {
             text.contains(
                 "GET /storage/uploads/diaktoll/ujsag_final_2021osz.pdf \
                  [origin: https://verseghy-gimnazium.net] [range: bytes=0-9,20-29]: \
+                 body must be the 4096 expected bytes"
+            ),
+            "{text}"
+        );
+        // A stale If-Range must get the whole file; the empty 200 fails.
+        assert!(
+            text.contains(
+                "[range: bytes=0-99] [if-range: Mon, 31 Aug 2026 08:00:00 GMT]: \
                  body must be the 4096 expected bytes"
             ),
             "{text}"

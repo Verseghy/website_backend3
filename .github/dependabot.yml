@@ -164,6 +164,14 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: percent-encoding
         update-types: ["version-update:semver-major"]
+      # The fallback /storage router (src/controllers/storage.rs) types a 304,
+      # which carries no type, with mime_guess, the table tower-http's
+      # ServeDir types the 200 with, so a PDF's 304 goes without the sandbox
+      # like its 200 (ADR 0013 section 7; Cargo.toml). A new major alone
+      # would be a second copy that may type a file differently from
+      # ServeDir's; it comes with the Loco bump that moves tower-http.
+      - dependency-name: mime_guess
+        update-types: ["version-update:semver-major"]
       # ts-rs is pinned at major 12, as in Loco's template (ADR 0005
       # section 2). A new major can rewrite the committed admin/src/bindings/
       # (the `Contract` job), so it is a contract decision, not a routine bump.

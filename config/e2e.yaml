@@ -126,12 +126,17 @@ settings:
   # `min_free_bytes`: uploads are refused below 2 GiB of free space.
   # `public_base_url`: the base of the public API's absolute media URLs,
   # with no trailing slash (public-api.md §2.3), here the E2E server's.
-  # `serve_storage`: the fallback of ADR 0015 §4, off. Checked at boot;
-  # whether the directories exist is checked by each upload.
+  # `serve_storage`: on. The E2E server stands in for the backend3 host,
+  # whose /storage Route reaches the media server in production; with no
+  # media server here, backend3 serves /storage from `root` itself with the
+  # fallback router of ADR 0015 §4 (src/controllers/storage.rs), so the
+  # admin shows uploaded images and admin/e2e/storage.spec.ts opens files
+  # under /storage the way a browser does. Checked at boot; whether the
+  # directories exist is checked by each upload and each /storage request.
   media:
     root: target/media/e2e/public
     tmp_dir: target/media/e2e/tmp
     trash_dir: target/media/e2e/trash
     min_free_bytes: 2147483648
     public_base_url: "http://localhost:5150/storage"
-    serve_storage: false
+    serve_storage: true

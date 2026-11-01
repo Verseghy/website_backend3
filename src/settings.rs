@@ -131,10 +131,12 @@ pub struct MediaSettings {
     pub public_base_url: BaseUrl,
     /// Whether backend3 serves `/storage` itself: the fallback of ADR 0015
     /// §4, for when the media server cannot share the volume. `false` in
-    /// every committed configuration, since the separate media server is
+    /// production, development and test, since the separate media server is
     /// the variant in use (research: DECISIONS R9, D43); production reads
     /// `MEDIA_SERVE_STORAGE`, so the fallback can be switched on without a
-    /// new image. The fallback router reads it.
+    /// new image. `true` only in `config/e2e.yaml`, whose server stands in
+    /// for the backend3 host with no media server beside it.
+    /// `controllers::storage::mount` reads it.
     pub serve_storage: bool,
 }
 

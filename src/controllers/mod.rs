@@ -10,6 +10,8 @@
 //! - [`not_found`]: the fallback for unknown paths, with the JSON `404` of
 //!   `/api/admin`, `/api/v1` and backend1's retired REST routes.
 //! - [`site`]: `/` and `/robots.txt` (ADR 0014).
+//! - [`storage`]: `/storage/**` served by backend3 itself, the fallback of
+//!   ADR 0015 §4, mounted only when `settings.media.serve_storage` is on.
 //! - [`v1`]: the public read API under `/api/v1`: the one builder of its
 //!   routes, with CORS (ADR 0014), and so far its OpenAPI document
 //!   (ADR 0005 §4).
@@ -22,4 +24,5 @@ pub mod admin_ui;
 pub mod metrics;
 pub mod not_found;
 pub mod site;
+pub mod storage;
 pub mod v1;

@@ -13,17 +13,30 @@ import { defineConfig, devices } from "@playwright/test"
  * (`/admin/about`): a relative `about` would resolve against a base without a
  * trailing slash to `/about`, outside the admin.
  *
- * Two projects, both Chromium. Every test signs in with the one seed account
- * (ADR 0040), in parallel, and a sign-out ends every session of that account
- * (ADR 0006 §2). A sign-out among the other tests would therefore end their
- * sessions mid-test. So the files that sign out (`SIGN_OUT_SPECS`) run in the
- * `sign-out` project, which Playwright starts only after every test of the
- * `chromium` project has passed, and each of them runs its tests one after
- * another (`mode: "serial"`).
+ * The admin runs in Chromium, in two projects. Every admin test signs in with
+ * the one seed account (ADR 0040), in parallel, and a sign-out ends every
+ * session of that account (ADR 0006 §2). A sign-out among the other tests
+ * would therefore end their sessions mid-test. So the files that sign out
+ * (`SIGN_OUT_SPECS`) run in the `sign-out` project, which Playwright starts
+ * only after every test of the `chromium` project has passed, and each of them
+ * runs its tests one after another (`mode: "serial"`).
+ *
+ * `e2e/storage.spec.ts`, the files under `/storage` (editor.md §13 P9), runs
+ * in all three engines instead, in its own three projects, each with its PDF
+ * viewer on, as in the browsers people use: Playwright's default Chromium is
+ * the headless shell, which has no PDF viewer, so the full Chromium build runs
+ * it (`channel: "chromium"`, new headless mode); and Playwright's Firefox
+ * turns pdf.js off by default (`pdfjs.disabled`), so the project turns it back
+ * on. Playwright's WebKit for Linux has no PDF viewer at all. CI installs all
+ * three (`npx playwright install --with-deps`). It signs in to nothing, so a
+ * sign-out cannot touch it, and it runs beside the admin projects.
  */
 
 /** The spec files whose tests end the seed account's sessions. */
 const SIGN_OUT_SPECS = /[/\\]sign-out\.spec\.ts$/
+
+/** The spec that runs in all three engines, and only in them. */
+const STORAGE_SPEC = /storage\.spec\.ts$/
 
 export default defineConfig({
   testDir: "./e2e",
@@ -42,14 +55,32 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
-      testIgnore: SIGN_OUT_SPECS,
+      testIgnore: [SIGN_OUT_SPECS, STORAGE_SPEC],
     },
     {
       name: "sign-out",
       use: { ...devices["Desktop Chrome"] },
       testMatch: SIGN_OUT_SPECS,
-      // After every other test: see the documentation above.
+      // After every other admin test: see the documentation above.
       dependencies: ["chromium"],
+    },
+    {
+      name: "storage-chromium",
+      testMatch: STORAGE_SPEC,
+      use: { ...devices["Desktop Chrome"], channel: "chromium" },
+    },
+    {
+      name: "storage-firefox",
+      testMatch: STORAGE_SPEC,
+      use: {
+        ...devices["Desktop Firefox"],
+        launchOptions: { firefoxUserPrefs: { "pdfjs.disabled": false } },
+      },
+    },
+    {
+      name: "storage-webkit",
+      testMatch: STORAGE_SPEC,
+      use: { ...devices["Desktop Safari"] },
     },
   ],
 })

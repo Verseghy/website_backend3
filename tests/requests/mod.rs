@@ -18,4 +18,5 @@ mod retired_routes;
 mod security_headers;
 mod site;
 mod starter_auth;
+mod storage;
 mod trailing_slash;
