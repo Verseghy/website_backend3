@@ -451,6 +451,10 @@ mod tests {
     const LINK: &str = r#"<p><a href="https://example.org/" target="_blank" rel="noopener noreferrer">link</a></p>"#;
     const YOUTUBE_STYLED: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/VIDEOID?start=30" width="640" height="360" title="Videó" style="aspect-ratio: 16 / 9; height: auto; max-width: 640px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
     const PADLET_STYLED: &str = r#"<p data-padlet-embed=""><iframe src="https://padlet.com/embed/KEY" width="100%" height="608" title="Padlet" style="height: 608px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
+    /// The `style` the structural pass gives an `img` that has none: the
+    /// locked declarations, as the grammar writes them for an empty style.
+    const IMAGE_STYLE: &str =
+        r#" style="display: block; height: auto; margin: 0 auto; max-width: 100%""#;
 
     // editor.md §13.6, "Pinned ammonia behaviour". An ammonia upgrade that
     // changes any of these fails here.
@@ -588,12 +592,13 @@ mod tests {
     #[test]
     fn styles_keep_their_allowed_declarations_in_place() {
         // The filter rewrites the value where it stands, so no attribute
-        // moves (no `swap_remove`).
+        // moves (no `swap_remove`); the value itself is the canonical
+        // string, sorted by property.
         assert_eq!(
             clean(
                 r#"<img src="/storage/uploads/a.jpg" alt="a" width="350" style="WIDTH: 262.5pt; float: left; height: 495px">"#
             ),
-            r#"<img src="/storage/uploads/a.jpg" alt="a" width="350" style="width: 350px; display: block; height: auto; margin: 0 auto; max-width: 100%">"#
+            r#"<img src="/storage/uploads/a.jpg" alt="a" width="350" style="display: block; height: auto; margin: 0 auto; max-width: 100%; width: 350px">"#
         );
         assert_eq!(
             clean(r#"<p style="text-align:CENTER; margin-bottom: 0" class="MsoNormal">x</p>"#),
@@ -618,7 +623,7 @@ mod tests {
                 r#"<table style="width: 100%; border-collapse: separate"><tbody><tr><td style="width: 10px">x</td></tr></tbody></table>"#
             ),
             format!(
-                r#"<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><td style="width: 10px">x</td></tr></tbody></table>"#
+                r#"<table style="{TABLE_STYLE}"><tbody style="{TBODY_STYLE}"><tr><td style="box-sizing: content-box; width: 10px">x</td></tr></tbody></table>"#
             )
         );
         // A case variant matches the allow-list and is overwritten in place.
@@ -759,7 +764,7 @@ mod tests {
         );
         assert_eq!(
             clean(r#"<img src="/storage/uploads/a.jpg" srcset="/a.jpg 2x" alt="a" title="t">"#),
-            r#"<img src="/storage/uploads/a.jpg" alt="a">"#
+            format!(r#"<img src="/storage/uploads/a.jpg" alt="a"{IMAGE_STYLE}>"#)
         );
         let iframe =
             clean(r#"<iframe srcdoc="<script></script>" frameborder="0" onload="x"></iframe>"#);
@@ -777,7 +782,7 @@ mod tests {
             clean(
                 r#"<img src="https://verseghy-gimnazium.net/storage/uploads/a.jpg" alt="a" width="0350" height="5001">"#
             ),
-            r#"<img src="/storage/uploads/a.jpg" alt="a" width="350">"#
+            format!(r#"<img src="/storage/uploads/a.jpg" alt="a" width="350"{IMAGE_STYLE}>"#)
         );
         assert_eq!(
             clean(r#"<ol start="1" type="1"><li>x</li></ol>"#),
@@ -1152,22 +1157,29 @@ mod tests {
     /// An `img` without a `style` is not content-v1: its four locked
     /// declarations are always present (editor.md §3.3). ammonia calls the
     /// attribute filter only for attributes that exist, so the grammar never
-    /// sees this image, and the structural pass (`structure.rs`) does not
-    /// have the editor.md §7.5 rule that adds them yet. This pins
-    /// the gap, so the slice that adds the rule changes the expected output
-    /// here instead of meeting it by surprise. The same image with an empty
-    /// `style` reaches the grammar, which adds the declarations: that is the
-    /// output the rule is to give the image without one, which is why the
-    /// rule decides nothing new (editor.md §7.5).
+    /// sees this image; the structural pass gives it the declarations
+    /// (editor.md §7.5). The rule decides nothing new: its output is exactly
+    /// what the grammar writes for the same image with an empty `style`, as
+    /// the second half checks. Nothing was removed, so nothing is reported,
+    /// and the output is a fixed point.
     #[test]
-    fn an_image_without_a_style_keeps_none_until_its_structural_rule() {
+    fn an_image_without_a_style_gets_its_locked_declarations() {
         let image = r#"<p><img src="/storage/uploads/posts/612/kep.jpg" alt="A díjazottak a színpadon" width="350" height="495"></p>"#;
-        assert_eq!(clean(image), image);
-        let locked =
-            r#" style="display: block; height: auto; margin: 0 auto; max-width: 100%"></p>"#;
+        let styled = image.replace("></p>", &format!("{IMAGE_STYLE}></p>"));
+        let result = sanitizer().sanitize(image).expect("a small input");
+        assert_eq!(result.html.as_str(), styled);
+        assert!(result.report.is_empty(), "{:?}", result.report);
+        assert_eq!(clean(&image.replace("></p>", r#" style=""></p>"#)), styled);
+        assert_eq!(passes(&styled), (styled.clone(), 1));
+        // The rule is given only to an image without any `style`: one that
+        // has a `style` went through the grammar, which kept its width.
+        let sized = image.replace("></p>", r#" style="width: 350px"></p>"#);
         assert_eq!(
-            clean(&image.replace("></p>", r#" style=""></p>"#)),
-            image.replace("></p>", locked)
+            clean(&sized),
+            image.replace(
+                "></p>",
+                r#" style="display: block; height: auto; margin: 0 auto; max-width: 100%; width: 350px"></p>"#
+            )
         );
     }
 

@@ -3,11 +3,12 @@
 //! The unit tests and proptests of each part live next to the code in
 //! `src/domain/rich_text/`. These tests treat the sanitiser as a black box,
 //! as every write path will: the properties P1 (idempotence) and P5
-//! (determinism across instances) over generated HTML, and the runner of
-//! the permanent regression fixtures under `tests/fixtures/regressions/`,
-//! which reads files and therefore cannot live in the pure `src/domain/`
-//! (ADR 0008).
+//! (determinism across instances) over generated HTML, the runner of the
+//! permanent regression fixtures under `tests/fixtures/regressions/`, and
+//! the snapshot of `css-vectors.jsonl`. The last two read files and
+//! therefore cannot live in the pure `src/domain/` (ADR 0008).
 
+mod css_vectors;
 mod properties;
 mod regressions;
 

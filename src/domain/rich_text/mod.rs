@@ -21,11 +21,10 @@
 //!   parse, and each pass's output size after it.
 //!
 //! This module holds the policy tables, the URL rules, the attribute filter,
-//! the per-element CSS grammar ([`css`]), the ammonia builder, the
-//! structural pass, the depth scan and the removal report. The rest of the
-//! canonical style writer of §3.1 and the tree-level style rules of §7.5
-//! follow in their own slice; until then a `style` keeps its declarations in
-//! source order.
+//! the per-element CSS grammar with the canonical style string of §3.1 and
+//! the cases of `css-vectors.jsonl` ([`css`]), the ammonia builder, the
+//! structural pass with its tree-level style rules, the depth scan and the
+//! removal report.
 //!
 //! Like everything under `src/domain/`, the module is pure (ADR 0008): the
 //! policy comes in as an argument, built once at boot from the settings.
