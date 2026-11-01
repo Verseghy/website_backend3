@@ -80,6 +80,11 @@ fn static_and_fallback_middlewares_are_disabled_and_headers_enabled() {
             compression.enable,
             "{environment}: compression (ADR 0004 §3)"
         );
+        // public-api.md §9: the 304 of a public answer. Loco turns the
+        // middleware on when the key is absent, but a key without
+        // `enable: true` turns it off, so the files write it out.
+        let etag = middlewares.etag.expect("etag configured");
+        assert!(etag.enable, "{environment}: etag (public-api.md §9)");
 
         let secure = middlewares
             .secure_headers

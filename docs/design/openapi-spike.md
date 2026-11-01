@@ -39,6 +39,7 @@ The spike's findings, for every slice that adds to the document. Recipe 3 of `.c
 4. **Bounds go into the schema explicitly.** The schema comes from the Rust type: `u32` became `integer`, format `int32`, `minimum: 0`, which neither states the documented range of `limit` (1 to 100, public-api.md §7.1) nor fits `int32` above 2^31 − 1. Parameters and fields with a documented range state it with `minimum` and `maximum`.
 5. **Doc comments are published.** The first paragraph of a handler's doc comment becomes the operation's `summary` and the rest its `description`; a field's doc comment becomes the property's `description`. They are written for API users, in English.
 6. **Paths are written in full**, `/api/v1/...`, in `#[utoipa::path(path = ...)]`. The document has no `servers` entry, so a path without the prefix would point at the host root; the coverage test reports it as an operation without a route.
+7. **Caching is not declared per operation.** The `Caching` modifier of `src/controllers/v1/openapi.rs` adds the `ETag` and `Cache-Control` headers, the `If-None-Match` parameter and the `NotModified` (`304`) response of public-api.md §9 to the components and refers to them from every `GET` operation, with both headers on its `200`. An operation declares only its own parameters and responses; one that declares one of those names itself, in any letter case (header names are case-insensitive), keeps its own.
 
 ## 4. Measurements
 

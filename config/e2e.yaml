@@ -24,6 +24,13 @@ server:
       enable: false
     compression:
       enable: true
+    # public-api.md §9: a request whose If-None-Match equals the ETag of a
+    # public answer gets 304 Not Modified without a body. Loco turns it on
+    # when the key is absent; it is written out, with `enable`, because a
+    # key without `enable: true` turns it off (the vendored Loco skill,
+    # recipes/middleware.md).
+    etag:
+      enable: true
     # ADR 0023 §6: the same headers as production, so the CSP-violation check
     # of the E2E run tests what production sends.
     secure_headers:

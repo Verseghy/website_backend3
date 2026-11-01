@@ -6,6 +6,7 @@ mod auth_login;
 mod metrics;
 mod not_found;
 mod openapi;
+mod public_caching;
 mod public_router;
 mod retired_routes;
 mod security_headers;
