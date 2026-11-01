@@ -190,6 +190,72 @@ async fn root_files_are_served_with_revalidation() {
     .await;
 }
 
+/// The licence notices of the bundled packages (ADR 0038) are a root file of
+/// `dist/`: the root-file row serves them, with their charset stated so the
+/// accented names and `©` signs are decoded as UTF-8.
+#[tokio::test]
+async fn the_licence_notices_are_served_as_utf8_text() {
+    with_server(|request, _ctx| async move {
+        let response = request.get("/admin/licenses.txt").await;
+        assert_eq!(response.status_code(), StatusCode::OK);
+        assert_eq!(response.as_bytes().as_ref(), fixture("licenses.txt"));
+        assert!(response.text().contains("Copyright © 2026"));
+        assert_eq!(
+            header(&response, "content-type").as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(
+            header(&response, "cache-control").as_deref(),
+            Some("no-cache")
+        );
+        // The admin's own security headers apply, nosniff included, so the
+        // browser keeps the stated type (ADR 0023 §6).
+        assert_eq!(
+            header(&response, "x-content-type-options").as_deref(),
+            Some("nosniff")
+        );
+        assert!(header(&response, "content-security-policy").is_some());
+
+        // HEAD answers with the same headers and no body.
+        let head = request.method(Method::HEAD, "/admin/licenses.txt").await;
+        assert_eq!(head.status_code(), StatusCode::OK);
+        assert!(head.as_bytes().is_empty());
+        for name in [
+            "content-type",
+            "cache-control",
+            "x-content-type-options",
+            "content-security-policy",
+        ] {
+            assert_eq!(header(&head, name), header(&response, name), "{name}");
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn text_files_of_the_build_state_the_utf8_charset() {
+    with_server(|request, _ctx| async move {
+        let asset = format!("/admin/{FIXTURE_ASSET}");
+        for (path, content_type) in [
+            ("/admin", "text/html; charset=utf-8"),
+            ("/admin/posts/12/show", "text/html; charset=utf-8"),
+            ("/admin/index.html", "text/html; charset=utf-8"),
+            (asset.as_str(), "text/javascript; charset=utf-8"),
+            // SVG states its encoding itself and is not text/*.
+            ("/admin/favicon.svg", "image/svg+xml"),
+        ] {
+            let response = request.get(path).await;
+            assert_eq!(response.status_code(), StatusCode::OK, "{path}");
+            assert_eq!(
+                header(&response, "content-type").as_deref(),
+                Some(content_type),
+                "{path}"
+            );
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn missing_root_files_are_a_404() {
     with_server(|request, _ctx| async move {

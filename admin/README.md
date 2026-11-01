@@ -20,7 +20,7 @@ licences (see `../THIRD_PARTY.md`).
 | `src/components/admin/`, `src/components/ui/` | vendored shadcn-admin-kit and shadcn/ui code, with `LICENSE` and `LOCAL_CHANGES.md` |
 | `e2e/` | Playwright tests against a running backend3 |
 | `eslint-rules/` | the `local/no-ui-literals` rule (ADR 0021 §7) |
-| `scripts/`, `license-policy.json` | the production-dependency licence check (ADR 0022 §4) |
+| `scripts/`, `license-policy.json` | the production-dependency licence check (ADR 0022 §4), and the Vite plugin that completes the licence notices of the bundled packages and copied code, `dist/licenses.txt` (ADR 0038) |
 
 Commands, rules and the gate are in `CLAUDE.md`. In short: `npm ci`, then
 `npm run dev` (Vite on port 5173, proxying `/api` and `/storage` to a local

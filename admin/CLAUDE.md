@@ -84,7 +84,9 @@ ADR 0005 (bindings) before changing anything here.
 - **Vendored code (ADR 0012 §4).** `src/components/admin/`,
   `src/components/ui/`, `src/lib/utils.ts`, `src/lib/field.type.ts`,
   `src/lib/i18nProvider.ts` and `src/hooks/use-mobile.ts` are copied from
-  shadcn-admin-kit and shadcn/ui under MIT. Keep their `LICENSE` files. Any
+  shadcn-admin-kit and shadcn/ui under MIT. Keep their `LICENSE` files where
+  they are: the licence-notices plugin finds them beside the bundled code
+  (ADR 0038). Any
   change to them is listed in that directory's `LOCAL_CHANGES.md`, and adding or
   re-syncing vendored files updates `THIRD_PARTY.md` at the repository root in
   the same PR. They keep their upstream formatting (Prettier ignores them).
@@ -105,6 +107,21 @@ ADR 0005 (bindings) before changing anything here.
   licences of ADR 0022 §4's allow-list (deny.toml's `allow`); any other
   licence, including 0BSD and BlueOak-1.0.0, is an `exceptions` entry that
   names the package, one entry per package (ADR 0027).
+- **Licence notices (ADR 0038).** Every build writes the licence notices of
+  the bundled packages to `dist/licenses.txt`, which backend3 serves at
+  `/admin/licenses.txt`: Vite's `build.license` lists the packages of the
+  JavaScript chunks, and the `licenceNotices` plugin of
+  `scripts/licence-notices.mjs` adds the packages that a stylesheet
+  `@import`s or that an asset is copied from, then the licence files of the
+  copied code of `src/`: every capitalised `LICENSE`, `LICENCE` or `COPYING`
+  file in the directory of a bundled module or in a parent up to `src/`.
+  Keep both in `vite.config.ts`, with the same file name.
+  `scripts/licence-notices.build.test.mjs` builds the admin and fails when a
+  bundled package is missing from the file or has no licence text, when a
+  bundled path of `../THIRD_PARTY.md` lacks its licence file, or when a
+  bundled package or `src/` brings a `NOTICE` file, which the file would
+  leave out; when it fails for a new dependency or newly copied code, fix the
+  cause it names rather than the test.
 - **Pinned majors.** `../.github/dependabot.yml` keeps Dependabot's version
   updates off the majors the ADRs pin: `@types/node` on the `.node-version`
   major, react-router 7, ra-core 5 and its peers, React 19, Vite 8,

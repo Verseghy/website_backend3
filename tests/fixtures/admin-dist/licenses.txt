@@ -1,0 +1,11 @@
+# Licenses
+
+The app bundles dependencies which contain the following licenses:
+
+## example-package - 1.0.0 (MIT)
+
+Test fixture for the /admin router (ADR 0038): it stands in for the licence
+notices file that the Vite build writes, and is not the real one. The
+non-ASCII characters below prove that the file reaches the browser as UTF-8.
+
+Copyright © 2026 Példa Árvíztűrő

@@ -133,10 +133,98 @@ pub const fn cache_control(request: AdminRequest, status: u16) -> &'static str {
     }
 }
 
+/// The `charset` parameter that [`utf8_text_content_type`] adds.
+pub const UTF8_CHARSET: &str = "charset=utf-8";
+
+/// The `Content-Type` for a text file of the admin build, with its charset
+/// stated.
+///
+/// - `content_type`: the value the file server derived from the file name,
+///   for example `text/plain` for the licence notices file `licenses.txt`
+///   (ADR 0038) or `text/javascript` for a chunk.
+///
+/// Returns the value with `; charset=utf-8` added when it is a `text/*`
+/// media type without a `charset` parameter, and `None` when it needs no
+/// change: another top-level type (JSON and SVG declare their encoding
+/// themselves), a value that already names a charset, or one that is not a
+/// media type at all.
+///
+/// Why: tower-http's `ServeDir` sends the bare type that `mime_guess`
+/// knows, and a browser decodes a `text/plain` body without a charset with
+/// a locale-dependent default, which need not be UTF-8, so the accented
+/// names of the licence notices could be garbled. Every text file of the
+/// admin build is UTF-8: Vite writes its output in UTF-8, and the files it
+/// copies from `admin/public/` are repository files, which are UTF-8 too.
+#[must_use]
+pub fn utf8_text_content_type(content_type: &str) -> Option<String> {
+    let mut parts = content_type.split(';');
+    let essence = parts.next().unwrap_or_default().trim();
+    let (top_level, subtype) = essence.split_once('/')?;
+    if !top_level.eq_ignore_ascii_case("text")
+        || subtype.is_empty()
+        || subtype.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let names_charset = parts.any(|parameter| {
+        parameter
+            .split_once('=')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("charset"))
+    });
+    if names_charset {
+        return None;
+    }
+    Some(format!("{}; {UTF8_CHARSET}", content_type.trim_end()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn text_types_get_the_utf8_charset() {
+        for (given, expected) in [
+            ("text/plain", "text/plain; charset=utf-8"),
+            ("text/markdown", "text/markdown; charset=utf-8"),
+            ("text/html", "text/html; charset=utf-8"),
+            ("text/css", "text/css; charset=utf-8"),
+            ("text/javascript", "text/javascript; charset=utf-8"),
+            ("TEXT/Plain", "TEXT/Plain; charset=utf-8"),
+            // Other parameters stay as they are.
+            (
+                "text/plain; format=flowed",
+                "text/plain; format=flowed; charset=utf-8",
+            ),
+            ("text/plain ", "text/plain; charset=utf-8"),
+        ] {
+            assert_eq!(
+                utf8_text_content_type(given).as_deref(),
+                Some(expected),
+                "{given}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_types_and_stated_charsets_are_left_alone() {
+        for given in [
+            "image/svg+xml",
+            "application/json",
+            "application/octet-stream",
+            "font/woff2",
+            "text/plain; charset=utf-8",
+            "text/html;charset=UTF-8",
+            "text/plain; CHARSET = iso-8859-2",
+            "text",
+            "text/",
+            "text/pl ain",
+            "",
+            "plain",
+        ] {
+            assert_eq!(utf8_text_content_type(given), None, "{given}");
+        }
+    }
 
     #[test]
     fn index_paths() {
@@ -355,6 +443,40 @@ mod tests {
             status in prop_oneof![0u16..200, 400u16..=u16::MAX],
         ) {
             prop_assert!(!is_cacheable_success(status));
+        }
+
+        #[test]
+        fn utf8_text_content_type_never_panics(content_type in any::<String>()) {
+            let _ = utf8_text_content_type(&content_type);
+        }
+
+        #[test]
+        fn a_bare_text_type_gets_exactly_the_utf8_charset(
+            subtype in "[a-z][a-z0-9.+-]{0,15}",
+        ) {
+            let content_type = format!("text/{subtype}");
+            prop_assert_eq!(
+                utf8_text_content_type(&content_type),
+                Some(format!("{content_type}; {UTF8_CHARSET}"))
+            );
+        }
+
+        #[test]
+        fn adding_the_charset_is_idempotent(content_type in "[ -~]{0,40}") {
+            if let Some(with_charset) = utf8_text_content_type(&content_type) {
+                prop_assert!(with_charset.starts_with(content_type.trim_end()));
+                prop_assert!(with_charset.ends_with(UTF8_CHARSET));
+                prop_assert_eq!(utf8_text_content_type(&with_charset), None);
+            }
+        }
+
+        #[test]
+        fn only_text_types_are_changed(
+            top_level in "[a-z]{1,12}",
+            subtype in "[a-z][a-z0-9.+-]{0,15}",
+        ) {
+            prop_assume!(top_level != "text");
+            prop_assert_eq!(utf8_text_content_type(&format!("{top_level}/{subtype}")), None);
         }
 
         #[test]

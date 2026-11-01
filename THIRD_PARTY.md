@@ -19,6 +19,19 @@ listing dependencies here is a notice that a dependency's licence requires in
 the documentation of the binaries built with it: those notices are listed in
 the next section.
 
+The npm packages that the admin bundle contains are listed with their licence
+texts in a file that travels with the bundle: every admin build writes
+`admin/dist/licenses.txt`, every image carries it, and backend3 serves it at
+`/admin/licenses.txt`. Vite's `build.license` option writes it, and
+`admin/scripts/licence-notices.mjs` adds the packages that reach the bundle
+through a stylesheet `@import` or as a copied asset, then the licence files
+of the copied code below `admin/src/` that the bundle holds. The plugin finds
+a licence file in the directory of bundled code or in a parent of it, so each
+licence file of the table below stays next to the code it covers, or next to
+other copied code that every build bundles; the admin's build test checks
+every row
+([ADR 0038](docs/design/adr/0038-licence-notices-of-the-bundled-admin-packages.md)).
+
 ## Notices that dependencies require
 
 - **The Independent JPEG Group.** backend3 decodes and re-encodes JPEG
