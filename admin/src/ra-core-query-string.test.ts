@@ -7,9 +7,10 @@
  * (`parseQueryFromLocation`) and a create screen's `?source=…`
  * (`getRecordFromLocation`) with its own nested query-string 7.1.3, a
  * CommonJS package that `require()`s the CommonJS decode-uri-component 0.2.2.
- * An npm override of either must resolve to a CommonJS module with the same
- * exports (admin/CLAUDE.md, "ra-core's query-string stays on 7"). The ESM-only
- * releases break ra-core:
+ * That chain stays as ra-core ships it, and an npm override or a Vite alias of
+ * either never points at a vendored or patched copy (admin/CLAUDE.md,
+ * "ra-core's query-string stays on 7"). These tests stop an override or alias
+ * to a published release that breaks ra-core, as the ESM-only releases do:
  *
  * - decode-uri-component 0.4 and later: query-string 7's `require()` gets a
  *   module namespace object, so every non-empty query throws a TypeError

@@ -32,18 +32,22 @@ ADR 0005 (bindings) before changing anything here.
   only; npm's `latest` tag is 8.
 - **ra-core's query-string stays on 7.** ra-core 5.15.5 parses list and
   create URLs with its nested query-string 7.1.3 (CommonJS), which
-  `require()`s decode-uri-component 0.2.2. An npm `overrides` entry (or a
-  Vite alias) for either must resolve to a CommonJS module with the same
-  exports, and `src/ra-core-query-string.test.ts` must stay green. Two
-  targets break ra-core, so never override to them:
+  `require()`s decode-uri-component 0.2.2. That chain stays as ra-core ships
+  it until a ra-core release leaves query-string 7. An npm `overrides` entry
+  or a Vite alias for query-string or decode-uri-component never points at a
+  vendored or patched copy of either: the maintainer's rule is to never
+  vendor a fix and to always wait for the upstream release (research:
+  DECISIONS R22, D113). `src/ra-core-query-string.test.ts` stays, and must
+  stay green. Two published release lines break ra-core, so never override
+  or alias to them either:
   - query-string 8 and later, which export only a default: ra-core's named
     imports fail to link, which `npm run build` and every test that imports
     ra-core report;
-  - decode-uri-component 0.4 and later as published, which are ESM-only:
-    the `require()` gets a namespace object and every non-empty query
-    throws. `npm run build`, the other unit tests and the E2E suite stay
-    green (no screen reads a query yet); only that test fails, in Node and
-    in a production bundle.
+  - decode-uri-component 0.4 and later, which are ESM-only: the `require()`
+    gets a namespace object and every non-empty query throws.
+    `npm run build`, the other unit tests and the E2E suite stay green (no
+    screen reads a query yet); only that test fails, in Node and in a
+    production bundle.
 
   The app's own query-string (10, for the kit's `filter-form.tsx`) is a
   separate copy. Drop this note, and that test's override reasoning, when a
@@ -91,12 +95,16 @@ ADR 0005 (bindings) before changing anything here.
   (`admin/AGENTS.md`). Then review the diff, re-apply `LOCAL_CHANGES.md`, and
   remove any nested `.git` the CLI created.
 - **Dependencies.** Install with `npm ci`; `package-lock.json` is committed.
-  A new production dependency must pass `npm run licenses`; a licence that is
-  not in `license-policy.json` is added only in a PR that states why it may be
-  combined with AGPL-3.0-only (ADR 0022 §4). `allow` holds only licences of
-  ADR 0022 §4's allow-list (deny.toml's `allow`); any other licence,
-  including 0BSD and BlueOak-1.0.0, is an `exceptions` entry that names the
-  package, one entry per package (ADR 0027).
+  Never vendor a patched copy of a dependency to fix it; wait for the
+  upstream release (research: DECISIONS R22, D113). Copying a package's code
+  into `src/` to patch it is vendoring too. The kit code that ADR 0012 §4
+  copies and owns is not covered: it changes as the vendored-code rule above
+  says. A new production dependency must pass `npm run licenses`; a licence
+  that is not in `license-policy.json` is added only in a PR that states why
+  it may be combined with AGPL-3.0-only (ADR 0022 §4). `allow` holds only
+  licences of ADR 0022 §4's allow-list (deny.toml's `allow`); any other
+  licence, including 0BSD and BlueOak-1.0.0, is an `exceptions` entry that
+  names the package, one entry per package (ADR 0027).
 - **Pinned majors.** `../.github/dependabot.yml` keeps Dependabot's version
   updates off the majors the ADRs pin: `@types/node` on the `.node-version`
   major, react-router 7, ra-core 5 and its peers, React 19, Vite 8,
