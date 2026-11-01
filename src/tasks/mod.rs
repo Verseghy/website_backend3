@@ -5,4 +5,6 @@
 //! `App::register_tasks`. Every task is idempotent and does all of its
 //! database work inside [`crate::models::task_lock::with_task_lock`], which
 //! skips the run, successfully, while another run holds the task's lock
-//! (ADR 0016 §4; recipe 6 of the backend3 skill).
+//! (ADR 0016 §4; recipe 6 of the backend3 skill). `tests/architecture.rs`
+//! fails for a task whose `impl Task` does not call it under the name the
+//! task registers.

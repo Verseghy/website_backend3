@@ -13,6 +13,21 @@
 //! - **The work runs outside the holder**, in transactions of its own: the
 //!   import, for example, writes everything in one transaction and rolls it
 //!   back on a dry run (ADR 0017), which must not end the lock.
+//! - **The server's defaults do not change the holder** (research: DECISIONS
+//!   R15, D95). A server, database or role may set defaults for every session,
+//!   for example while PostgreSQL is tuned for a small node; the holder
+//!   overrides the three that would break it, for itself only:
+//!   - `idle_in_transaction_session_timeout` and `transaction_timeout` would
+//!     end its session in the middle of the run, and the lock with it. The
+//!     holder sets both to 0 with `SET LOCAL`, which ends with the holder's
+//!     transaction, so the pooled connection keeps the server's settings and
+//!     every other transaction, the work's included, stays under them.
+//!   - `default_transaction_isolation`: under `REPEATABLE READ` or
+//!     `SERIALIZABLE`, the holder would keep the snapshot of its first
+//!     statement for the whole run, and VACUUM could not remove the rows that
+//!     die in the meantime. The holder is always `READ COMMITTED`, which keeps
+//!     no snapshot between statements, and `READ ONLY`, so it can never write
+//!     and take a transaction id, which would hold VACUUM back the same way.
 //! - **A lost lock is reported.** If the holder's session ends during the
 //!   run (a restarted server, a terminated backend), the helper logs a
 //!   warning that another run may have overlapped this one, and returns the
@@ -26,11 +41,25 @@ use std::future::Future;
 
 use loco_rs::{Error, Result};
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseConnectionType, DatabaseTransaction, DbBackend,
-    Statement, TransactionTrait,
+    AccessMode, ConnectionTrait, DatabaseConnection, DatabaseConnectionType, DatabaseTransaction,
+    DbBackend, IsolationLevel, Statement, TransactionTrait,
 };
 
 use crate::domain::task_lock_key::task_lock_key;
+
+/// Turn the holder's two session-ending timeouts off (0) until its
+/// transaction ends, one statement each, so that an error names the setting.
+///
+/// Both names are written out rather than looked up: a misspelt or removed
+/// setting then fails every task with the server's "unrecognized
+/// configuration parameter" error, instead of leaving the holder under the
+/// timeout without a word. `transaction_timeout` exists from PostgreSQL 17;
+/// CI, compose and production run PostgreSQL 18 (docs/design/README.md,
+/// Open questions).
+const EXEMPT_FROM_TIMEOUTS: [&str; 2] = [
+    "SET LOCAL idle_in_transaction_session_timeout = 0",
+    "SET LOCAL transaction_timeout = 0",
+];
 
 /// The smallest database pool [`with_task_lock`] accepts: the holder keeps
 /// one connection for the whole run, and the work needs at least one more.
@@ -66,7 +95,9 @@ pub enum TaskLockOutcome<T> {
 /// - the task name is empty or not snake case;
 /// - `db` is not a PostgreSQL pool, or a pool of fewer than
 ///   [`MIN_POOL_CONNECTIONS`] connections;
-/// - the holder transaction cannot be opened or the lock cannot be queried;
+/// - the holder transaction cannot be opened, its timeouts cannot be turned
+///   off (on a server without `transaction_timeout`, which PostgreSQL 17
+///   added, for example), or the lock cannot be queried;
 /// - `work` fails: its error is returned unchanged, after the lock is
 ///   released. This is the only error after which `work` has run.
 pub async fn with_task_lock<T, F, Fut>(
@@ -81,7 +112,28 @@ where
     let key = task_lock_key(task_name).map_err(Error::msg)?;
     check_pool(db, task_name)?;
 
-    let holder = db.begin().await?;
+    // sea-orm issues `SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ
+    // ONLY` right after `BEGIN`, before any query, as PostgreSQL requires.
+    let holder = db
+        .begin_with_config(
+            Some(IsolationLevel::ReadCommitted),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    // Before the lock: a held lock must never sit in a session that a timeout
+    // may still end.
+    for statement in EXEMPT_FROM_TIMEOUTS {
+        holder
+            .execute_unprepared(statement)
+            .await
+            .map_err(|error| {
+                Error::Message(format!(
+                    "task {task_name}: the task lock's holder transaction could not run \
+                     `{statement}` (ADR 0016 §4; `transaction_timeout` needs PostgreSQL 17 or \
+                     later): {error}"
+                ))
+            })?;
+    }
     if !try_lock(&holder, key).await? {
         tracing::info!(
             task = task_name,
