@@ -371,7 +371,19 @@ apart (ADR 0016 §4).
    work inside `with_task_lock(&ctx.db, &self.task().name, || async { ... })`
    (`src/models/task_lock.rs`) and returns `Ok(())` for both outcomes, so a
    run that finds the lock held exits 0. Lock under the registered name, and
-   never take an advisory lock by hand.
+   never take an advisory lock by hand. Write the call in the body of the
+   `impl Task for <Type>` that `cargo loco generate task` writes, with
+   `&self.task().name` as its second argument, and keep the generated
+   `tasks.register(tasks::<name>::<Type>);` line in `register_tasks` itself
+   (a `#[cfg(...)]` in front of it is fine): `tests/architecture.rs` fails
+   for a `Task` impl without that call, for a registered task whose impl it
+   cannot read at that path, and for any other statement in
+   `register_tasks`, such as a helper that registers tasks (research:
+   DECISIONS R15, D95). It sees the call, not what runs outside it, so
+   review checks that all of the work is inside. The helper's holder sets
+   its own timeouts and isolation level, so the database defaults an
+   operator sets do not end or change it; the task's own transactions stay
+   under them.
 3. **Idempotent**: two runs give the same result as one, because the
    `CronJob` retries a failed run. A task that needs the uploads volume only
    enqueues a job for the worker (ADR 0015 §3).

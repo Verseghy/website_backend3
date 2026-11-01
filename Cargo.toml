@@ -282,8 +282,8 @@ png = "0.18"
 # The response type of Loco's test server, named in test helpers. Same major
 # as loco-rs 1.2.0 uses, so one copy is built.
 axum-test = "17"
-# `catch_unwind` on futures, so the per-test database is dropped even when a
-# test panics (tests/support).
+# `catch_unwind` on futures, so a test that panics still closes its pools and
+# drops its database (tests/support, tests/models/task_lock.rs).
 futures-util = "0.3"
 # The committed snapshots of the /api/v1 OpenAPI document (ADR 0005 §4): "a
 # snapshot change is an API change", and of the schema that the migrations
