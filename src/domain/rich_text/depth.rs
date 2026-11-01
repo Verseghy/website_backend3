@@ -76,8 +76,11 @@
 //!   text integration point;
 //! - a start tag in an `annotation-xml` whose `encoding` is HTML, because
 //!   ammonia's tree treats that element as an HTML integration point and
-//!   scraper's, which the removal report and the structural pass use, does
-//!   not.
+//!   scraper's own tree does not. The removal report and the structural
+//!   pass parse into scraper's tree through a sink that answers as
+//!   ammonia's does (`IntegrationPointSink` in `super::report`), and the
+//!   oracle checks the scan against both trees, so the scan does not depend
+//!   on which one a parse builds.
 //!
 //! From there on the scan stops modelling and counts every `<` followed by an
 //! ASCII letter as an element that stays open, on top of the depth it had
@@ -847,7 +850,10 @@ fn is_void(name: &LocalName) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::rich_text::report::parse_like_ammonia;
+    use crate::domain::rich_text::report::IntegrationPointSink;
+    use html5ever::QualName;
+    use html5ever::driver::{ParseOpts, parse_fragment};
+    use html5ever::tendril::TendrilSink;
     use proptest::prelude::*;
 
     fn nested(tag: &str, depth: usize) -> String {
@@ -859,19 +865,36 @@ mod tests {
     }
 
     /// The depth of the deepest element of html5ever's tree for `input`,
-    /// found with an explicit stack so a deep tree cannot overflow it.
+    /// found with an explicit stack so a deep tree cannot overflow it. The
+    /// deeper of two trees counts: ammonia's, which the sanitiser's parses
+    /// build, and scraper's own, which differs at an `annotation-xml` with an
+    /// HTML `encoding` (`report::IntegrationPointSink`). The scan must never
+    /// count less than either.
     pub(super) fn tree_depth(input: &str) -> usize {
-        let html = parse_like_ammonia(input);
-        let mut deepest = 0;
-        // The children of the fragment's `html` root are at depth 1.
-        let mut stack: Vec<_> = html.root_element().children().map(|n| (n, 1)).collect();
-        while let Some((node, depth)) = stack.pop() {
-            if node.value().is_element() {
-                deepest = deepest.max(depth);
-                stack.extend(node.children().map(|child| (child, depth + 1)));
-            }
-        }
-        deepest
+        [true, false]
+            .into_iter()
+            .map(|like_ammonia| {
+                let html = parse_fragment(
+                    IntegrationPointSink::new(like_ammonia),
+                    ParseOpts::default(),
+                    QualName::new(None, ns!(html), local_name!("div")),
+                    Vec::new(),
+                    false,
+                )
+                .one(input);
+                let mut deepest = 0;
+                // The children of the fragment's `html` root are at depth 1.
+                let mut stack: Vec<_> = html.root_element().children().map(|n| (n, 1)).collect();
+                while let Some((node, depth)) = stack.pop() {
+                    if node.value().is_element() {
+                        deepest = deepest.max(depth);
+                        stack.extend(node.children().map(|child| (child, depth + 1)));
+                    }
+                }
+                deepest
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     /// The smallest limit the scan accepts `input` under. The scan is

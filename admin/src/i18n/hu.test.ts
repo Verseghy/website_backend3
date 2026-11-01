@@ -12,6 +12,8 @@ import { resolve } from "node:path"
 import englishMessages from "ra-language-english"
 import { describe, expect, it } from "vitest"
 
+import type { ErrorCode } from "../bindings/ErrorCode"
+
 import { hu, type MessageTree } from "./hu"
 import {
   lookupMessage,
@@ -118,9 +120,79 @@ describe("hu.ts", () => {
     expect(hu.errors.invalid_credentials).toBe("Hibás e-mail-cím vagy jelszó.")
     // A body that is not the endpoint's JSON, and one above the size limit.
     expect(hu.errors.invalid_body).toBe(
-      "A kérés formátuma hibás. Frissítsd az oldalt, és próbáld újra!",
+      "A kérés formátuma hibás. Frissítsd az oldalt, és próbáld újra!"
     )
     expect(hu.errors.body_too_large).toBe("Az elküldött adat túl nagy.")
+    // A refused rich-text body (editor.md §7.6).
+    expect(hu.errors.image_alt_missing).toBe(
+      "A(z) %{index}. képnek nincs alternatív szövege."
+    )
+    expect(hu.errors.image_src_rejected).toBe(
+      "A(z) %{index}. kép forrása nem engedélyezett. Képet a Kép gombbal tölthetsz fel, vagy választhatsz a médiatárból."
+    )
+    expect(hu.errors.embed_rejected).toBe(
+      "A(z) %{index}. beágyazás nem engedélyezett: csak YouTube- és Padlet-beágyazás használható."
+    )
+    expect(hu.errors.iframe_content).toBe(
+      "A(z) %{index}. beágyazás nem tartalmazhat szöveget."
+    )
+    // `actual` and `limit` are filled in as sizes (ADR 0021 §5), so the
+    // message carries no unit of its own.
+    expect(hu.errors.content_too_large).toBe(
+      "A tartalom túl nagy (%{actual}): legfeljebb %{limit} lehet."
+    )
+    expect(hu.errors.content_too_deep).toBe(
+      "A tartalomban túl mélyen vannak egymásba ágyazva az elemek (%{line}. sor): legfeljebb %{limit} szint lehet."
+    )
+    expect(hu.errors.content_not_normalisable).toBe(
+      "A szerver nem tudta egységes formára hozni a tartalmat. Kérlek, jelezd ezt a hibát a honlap üzemeltetőjének!"
+    )
+  })
+
+  it("fills error messages only with the names the server sends for the code", () => {
+    // The envelope codes carry no params yet. A rich-text finding
+    // (`ContentError`, editor.md §7.6) has the `detail` names that
+    // `src/dtos/admin/content.rs` documents for its code, and an `index` for
+    // the image and embed codes only (it is null for the whole-body codes).
+    const sent: Record<ErrorCode, string[]> = {
+      not_found: [],
+      invalid_credentials: [],
+      invalid_body: [],
+      body_too_large: [],
+      image_alt_missing: ["index", "src"],
+      image_src_rejected: ["index", "src"],
+      embed_rejected: ["index", "src"],
+      iframe_content: ["index"],
+      content_too_large: ["limit", "actual", "measured"],
+      content_too_deep: ["limit", "line"],
+      content_not_normalisable: ["passes"],
+    }
+    const unknown = Object.entries(hu.errors).flatMap(([code, message]) =>
+      placeholders(message)
+        .filter((name) => !sent[code as ErrorCode].includes(name))
+        .map((name) => `errors.${code}: %{${name}}`)
+    )
+    expect(unknown).toEqual([])
+  })
+
+  it("names what editor.md §7.6 asks each rich-text message to name", () => {
+    // The position of the image or embed, the limit, and the line. The size
+    // message names the measured size beside its limit, so the two numbers
+    // are always about the same thing (the submitted body, or what the
+    // sanitiser wrote from it).
+    for (const code of [
+      "image_alt_missing",
+      "image_src_rejected",
+      "embed_rejected",
+      "iframe_content",
+    ] as const) {
+      expect(placeholders(hu.errors[code]), code).toContain("index")
+    }
+    expect(placeholders(hu.errors.content_too_large)).toEqual([
+      "actual",
+      "limit",
+    ])
+    expect(placeholders(hu.errors.content_too_deep)).toEqual(["limit", "line"])
   })
 
   it("keeps the ADR 0004 §5 update prompt verbatim", () => {

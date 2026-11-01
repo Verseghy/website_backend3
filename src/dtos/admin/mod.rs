@@ -6,4 +6,5 @@
 //! `#[ts(type = "number")]` (ADR 0005 §3).
 
 pub mod auth;
+pub mod content;
 pub mod error;

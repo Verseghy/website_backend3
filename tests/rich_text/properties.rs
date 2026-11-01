@@ -172,14 +172,14 @@ fn arb_part() -> impl Strategy<Value = String> {
 }
 
 /// A body of up to 40 pieces of soup.
-fn arb_html() -> impl Strategy<Value = String> {
+pub(super) fn arb_html() -> impl Strategy<Value = String> {
     prop::collection::vec(arb_part(), 0..40).prop_map(|parts| parts.concat())
 }
 
 /// At least 512 cases (editor.md §13.6), or more when `PROPTEST_CASES`
 /// asks for more. proptest itself reads the variable in its default
 /// configuration.
-fn config() -> ProptestConfig {
+pub(super) fn config() -> ProptestConfig {
     let default = ProptestConfig::default();
     ProptestConfig {
         cases: default.cases.max(512),

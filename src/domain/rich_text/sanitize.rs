@@ -413,7 +413,9 @@ mod tests {
     use crate::domain::rich_text::policy::{
         IFRAME_ALLOW, IFRAME_REFERRER_POLICY, TABLE_STYLE, TBODY_STYLE, element_rule,
     };
-    use crate::domain::rich_text::report::{AMMONIA_FOREIGN_TAGS, RemovalRule, parse_like_ammonia};
+    use crate::domain::rich_text::report::{
+        AMMONIA_FOREIGN_TAGS, RemovalRule, parse_like_ammonia, url_outcome,
+    };
     use proptest::prelude::*;
     use scraper::Node;
     use std::fmt::Write as _;
@@ -1304,6 +1306,29 @@ mod tests {
         "I",
     ];
 
+    /// URL attribute values for `url_outcome_matches_ammonia`: image, embed
+    /// and link URLs that each of ammonia's three steps keeps, rewrites or
+    /// rejects, including shapes that only the same-origin step refuses
+    /// (`//host`, `/\host`).
+    #[rustfmt::skip]
+    const URL_VALUES: &[&str] = &[
+        "/storage/uploads/a.jpg", "/storage/uploads/../x.jpg", "/storage/uploads/a%2F..%2Fb.jpg",
+        "https://verseghy-gimnazium.net/storage/uploads/b.png", "https://evil.example/a.jpg",
+        "data:image/png;base64,AA", "blob:x", "javascript:x", "//evil.example/a.jpg", "a.jpg",
+        "https://www.youtube-nocookie.com/embed/abc?start=3", "https://padlet.com/embed/k",
+        "http://www.youtube.com/embed/x", "", " /storage/uploads/a.jpg", "/storage/uploads/a.txt",
+        "//evil.example/x", "/\\evil.example/x", "\\\\evil.example/x", "/\t/evil.example/x",
+        "#top", "?q=1", "../x", "x/y", "https://example.org/", "mailto:a@b.example",
+        "https://verseghy-gimnazium.net/storage/uploads/doc.pdf", "/storage/uploads/doc.pdf",
+    ];
+
+    /// The value of the attribute `name` on the first element named `tag`.
+    fn attribute(html: &str, tag: &str, name: &str) -> Option<String> {
+        attributes_of(html, tag)?
+            .into_iter()
+            .find_map(|(attribute, value)| (attribute == name).then_some(value))
+    }
+
     /// A tree that the HTML parser keeps as written: in a `div` context and
     /// inside table cells these tags nest freely. `p`, `li`, `a`, headings,
     /// `button` and the raw-text elements are left out, because they close,
@@ -1457,6 +1482,29 @@ mod tests {
             prop_assert!(too_deep.contains(&limit.to_string()) && too_deep.contains(&line.to_string()));
             let output = SanitizeError::OutputTooLarge { limit, actual }.to_string();
             prop_assert!(output.contains(&limit.to_string()) && output.contains(&actual.to_string()));
+        }
+
+        // The removal report and the validator decide every URL attribute
+        // with `report::url_outcome`, so it is checked against ammonia's real
+        // output rather than against either of them: one ammonia pass keeps
+        // the attribute exactly when `url_outcome` keeps it, with the value
+        // `url_outcome` gives. The value is the one the parser decodes from
+        // the input, as ammonia's filter sees it.
+        #[test]
+        fn url_outcome_matches_ammonia(
+            value in prop_oneof![prop::sample::select(URL_VALUES).prop_map(str::to_owned), ".{0,30}"],
+            tag in prop::sample::select(&["img", "iframe", "a"][..]),
+        ) {
+            let name = if tag == "a" { "href" } else { "src" };
+            let escaped = value.replace('&', "&amp;").replace('"', "&quot;");
+            let input = match tag {
+                "img" => format!(r#"<img {name}="{escaped}">"#),
+                _ => format!(r#"<{tag} {name}="{escaped}"></{tag}>"#),
+            };
+            let decoded = attribute(&input, tag, name).expect("the input has the attribute");
+            let outcome = url_outcome(&SanitizePolicy::content_v1(), tag, name, &decoded)
+                .map(std::borrow::Cow::into_owned);
+            prop_assert_eq!(attribute(&ammonia(&input), tag, name), outcome, "{}", input);
         }
 
         // The ammonia part of the report is checked against ammonia's real
