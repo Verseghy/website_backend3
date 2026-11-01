@@ -1,15 +1,18 @@
-//! `import_mysql` in production, end to end through the built `backend3-cli`
+//! `import_mysql` end to end through the built `backend3-cli`
 //! (data-migration.md §4.1): config/production.yaml reads the source from
 //! `IMPORT_SOURCE_DATABASE_URL` with the empty string as its default, the
 //! task refuses an unset source in both spellings (the empty string and the
 //! `backend-secrets` placeholder `disabled`), and neither the process's
 //! output nor its JSON log ever shows the source URL, even at log level
-//! `trace`.
+//! `trace`. config/development.yaml reads the same variable, and there the
+//! source guard refuses a source that is not local (ADR 0024 §4, layer 3),
+//! while production, the operator's environment, accepts it.
 //!
 //! The child process connects to the test's own migrated database (Loco
 //! builds a task's context with a database pool), and the source URL points
-//! at a port where nothing answers: the task opens the source connection on
-//! first use, and no import step reads the source yet.
+//! at a port where nothing answers or at a host that is never resolved: the
+//! task opens the source connection on first use, and no import step reads
+//! the source yet.
 
 use std::{fs, time::Duration};
 
@@ -93,10 +96,18 @@ impl Run {
     /// Runs the task in production against `database_url`, with
     /// `IMPORT_SOURCE_DATABASE_URL` set to `source` (unset for `None`).
     fn cli(&self, database_url: &str, source: Option<&str>) -> CliRun {
+        self.cli_in("production", database_url, source)
+    }
+
+    /// Runs the task in `environment` against `database_url`, with
+    /// `IMPORT_SOURCE_DATABASE_URL` set to `source` (unset for `None`).
+    /// The variables that only config/production.yaml reads are set in
+    /// every environment; the others ignore them.
+    fn cli_in(&self, environment: &str, database_url: &str, source: Option<&str>) -> CliRun {
         let jwt_secret = cli_jwt_secret();
         let totp_key = cli_totp_key();
         let mut env = vec![
-            ("LOCO_ENV", "production"),
+            ("LOCO_ENV", environment),
             ("DATABASE_URL", database_url),
             ("HOST", "http://localhost"),
             ("JWT_SECRET", jwt_secret.as_str()),
@@ -213,6 +224,70 @@ async fn production_never_shows_the_source_url_in_its_output_or_its_logs() {
         ] {
             assert!(!text.contains(PASSWORD), "{name}: {text}");
             assert!(!text.contains("backend3_import"), "{name}: {text}");
+        }
+    })
+    .await;
+}
+
+/// A source host that no output may name: the guard's refusal shows no
+/// part of the URL, its host included (data-migration.md §4.1).
+const REMOTE_HOST: &str = "source-host-a7c3.example";
+
+/// ADR 0024 §4, layer 3: development reads only a local source. The task
+/// refuses a remote one, naming the setting, and neither its output nor
+/// its log at level `trace` shows any part of the URL.
+#[tokio::test]
+async fn development_refuses_a_source_that_is_not_local_without_showing_it() {
+    with_app(|_router, ctx| async move {
+        let database_url = child_database_url(&ctx);
+        for host in [REMOTE_HOST, "mysql"] {
+            let source = format!("mysql://backend3_import:{PASSWORD}@{host}:3306/verseghy");
+            let run = Run::new();
+            let cli = run.cli_in("development", &database_url, Some(&source));
+            wait_for_children_to_disconnect(&ctx).await;
+            assert!(!cli.status.success(), "{host}: {}", cli.stderr);
+            assert!(
+                cli.stderr.contains(
+                    "Error: refusing to start: LOCO_ENV=development, but \
+                     settings.import.source_database_url (IMPORT_SOURCE_DATABASE_URL) points at a \
+                     MySQL server that is not local."
+                ),
+                "{host}: {}",
+                cli.stderr
+            );
+            assert!(
+                run.report_text().is_empty(),
+                "{host}: a refused run wrote a report"
+            );
+            for (name, text) in [("stdout", &cli.stdout), ("stderr", &cli.stderr)] {
+                for part in [PASSWORD, "backend3_import", REMOTE_HOST] {
+                    assert!(!text.contains(part), "{name} shows {part}: {text}");
+                }
+            }
+        }
+    })
+    .await;
+}
+
+/// Staging and production imports are operator runs (data-migration.md
+/// §3.3): production applies no locality rule, so a remote source passes
+/// and the run goes on. No import step reads the source yet, so nothing
+/// connects to it.
+#[tokio::test]
+async fn production_accepts_a_source_that_is_not_local() {
+    with_app(|_router, ctx| async move {
+        let database_url = child_database_url(&ctx);
+        let source = format!("mysql://backend3_import:{PASSWORD}@{REMOTE_HOST}:3306/verseghy");
+        let run = Run::new();
+        let cli = run.cli(&database_url, Some(&source));
+        wait_for_children_to_disconnect(&ctx).await;
+        assert!(cli.status.success(), "{}\n{}", cli.stdout, cli.stderr);
+        let report = run.report_text();
+        assert!(report.contains("\"outcome\": \"completed\""), "{report}");
+        for text in [&cli.stdout, &cli.stderr, &report] {
+            for part in [PASSWORD, "backend3_import", REMOTE_HOST] {
+                assert!(!text.contains(part), "{part}: {text}");
+            }
         }
     })
     .await;

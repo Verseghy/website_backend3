@@ -15,9 +15,10 @@
 //! 2. parses and validates the arguments into an [`ImportOptions`]
 //!    (`domain::import_mysql::options`);
 //! 3. reads the source setting, `settings.import.source_database_url`, and
-//!    refuses an unset one (empty, or the placeholder `disabled`) or one that
-//!    is not a MySQL URL, naming the setting and never showing its value
-//!    ([`source`]);
+//!    refuses an unset one (empty, or the placeholder `disabled`), one that
+//!    is not a MySQL URL, and, in the `test`, `development` and `e2e`
+//!    environments, one that is not local (the source guard of ADR 0024 §4,
+//!    layer 3), naming the setting and never showing its value ([`source`]);
 //! 4. checks the paths: the resolution file can be read, `storage_root` is a
 //!    directory, and `report` is an empty directory outside `storage_root`
 //!    ([`paths`]);
@@ -30,14 +31,20 @@
 //! [`run`] is where the import steps go, one slice at a time (ADR 0025
 //! class d): the source session and the target guard, the resolution file,
 //! the defect detector and the table steps. Until they arrive it imports
-//! nothing, and the report says so section by section.
+//! nothing, and the report says so section by section. Every step reads
+//! the legacy tables through [`source::select_rows`], the source query
+//! layer, which reads only the tables of the source allow-list
+//! (`domain::import_mysql::source_tables`; the newsletter is never read,
+//! NWS-01). `tests/architecture.rs` fails when a file of this module other
+//! than `source.rs` builds or sends a statement to the source or opens a
+//! connection to it.
 //!
 //! The whole module, and the MySQL driver, exist only with the default Cargo
 //! feature `import-mysql` (data-migration.md §3.3).
 
 mod paths;
 pub mod report;
-mod source;
+pub mod source;
 
 use loco_rs::{
     Error, Result,
@@ -85,7 +92,10 @@ impl Task for ImportMysql {
         let started_at = clock.now();
         let options = ImportOptions::from_arguments(&vars.cli, started_at).map_err(Error::msg)?;
         let settings = Settings::from_section(ctx.config.settings.as_ref()).map_err(Error::msg)?;
-        let source_options = source::connect_options(&settings.import.source_database_url)?;
+        let source_options = source::connect_options(
+            &settings.import.source_database_url,
+            &ctx.environment.to_string(),
+        )?;
         paths::check(&options)?;
 
         with_task_lock(&ctx.db, &self.task().name, || async {

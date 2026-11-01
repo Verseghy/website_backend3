@@ -1,5 +1,8 @@
 # A throwaway local PostgreSQL for tests, development and CI (ADR 0002,
-# ADR 0022 §3). Start it with `podman-compose up -d` (or `docker compose up -d`).
+# ADR 0022 §3), and, under the profile `import`, the throwaway MySQL source
+# of the legacy import (the `mysql` service below). Start both with
+# `podman-compose --profile import up -d` (or `docker compose --profile
+# import up -d`); without the profile, `up -d` starts PostgreSQL only.
 #
 # - The major version matches production: PostgreSQL 18. The image is pinned
 #   by the digest of its multi-arch index; a bump changes tag and digest
@@ -75,3 +78,71 @@ services:
       timeout: 5s
       retries: 30
       start_period: 5s
+
+  # The legacy import's source (data-migration.md §3.3, §12): a throwaway
+  # MySQL with the legacy schema and no rows, which the import_mysql tests
+  # read and which local import runs use. It is under the profile `import`,
+  # so a plain `up -d` leaves it out; the CI Test job and the local gate
+  # start it (AGENTS.md, "Before you call it done").
+  #
+  # - The server matches production's: the official image at the tag that
+  #   website_k8s runs (website_k8s@f0286dc:verseghy-website/mysql/kustomization.yaml),
+  #   pinned by the digest of its multi-arch index. As for PostgreSQL,
+  #   nothing bumps the pin automatically; a bump changes tag and digest
+  #   together, to the tag that website_k8s then runs.
+  # - The schema is tests/fixtures/legacy/schema.sql, the expected legacy
+  #   DDL, which the image loads into MYSQL_DATABASE when it initialises the
+  #   data directory (here: at every start, because of the tmpfs).
+  # - The account is `loco`/`loco`, the same local throwaway values as
+  #   PostgreSQL's, not secrets. It has exactly the grants of the cut-over's
+  #   source account, SELECT and LOCK TABLES on `verseghy` (§3.3), so the
+  #   tests read the source with no more rights than production's import
+  #   has. The root account signs in only inside the container
+  #   (MYSQL_ROOT_HOST), with a random password that the image prints to its
+  #   log at the start; nothing needs it, and the CI step that shows this
+  #   log on a failure drops that line.
+  # - The URL is mysql://loco:loco@127.0.0.1:3306/verseghy: the port is
+  #   published on loopback only, so the import's source guard accepts it
+  #   in test and development, where it refuses the container-network name
+  #   `mysql` (ADR 0024 §4, layer 3). The default ssl-mode, PREFERRED, signs
+  #   in over TLS with the certificate that the image generates, which
+  #   MySQL 8.4's caching_sha2_password needs (Cargo.toml, the sqlx entry).
+  mysql:
+    profiles: ["import"]
+    image: docker.io/library/mysql:8.4.13@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_ROOT_HOST: localhost
+      MYSQL_DATABASE: verseghy
+    # As for PostgreSQL: write the account script, then hand over to the
+    # image's own entrypoint with its default command. The image runs the
+    # files of /docker-entrypoint-initdb.d in name order, the .sql ones in
+    # MYSQL_DATABASE, so the schema exists before the grants name it.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        printf '%s\n' \
+          "CREATE USER 'loco'@'%' IDENTIFIED BY 'loco';" \
+          "GRANT SELECT, LOCK TABLES ON verseghy.* TO 'loco'@'%';" \
+          > /docker-entrypoint-initdb.d/20-import-account.sql
+        exec docker-entrypoint.sh mysqld
+    volumes:
+      # Read-only; `z` lets SELinux hosts (podman on Fedora) share the file
+      # with the container, and docker ignores it elsewhere.
+      - ./tests/fixtures/legacy/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro,z
+    ports:
+      - "127.0.0.1:3306:3306"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      # Over TCP on purpose, as for PostgreSQL: the image initialises with a
+      # temporary server that skips networking, so a TCP answer comes only
+      # from the final server, after the schema and the account exist.
+      # `mysqladmin ping` succeeds for any answering server, even one that
+      # refuses the (absent) credentials.
+      test: ["CMD", "mysqladmin", "ping", "--host=127.0.0.1", "--port=3306", "--silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 10s

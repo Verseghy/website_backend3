@@ -13,6 +13,12 @@
 //! - [`source`]: the source setting, `settings.import.source_database_url`,
 //!   whose empty and `disabled` values both mean unset, and the checks that
 //!   never show its value, because it holds the source password;
+//! - [`source_guard`]: the refusal of a source that is not local in the
+//!   `test`, `development` and `e2e` environments (ADR 0024 §4, layer 3);
+//! - [`source_tables`]: the source allow-list, the 17 legacy tables the
+//!   import reads, and the checked `SELECT` that is the only statement
+//!   form that names one; the newsletter's subscriber list is never read
+//!   (NWS-01);
 //! - [`report`]: the run report's `summary.json` and its Markdown skeleton
 //!   (data-migration.md §11.3), from the instants the task read from the app
 //!   clock;
@@ -29,3 +35,5 @@ pub mod not_migrated;
 pub mod options;
 pub mod report;
 pub mod source;
+pub mod source_guard;
+pub mod source_tables;

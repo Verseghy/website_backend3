@@ -66,7 +66,7 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 | `src/workers/`, `src/tasks/` | background workers and tasks (ADR 0016); `src/tasks/import_mysql/` is the legacy import (ADR 0017, `docs/design/data-migration.md`), built only with the default Cargo feature `import-mysql`, which also brings its MySQL driver; its pure parts, in `src/domain/import_mysql/`, are built in every build |
 | `migration/` | Sea-ORM migrations (ADR 0009) |
 | `config/` | `development`, `test`, `e2e` and `production` configuration; typed settings under `settings:` |
-| `tests/` | integration, request and architecture tests (`tests/architecture.rs`, with the SQL date lint of ADR 0010 point 10 in `tests/architecture/sql_dates.rs`), the `/storage` media contract suite (`tests/media_contract/`), and the schema snapshot (`tests/schema/`, ADR 0009). `tests/support/` also holds the `/api/v1` test harness (public-api.md §16, §17): the named fixtures with their soft-deleted twins (`fixtures.rs`), the response check against the served OpenAPI document (`openapi_schema.rs`), and the route samples (`public_samples.rs`) and rules (`public_rules.rs`) of the global suite `tests/requests/public_global.rs`; recipe 3 of `.claude/skills/backend3/SKILL.md` says what each endpoint adds to them |
+| `tests/` | integration, request and architecture tests (`tests/architecture.rs`, with the SQL date lint of ADR 0010 point 10 in `tests/architecture/sql_dates.rs`), the `/storage` media contract suite (`tests/media_contract/`), the schema snapshot (`tests/schema/`, ADR 0009), and the expected DDL of the legacy MySQL database (`tests/fixtures/legacy/schema.sql`), which compose.yaml's MySQL source loads. `tests/support/` also holds the `/api/v1` test harness (public-api.md §16, §17): the named fixtures with their soft-deleted twins (`fixtures.rs`), the response check against the served OpenAPI document (`openapi_schema.rs`), and the route samples (`public_samples.rs`) and rules (`public_rules.rs`) of the global suite `tests/requests/public_global.rs`; recipe 3 of `.claude/skills/backend3/SKILL.md` says what each endpoint adds to them |
 | `examples/media_contract.rs` | runs that suite from the command line against a running server (ADR 0015 §3, the co-mount test) |
 | `deploy/media/` | the media server: its nginx configuration, which website_k8s copies byte for byte, and its pinned image (`deploy/media/README.md`, ADR 0015 §1) |
 | `admin/` | the admin UI: an npm project (ADR 0004, ADR 0021) |
@@ -102,6 +102,7 @@ every start.
 
 ```sh
 podman-compose up -d postgres     # local PostgreSQL with backend3_test, backend3_development and backend3_e2e
+podman-compose --profile import up -d mysql  # the legacy import's MySQL source (below); the tests need it
 cargo loco db migrate             # LOCO_ENV defaults to development
 cargo loco start                  # http://localhost:5150; health check: GET /_ping
 curl http://127.0.0.1:9464/metrics  # the metrics port of the running server (below)
@@ -122,6 +123,24 @@ database before it runs any subcommand, so `db create` fails with "database
 Local database URLs: `postgres://loco:loco@localhost:5432/backend3_development`,
 `.../backend3_test` and `.../backend3_e2e`. Tests, development and E2E refuse
 any database that is not local.
+
+The legacy import (`import_mysql`, data-migration.md) reads a MySQL source.
+Locally and in the CI `Test` job that is the `mysql` service of
+`compose.yaml`, under the profile `import` (so a plain `podman-compose up -d`
+leaves it out): production's MySQL 8.4 image, pinned like the PostgreSQL one,
+loaded at every start with the legacy schema of
+`tests/fixtures/legacy/schema.sql` and no rows, on `127.0.0.1:3306`. Its
+account `loco`/`loco` (throwaway values, not secrets) has exactly the
+cut-over source account's grants, `SELECT` and `LOCK TABLES` on `verseghy`.
+The import_mysql tests read it, so the test suite needs it running; a test
+that cannot reach it fails and says how to start it. Its URL is
+`mysql://loco:loco@127.0.0.1:3306/verseghy`; set it as
+`IMPORT_SOURCE_DATABASE_URL` for a local `cargo loco task import_mysql`.
+In `test`, `development` and `e2e` the task refuses a source that is not
+local (localhost, 127.0.0.1, ::1 or a Unix socket), the container-network
+name `mysql` included (ADR 0024 §4, layer 3), and it reads only the legacy
+tables of its allow-list, never the newsletter's subscriber list
+(`src/domain/import_mysql/source_tables.rs`, NWS-01).
 
 To start the development database over, recreate it: `podman-compose down`,
 then `podman-compose up -d postgres`, which starts all three databases empty
@@ -240,8 +259,12 @@ Run the same gate as CI, from the repository root:
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 podman-compose up -d postgres
+podman-compose --profile import up -d mysql  # the import's MySQL source
 TZ=UTC cargo nextest run --locked --workspace --all-targets
 TZ=Pacific/Chatham cargo nextest run --locked --workspace --all-targets  # a second process TZ (ADR 0010)
+# without the import-mysql feature (data-migration.md §3.3): no MySQL driver in the build, and the rest passes
+cargo tree --locked --workspace --no-default-features --target all --edges normal,build,dev --invert sqlx-mysql  # prints nothing
+TZ=UTC cargo nextest run --locked --workspace --all-targets --no-default-features
 cargo test --locked --workspace --doc     # nextest does not run doctests
 # the media contract against deploy/media/nginx.conf in its pinned image (docker or podman):
 cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'test(/^media_contract::nginx::/)'

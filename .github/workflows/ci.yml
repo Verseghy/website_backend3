@@ -152,6 +152,14 @@ jobs:
             exit 1
           fi
           echo "template1 locale: $actual (matches production)"
+      - name: Start the legacy MySQL source (compose.yaml, profile import)
+        # The import's throwaway source (data-migration.md §3.3, §12):
+        # production's MySQL 8.4 with the legacy schema of
+        # tests/fixtures/legacy/schema.sql, no rows, and an account with the
+        # cut-over account's grants. The import_mysql tests of both nextest
+        # runs below read it. A step of this job, so no context changes
+        # (ADR 0022 section 3).
+        run: docker compose --profile import up --detach --wait --wait-timeout 180 mysql
       - name: Script tests (scripts/tests)
         run: bash scripts/tests/run-all.sh
       - name: cargo nextest
@@ -173,6 +181,34 @@ jobs:
             exit 1
           fi
           cargo nextest run --locked --workspace --all-targets
+      - name: Build and test without the import-mysql feature
+        # data-migration.md §3.3: CI also builds and tests once without the
+        # importer, to prove that the rest of backend3 does not depend on
+        # it. The build must not contain the MySQL driver at all, not even
+        # through a dev-dependency, because the test run that follows builds
+        # those too; then the whole suite runs without the feature: the
+        # import's tests are left out by their cfg, and
+        # tests/tasks/import_feature.rs checks that no import_mysql task is
+        # registered. UTC, as in the first run. A step of this job, so no
+        # context changes (ADR 0022 section 3).
+        env:
+          TZ: UTC
+        run: |
+          # `cargo tree --invert` prints nothing (a warning on stderr, exit 0)
+          # when the package is not in the build; any output names the path
+          # that brings the driver in.
+          if ! driver=$(cargo tree --locked --workspace --no-default-features --target all \
+              --edges normal,build,dev --invert sqlx-mysql 2>"$RUNNER_TEMP/cargo-tree.err"); then
+            cat "$RUNNER_TEMP/cargo-tree.err"
+            echo "::error::cargo tree failed; its error is above."
+            exit 1
+          fi
+          if [[ -n $driver ]]; then
+            echo "::error::The build without the import-mysql feature still contains the MySQL driver (sqlx-mysql); every dependency on it must be behind the feature:"
+            echo "$driver"
+            exit 1
+          fi
+          cargo nextest run --locked --workspace --all-targets --no-default-features
       - name: Media contract (deploy/media/nginx.conf)
         # ADR 0015 §1, "What must be true": the suite of tests/media_contract/
         # against the real configuration in the image pinned by
@@ -188,6 +224,14 @@ jobs:
       - name: PostgreSQL log
         if: failure()
         run: docker compose logs postgres
+      - name: MySQL log
+        if: failure()
+        # The image prints the random root password it generated. Root signs
+        # in only inside this throwaway container (MYSQL_ROOT_HOST in
+        # compose.yaml), so the value protects nothing, but a public log
+        # shows no credential-looking line: sed drops it (and, unlike
+        # `grep -v`, exits 0 when nothing is left).
+        run: docker compose --profile import logs mysql | sed '/GENERATED ROOT PASSWORD/d'
 
   contract:
     name: Contract

@@ -20,6 +20,7 @@ You need the Rust toolchain manager `rustup` (it installs the release pinned in 
 
 ```sh
 podman-compose up -d postgres   # throwaway local PostgreSQL 18 on 127.0.0.1:5432
+podman-compose --profile import up -d mysql  # the legacy import's MySQL source; the tests need it
 cargo loco db migrate           # migrate backend3_development
 cargo loco start                # http://localhost:5150 (health check: /_ping)
 

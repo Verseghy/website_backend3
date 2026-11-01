@@ -442,7 +442,7 @@ website_backend3/
 ├── rust-toolchain.toml      exact Rust release, at least 1.94
 ├── deny.toml, clippy.toml   cargo-deny licence policy; clippy bans (std::env::var, tokio::spawn)
 ├── about.toml, about.hbs    cargo-about configuration and template for the binary's licence notices (ADR 0042)
-├── compose.yaml             throwaway local PostgreSQL for tests and development
+├── compose.yaml             throwaway local PostgreSQL for tests and development; the import's MySQL source (profile import)
 ├── .claude/
 │   ├── settings.json        committed deny rules; registers the PreToolUse hook
 │   ├── hooks/               guard-bash.sh, the PreToolUse hook
