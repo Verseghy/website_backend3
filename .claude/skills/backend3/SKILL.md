@@ -190,7 +190,22 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
    restore write only the activity entry. A relation change (labels on a post)
    updates the parent's audit columns and writes a parent revision.
 4. **The live-row helper**: one finder that adds `deleted_at IS NULL`, used by
-   every public query on every table it touches (ADR 0011 section 3).
+   every public query on every table it touches (ADR 0011 section 3). Every
+   model function that the public API calls and that takes a database
+   connection is a live-row finder, and its name has the word `live`
+   (`find_live_by_email`, `list_live_page`). A model function that takes no
+   connection reads no rows (ADR 0008 rules 2 and 4), so the public API may
+   call it under any name: `serve_content` (ADR 0013), which takes the cache
+   and the metrics family, and the read counter (public-api.md section 15),
+   which takes its in-memory counts. The architecture test
+   (`tests/architecture.rs`) fails when a module under `src/controllers/v1/`
+   or `src/dtos/v1/` names an entity, a column, a query trait, an entity
+   finder or raw SQL; calls through `crate::models` a function without that
+   word that takes a connection or that `src/models/` does not define; or
+   calls a method (`post.labels(db)`) with the name of such a model
+   function. It also fails when a function with that word in `src/models/`
+   has no `DeletedAt.is_null()`, no `deleted_at IS NULL` in its SQL and no
+   call of another live-row finder.
 5. **Dependencies**: refuse a delete while live rows depend on the target, and
    a restore while a row it depends on is trashed or a live row holds its
    unique value (409). The refusal names the blocking rows in a Hungarian
@@ -207,7 +222,8 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
    trash filter on the list, and the „Előzmények” panel on the edit page.
 9. **Tests**: model tests for delete, restore, each refusal, the revision and
    activity rows written per operation, and rollback on error; a request test
-   that every public read path ignores trashed rows.
+   that every public read path ignores trashed rows, through the
+   soft-deleted twins of the public fixtures (recipe 3 step 6).
 
 ---
 
@@ -247,8 +263,11 @@ public DTOs and operations that steps 2 and 5 follow.
    (the first value wins), then checks them in the order of section 8, path
    parameters first, returning the first `Rejection`. A new parameter adds
    its check there and its `Rejection` variant at its place in that order.
-4. **Query on the model** (`posts::Model::list_published(db, filter, cursor, limit)`
-   style) using the live-row helper of recipe 2.
+4. **Query on the model** (`posts::Model::list_live_published(db, filter, cursor, limit)`
+   style) using the live-row helper of recipe 2. The handler reads rows only
+   through such live-row finders, whose names have the word `live`; it calls
+   `serve_content` for a body and the read counter for a counted read
+   directly, because they take no database connection (recipe 2 step 4).
 5. **Handler** in `src/controllers/v1/<name>.rs` with `#[utoipa::path(...)]`
    that gives the full `/api/v1/...` path, a `tag` and a unique
    `operation_id` (openapi-spike.md section 3, rules 2 and 6), registered
@@ -274,26 +293,59 @@ public DTOs and operations that steps 2 and 5 follow.
    of every `GET` operation by itself (openapi-spike.md section 3, rule 7).
 6. **Fixtures**: add every fixture that `public-api.md` section 17.1 lists for
    this endpoint, under the name used there, as invented data (never copied
-   from production) loaded by the request tests. Check that each shape of the
+   from production), to `FIXTURES` in `tests/support/fixtures.rs` (its
+   module documentation has the rules). A fixture's load function writes its
+   rows directly, through the models on the transaction that
+   `FixtureWriter::db` gives, never through `/api/admin`; gives every row an
+   explicit id below `TWIN_ID_OFFSET`; and writes the soft-deleted twin of
+   every public row with `FixtureWriter::twin` (or `twin_with`, for a column
+   that is unique over trashed rows too), as ADR 0011 asks of every public
+   row type. A test loads the fixtures it reads with
+   `fixtures::load(&ctx.db, &["<§17.1 name>", ...])`, which returns the twin
+   ids. `tests/requests/public_fixtures.rs` checks that each name is a §17.1
+   name and that all fixtures load together. Check that each shape of the
    ADR 0019 section 2 table that the endpoint serves has its named fixture.
    Shapes that only legacy data has go into the import-path fixtures of
    section 17.2 (recipe 4).
 7. **Specification tests** in `tests/requests/public_<name>.rs`: one test per
    rule, named after the rule (for example
    `home_paging_visits_every_published_post_once`), asserting full order,
-   parsed JSON field by field, the response against its schema, and the
-   headers of section 16.2, with the helpers of `tests/support`
-   (`public_get`, `assert_public_cors`, `assert_public_not_found`). Every
-   `/api/v1` route in Loco's route table (`tests/support::public_paths`)
-   gets the CORS and method checks of `tests/requests/public_router.rs` and
-   the caching checks of `tests/requests/public_caching.rs` without further
-   work. Time-dependent tests inject "now" (recipe 7).
-8. **Contract**: review the `.snap.new` the tests write beside
+   parsed JSON field by field, the response against its schema
+   (`openapi_schema::assert_matches_operation` with the document from
+   `served_document`), the twins' absence (a `404` for a twin's id, lists in
+   full order without them), and the headers of section 16.2, with the
+   helpers of `tests/support` (`public_get`, `assert_public_cors`,
+   `assert_public_not_found`). Every `/api/v1` route in Loco's route table
+   (`tests/support::public_paths`) gets the CORS and method checks of
+   `tests/requests/public_router.rs` and the caching checks of
+   `tests/requests/public_caching.rs` without further work. Time-dependent
+   tests inject "now" (recipe 7).
+8. **Route samples** for the global suite of section 16.3
+   (`tests/requests/public_global.rs`, which fails until they exist): add a
+   `RouteSamples` entry for each new route to `ROUTE_SAMPLES` in
+   `tests/support/public_samples.rs` (its module documentation has the
+   rules). Give path values and `accepted` values that reach a live row of
+   the named fixtures: the base request must get the route's cacheable
+   `200`, and its body must list a row whose twin one of those fixtures
+   wrote (`rows: Rows::Twinned`; `Rows::NoIds` with the reason only for an
+   answer without row ids). For every documented query parameter give an
+   `other` value that is answered differently (a refused one is the usual
+   choice), and a `Spaced::Value` that the route answers differently with a
+   plus sign than with a space (a search text only the spaced form
+   matches), or `Spaced::Unobservable` with the reason when no value can
+   show it (a `limit`). An optional parameter that changes the answer, such
+   as the preview `token`, stays out of the base request (`in_base: false`)
+   and names the path of the row it is accepted on (`path: Some(...)`, the
+   draft). The suite reports samples that cannot show a rule, then checks
+   the trailing slash, `POST`, unknown and repeated parameters, `+`
+   decoding, CORS, the error envelope, the schema, the twins and the `304`
+   of every route, and sends random strings to every parameter.
+9. **Contract**: review the `.snap.new` the tests write beside
    `tests/requests/snapshots/openapi_document.snap` and accept it (`cargo
    insta review`), bump `info.version`'s minor by hand for an addition, and
    keep the route-coverage test of `tests/requests/openapi.rs` green (ADR
    0005 section 4). A snapshot change is an API change: say so in the PR.
-9. **PR**: `feat(api): ...` (or with `db`/`admin` scopes if the slice adds
+10. **PR**: `feat(api): ...` (or with `db`/`admin` scopes if the slice adds
    them), `Closes #N` for the PUB or NEW parity IDs it finishes.
 
 ---

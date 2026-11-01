@@ -66,7 +66,7 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 | `src/workers/`, `src/tasks/` | background workers and tasks (ADR 0016) |
 | `migration/` | Sea-ORM migrations (ADR 0009) |
 | `config/` | `development`, `test`, `e2e` and `production` configuration; typed settings under `settings:` |
-| `tests/` | integration, request and architecture tests (`tests/architecture.rs`, with the SQL date lint of ADR 0010 point 10 in `tests/architecture/sql_dates.rs`), the `/storage` media contract suite (`tests/media_contract/`), and the schema snapshot (`tests/schema/`, ADR 0009) |
+| `tests/` | integration, request and architecture tests (`tests/architecture.rs`, with the SQL date lint of ADR 0010 point 10 in `tests/architecture/sql_dates.rs`), the `/storage` media contract suite (`tests/media_contract/`), and the schema snapshot (`tests/schema/`, ADR 0009). `tests/support/` also holds the `/api/v1` test harness (public-api.md §16, §17): the named fixtures with their soft-deleted twins (`fixtures.rs`), the response check against the served OpenAPI document (`openapi_schema.rs`), and the route samples (`public_samples.rs`) and rules (`public_rules.rs`) of the global suite `tests/requests/public_global.rs`; recipe 3 of `.claude/skills/backend3/SKILL.md` says what each endpoint adds to them |
 | `examples/media_contract.rs` | runs that suite from the command line against a running server (ADR 0015 §3, the co-mount test) |
 | `deploy/media/` | the media server: its nginx configuration, which website_k8s copies byte for byte, and its pinned image (`deploy/media/README.md`, ADR 0015 §1) |
 | `admin/` | the admin UI: an npm project (ADR 0004, ADR 0021) |

@@ -1,4 +1,16 @@
 //! Helpers shared by the integration tests.
+//!
+//! The `/api/v1` specification tests (public-api.md §16) have helpers of
+//! their own: [`fixtures`], the named fixtures of public-api.md §17.1 with
+//! the soft-deleted twin of every public row (ADR 0011); [`openapi_schema`],
+//! the validation of a body against the served OpenAPI document (ADR 0005
+//! §4); [`public_samples`], the per-route samples of the global suite; and
+//! [`public_rules`], the global rules of §16.3 that the suite checks.
+
+pub mod fixtures;
+pub mod openapi_schema;
+pub mod public_rules;
+pub mod public_samples;
 
 use std::{
     collections::BTreeSet,
@@ -208,17 +220,29 @@ where
     F: FnOnce(TestServer, AppContext) -> Fut,
     Fut: Future<Output = T>,
 {
-    with_app(|router, ctx| async move {
-        let server = TestServer::new_with_config(
-            ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(
-                trim_trailing_slash(router),
-            ),
-            RequestConfig::default(),
-        )
-        .expect("start the test server");
-        test(server, ctx).await
-    })
-    .await
+    with_app(|router, ctx| async move { test(test_server(router), ctx).await }).await
+}
+
+/// Loco's test server in front of `router`, wrapped exactly as `App::serve`
+/// wraps the application router in production
+/// ([`backend3::app::trim_trailing_slash`]). [`with_server`] uses it for the
+/// application; the harness tests (`tests/requests/public_harness.rs`) put
+/// their probe routers behind it, so both see the same trailing-slash
+/// normalisation and client address.
+///
+/// - `router`: the router to serve.
+///
+/// # Panics
+///
+/// When the test server cannot start.
+pub fn test_server(router: axum::Router) -> TestServer {
+    TestServer::new_with_config(
+        ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(
+            trim_trailing_slash(router),
+        ),
+        RequestConfig::default(),
+    )
+    .expect("start the test server")
 }
 
 /// Takes the advisory lock of the task `task_name` on a transaction of its
@@ -494,15 +518,34 @@ pub async fn public_get(server: &TestServer, path: &str) -> TestResponse {
 ///
 /// - `ctx`: the test's context, whose `App::routes` is read.
 pub fn public_paths(ctx: &AppContext) -> Vec<String> {
-    let paths: BTreeSet<String> = App::routes(ctx)
+    public_routes(ctx)
+        .iter()
+        .map(|route| sample_path(route))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Every `/api/v1` route template of Loco's route table, sorted and each
+/// once (a route with several methods is one template), for the tests that
+/// check a rule per route: the global suite (`tests/requests/public_global.rs`)
+/// sends each one the samples registered for it.
+///
+/// - `ctx`: the test's context, whose `App::routes` is read.
+///
+/// # Panics
+///
+/// When the table has no OpenAPI document route: the tests would then pass
+/// on an empty table.
+pub fn public_routes(ctx: &AppContext) -> Vec<String> {
+    let routes: BTreeSet<String> = App::routes(ctx)
         .collect()
         .into_iter()
         .filter(|route| api_family(&route.uri) == Some(ApiFamily::V1))
-        .map(|route| sample_path(&route.uri))
+        .map(|route| route.uri)
         .collect();
-    // Without this the tests would pass on an empty route table.
-    assert!(paths.contains(DOCUMENT_ROUTE), "{paths:?}");
-    paths.into_iter().collect()
+    assert!(routes.contains(DOCUMENT_ROUTE), "{routes:?}");
+    routes.into_iter().collect()
 }
 
 /// `template` with every `{...}` segment replaced by `1`.
