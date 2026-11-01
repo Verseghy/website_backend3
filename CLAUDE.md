@@ -28,6 +28,11 @@ The test for where logic goes: if it needs the database or another external syst
 - Controllers, workers and tasks read the instant with `crate::app::clock(&ctx)?.now()` and pass it down; `src/domain/` takes it as an argument (rule 1 above, [ADR 0010](docs/design/adr/0010-all-instants-stored-as-timestamptz.md) point 7). Nothing else in `src/` reads the system time or uses chrono's `Local`, and only `src/app.rs` calls `set_clock`; `tests/architecture.rs` enforces it.
 - Time-dependent tests start at a chosen instant with `tests/support::with_app_at` or `with_server_at`. They read the wall clock only where recipe 7 of the project skill says so, because Loco's JWT reads the system time; the recipe also says how to change the `before_save` that `cargo loco db entities` generates.
 
+## Calendar days and event wall times
+
+- Both APIs send a calendar day as `YYYY-MM-DD` and an event's start or end as the Europe/Budapest wall time `YYYY-MM-DD HH:MM:SS`, always through `dtos::shared::CalendarDate` and `EventWallTime`, which read only that form and convert to and from the stored instant through `src/domain/budapest.rs` ([ADR 0010](docs/design/adr/0010-all-instants-stored-as-timestamptz.md), [ADR 0005](docs/design/adr/0005-rust-dtos-are-the-api-contract-ts-rs-utoipa-openapi.md) §3). No handler formats, parses or converts these values itself; recipe 1 step 6 of the project skill says which error is the client's.
+- SQL that takes a date, hour, month or year from a `timestamptz` names the school's zone, as in `(date AT TIME ZONE 'Europe/Budapest')::date` (ADR 0010 points 4 and 10). `tests/architecture/sql_dates.rs` fails, in `src/` and `migration/`, on a cast to `date` (`::date`, `CAST`, `date(x)`), a `date_trunc(` or a `current_date` that does not name `'Europe/Budapest'` or a bound zone; its module documentation lists what stays a review rule, such as the hour.
+
 ## Commits and pull requests
 
 [ADR 0012](docs/design/adr/0012-delivery-review-commits-and-licensing.md) sections 1-3 decide these.

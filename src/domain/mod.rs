@@ -26,6 +26,7 @@ pub mod budapest;
 pub mod cli_guard;
 pub mod clock;
 pub mod database_target;
+pub mod date_text;
 pub mod email_address;
 pub mod etag;
 pub mod http_metrics;
