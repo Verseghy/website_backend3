@@ -4,7 +4,11 @@
 # Only this file reads the environment, through `get_env` (ADR 0008,
 # ADR 0023 §11). A secret or an address takes no default: `get_env` without a
 # default fails at startup when the variable is unset, which is safer than
-# falling back to a development value. Required variables:
+# falling back to a development value. The one exception is
+# IMPORT_SOURCE_DATABASE_URL (below): only the import_mysql task reads it, so
+# the server and every other command run without it; its empty default means
+# unset, and the task, not the boot, refuses to run without a source
+# (data-migration.md §4.1). Required variables:
 #
 #   DATABASE_URL  postgres://website_backend3:<password>@postgres:5432/verseghy
 #                 (built by the Deployment from the backend-secrets key,
@@ -34,9 +38,12 @@
 #
 # Optional: LOG_LEVEL, DB_AUTO_MIGRATE (default false: boot runs no
 # migration, so backend3 also boots against a read-only database, ADR 0003),
-# DB_MAX_CONNECTIONS, DB_CONNECT_TIMEOUT, DB_IDLE_TIMEOUT, and
+# DB_MAX_CONNECTIONS, DB_CONNECT_TIMEOUT, DB_IDLE_TIMEOUT,
 # PNG_PRESET_THRESHOLD_PIXELS (below; set by the Deployment from the
-# measurement on the production node, ADR 0033 §5).
+# measurement on the production node, ADR 0033 §5), and
+# IMPORT_SOURCE_DATABASE_URL, the legacy MySQL source of the import_mysql
+# task (below; unset, empty or `disabled` outside the cut-over window and
+# the rehearsals, data-migration.md §4.1).
 #
 # Safety (ADR 0024 §4, layer 3): `App::load_config` refuses
 # dangerously_truncate, dangerously_recreate and queue.dangerously_flush here,
@@ -177,3 +184,14 @@ settings:
     png:
       threshold_pixels: <%= get_env(name="PNG_PRESET_THRESHOLD_PIXELS", default="6000000") %>
       large_preset: 0
+  # The legacy import (data-migration.md §3.3, §4.1). Only the import_mysql
+  # task reads it: it builds the source connection from it and passes that
+  # down, and the server never connects to the source. The variable is the
+  # backend-secrets key import-source-database-url, which holds the
+  # placeholder `disabled` outside the cut-over window. The empty default and
+  # `disabled` both mean unset, and the task then refuses to start, naming
+  # this key. The value holds the source account's password: no log line,
+  # error message or report shows it. Quoted and escaped like
+  # totp_encryption_key above, so any value reaches the task's own check.
+  import:
+    source_database_url: "<%= get_env(name='IMPORT_SOURCE_DATABASE_URL', default='') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>"

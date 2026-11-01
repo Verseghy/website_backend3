@@ -38,6 +38,13 @@
 //! is checked here in full, through [`PngEffort::new`], so a value that would
 //! break the rule stops the boot with a message that names the key and says
 //! what to change, before any upload is optimised with it.
+//!
+//! The legacy import's source (`settings.import.source_database_url`,
+//! data-migration.md §4.1) is the opposite case: only the `import_mysql`
+//! task uses it, so the boot checks only that it is a string and keeps it
+//! behind a type whose `Debug` never shows it, because it holds the source
+//! password. The task decides whether it is set and usable, so a bad value
+//! there never stops the server.
 
 use std::{net::IpAddr, path::PathBuf};
 
@@ -50,6 +57,7 @@ use serde::{Deserialize, Deserializer, de::Error as _};
 use crate::domain::{
     configured_key::KeyError,
     image_optimise::PngEffort,
+    import_mysql::source::{SOURCE_DATABASE_URL_ENV, SOURCE_DATABASE_URL_KEY, SourceDatabaseUrl},
     session_jwt::{
         ExpirationError, JwtSecret, LocationsError, TokenLocation, check_expiration,
         check_locations,
@@ -72,6 +80,8 @@ pub struct Settings {
     pub admin_auth: AdminAuthSettings,
     /// How uploaded images are optimised (ADR 0015 §7, ADR 0033).
     pub image_optimisation: ImageOptimisationSettings,
+    /// The legacy import (data-migration.md §3.3, §4.1).
+    pub import: ImportSettings,
 }
 
 /// Settings of admin sign-in (ADR 0006).
@@ -267,6 +277,49 @@ fn png_effort<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PngEffort, D
     PngEffort::new(fields.threshold_pixels, fields.large_preset).map_err(D::Error::custom)
 }
 
+/// Settings of the legacy import, the `import_mysql` task
+/// (data-migration.md §3.3, §4.1). Only that task reads them; it builds the
+/// source connection and passes it down (ADR 0008 rules 2 and 3).
+///
+/// `Debug` never shows the source URL: [`SourceDatabaseUrl`] prints only
+/// whether it is set.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportSettings {
+    /// The connection URL of the legacy MySQL source. Production and
+    /// development read it from `IMPORT_SOURCE_DATABASE_URL`, with the empty
+    /// string as the default; the empty string and the placeholder
+    /// `disabled` both mean unset, and the task then refuses to start.
+    #[serde(deserialize_with = "source_database_url")]
+    pub source_database_url: SourceDatabaseUrl,
+}
+
+/// The full key of [`ImportSettings::source_database_url`], for error
+/// messages; the same key that the task's own messages name.
+pub const IMPORT_SOURCE_DATABASE_URL_KEY: &str = SOURCE_DATABASE_URL_KEY;
+
+/// Deserializes [`ImportSettings::source_database_url`]: any string, which
+/// the task checks when it runs.
+///
+/// - `deserializer`: the deserializer positioned at the value.
+///
+/// As for the TOTP key, the value is read as any JSON value first, so that
+/// serde's own type error cannot quote a value that YAML typed as a number
+/// or a boolean: the value holds the source password. The error names the
+/// variable; `serde_path_to_error` adds the key path.
+fn source_database_url<'de, D>(deserializer: D) -> Result<SourceDatabaseUrl, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(configured) => Ok(SourceDatabaseUrl::new(configured)),
+        _ => Err(D::Error::custom(format!(
+            "the import source ({SOURCE_DATABASE_URL_ENV} in production) is not a string; write \
+             it in quotes, as config/production.yaml does, or as \"\" when there is no source"
+        ))),
+    }
+}
+
 /// Why the `settings:` section could not be turned into [`Settings`].
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
@@ -274,8 +327,8 @@ pub enum SettingsError {
     #[error(
         "the configuration has no `settings:` section; backend3 needs at least \
          {ADMIN_UI_DIST_DIR_KEY}, {METRICS_BINDING_KEY}, {METRICS_PORT_KEY}, \
-         {TOTP_ENCRYPTION_KEY_KEY} and {IMAGE_OPTIMISATION_PNG_KEY} (see config/test.yaml for \
-         an example)"
+         {TOTP_ENCRYPTION_KEY_KEY}, {IMAGE_OPTIMISATION_PNG_KEY} and \
+         {IMPORT_SOURCE_DATABASE_URL_KEY} (see config/test.yaml for an example)"
     )]
     Missing,
     /// A key is missing, unknown or has the wrong type.
@@ -496,6 +549,22 @@ mod tests {
         json!({ "threshold_pixels": 6_000_000, "large_preset": 0 })
     }
 
+    /// The `import` value of the committed test configuration: no source.
+    fn import() -> Value {
+        json!({ "source_database_url": "" })
+    }
+
+    /// A complete section with the import source replaced by `source`.
+    fn with_import_source(source: &Value) -> Value {
+        json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": metrics(),
+            "admin_auth": admin_auth(),
+            "image_optimisation": image_optimisation(),
+            "import": { "source_database_url": source },
+        })
+    }
+
     /// A complete section with the given admin UI directory and metrics
     /// sub-section, the local environments' TOTP key and the committed
     /// image optimisation values.
@@ -511,6 +580,7 @@ mod tests {
             "metrics": metrics,
             "admin_auth": admin_auth(),
             "image_optimisation": { "png": png },
+            "import": import(),
         })
     }
 
@@ -521,6 +591,7 @@ mod tests {
             "metrics": metrics(),
             "admin_auth": admin_auth(),
             "image_optimisation": image_optimisation(),
+            "import": import(),
         })
     }
 
@@ -531,6 +602,7 @@ mod tests {
             "metrics": metrics(),
             "admin_auth": { "totp_encryption_key": key },
             "image_optimisation": image_optimisation(),
+            "import": import(),
         })
     }
 
@@ -607,7 +679,85 @@ mod tests {
                 image_optimisation: ImageOptimisationSettings {
                     png: PngEffort::DEFAULT,
                 },
+                import: ImportSettings {
+                    source_database_url: SourceDatabaseUrl::new(String::new()),
+                },
             }
+        );
+    }
+
+    #[test]
+    fn the_import_source_is_kept_as_configured_and_checked_only_by_the_task() {
+        // Unset, the placeholder, a URL and even a malformed value all load:
+        // a bad source must not stop the server, only the import task.
+        for configured in [
+            "",
+            "disabled",
+            "mysql://import:pw@mysql/verseghy",
+            "not a url",
+        ] {
+            let settings = Settings::from_section(Some(&with_import_source(&json!(configured))))
+                .unwrap_or_else(|error| panic!("{configured:?}: {error}"));
+            assert_eq!(
+                settings.import.source_database_url,
+                SourceDatabaseUrl::new(configured.to_owned()),
+                "{configured:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_import_source_that_is_not_a_string_is_refused_without_showing_it() {
+        for value in [
+            json!(4_242_424_242_u64),
+            json!(true),
+            Value::Null,
+            json!(["mysql://import:pw-in-a-list@mysql/verseghy"]),
+            json!({ "url": "mysql://import:pw-in-a-map@mysql/verseghy" }),
+        ] {
+            let (path, message) = invalid(&with_import_source(&value));
+            assert_eq!(path, IMPORT_SOURCE_DATABASE_URL_KEY, "{value}: {message}");
+            assert!(message.contains("is not a string"), "{value}: {message}");
+            assert!(
+                message.contains("IMPORT_SOURCE_DATABASE_URL"),
+                "{value}: {message}"
+            );
+            for fragment in ["4242424242", "pw-in-a-", "true"] {
+                assert!(!message.contains(fragment), "{value}: {message}");
+            }
+        }
+        // The key itself is required, and unknown keys beside it are refused.
+        assert_eq!(
+            invalid(&json!({
+                "admin_ui": { "dist_dir": "x" },
+                "metrics": metrics(),
+                "admin_auth": admin_auth(),
+                "image_optimisation": image_optimisation(),
+                "import": {},
+            }))
+            .0,
+            "settings.import"
+        );
+        assert_eq!(
+            invalid(&json!({
+                "admin_ui": { "dist_dir": "x" },
+                "metrics": metrics(),
+                "admin_auth": admin_auth(),
+                "image_optimisation": image_optimisation(),
+                "import": { "source_database_url": "", "source_url": "" },
+            }))
+            .0,
+            "settings.import.source_url"
+        );
+    }
+
+    #[test]
+    fn debug_never_shows_the_import_source() {
+        let section = with_import_source(&json!("mysql://import:pw-in-debug@mysql/verseghy"));
+        let printed = format!("{:?}", Settings::from_section(Some(&section)));
+        assert!(
+            printed.contains("SourceDatabaseUrl(<redacted>)") && !printed.contains("pw-in-debug"),
+            "{printed}"
         );
     }
 
@@ -622,6 +772,7 @@ mod tests {
             METRICS_PORT_KEY,
             TOTP_ENCRYPTION_KEY_KEY,
             IMAGE_OPTIMISATION_PNG_KEY,
+            IMPORT_SOURCE_DATABASE_URL_KEY,
         ] {
             assert!(message.contains(key), "{message}");
         }
@@ -646,6 +797,7 @@ mod tests {
                     "metrics": metrics(),
                     "admin_auth": admin_auth(),
                     "image_optimisation": image_optimisation(),
+                    "import": import(),
                     "admin_uii": {},
                 }),
                 "settings.admin_uii",
@@ -656,6 +808,7 @@ mod tests {
                     "admin_ui": { "dist_dir": "x" },
                     "admin_auth": admin_auth(),
                     "image_optimisation": image_optimisation(),
+                    "import": import(),
                 }),
                 "settings",
             ),
@@ -683,6 +836,7 @@ mod tests {
                     "admin_ui": { "dist_dir": "x" },
                     "metrics": metrics(),
                     "image_optimisation": image_optimisation(),
+                    "import": import(),
                 }),
                 "settings",
             ),
@@ -692,6 +846,7 @@ mod tests {
                     "metrics": metrics(),
                     "admin_auth": {},
                     "image_optimisation": image_optimisation(),
+                    "import": import(),
                 }),
                 "settings.admin_auth",
             ),
@@ -701,6 +856,7 @@ mod tests {
                     "metrics": metrics(),
                     "admin_auth": { "totp_encryption_key": PUBLISHED_LOCAL_KEY, "extra": 1 },
                     "image_optimisation": image_optimisation(),
+                    "import": import(),
                 }),
                 "settings.admin_auth.extra",
             ),
@@ -721,6 +877,7 @@ mod tests {
                     "admin_ui": { "dist_dir": "x" },
                     "metrics": metrics(),
                     "admin_auth": admin_auth(),
+                    "import": import(),
                 }),
                 "settings",
             ),
@@ -1083,6 +1240,7 @@ mod tests {
             "metrics": metrics(),
             "admin_auth": admin_auth(),
             "image_optimisation": image_optimisation(),
+            "import": import(),
             "admin_uii": {},
         });
         let message = Settings::from_section(Some(&section))

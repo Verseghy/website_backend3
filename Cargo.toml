@@ -116,6 +116,27 @@ sea-orm = { version = "2.0", features = [
 # the PostgreSQL driver feature comes in through loco-rs (`with-db`), and no
 # SQLite or MySQL driver is enabled here.
 sea-orm-migration = { version = "2.0", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
+# The legacy importer's MySQL driver (ADR 0017 §1, ADR 0022 §2,
+# data-migration.md §3.3): plain sqlx queries, with no Sea-ORM entities for
+# the legacy tables. backend3 makes it optional behind the `import-mysql`
+# feature and adds the `mysql` driver there. It is the sqlx 0.9 that Sea-ORM
+# 2.0 and loco-rs 1.2.0 build, so the driver joins that one copy instead of a
+# second one (ADR 0002); a new 0.x line comes with a Loco bump
+# (.github/dependabot.yml). Default features are off: `any`, the query macros
+# and the migrator are not used. The runtime and the TLS backend are named
+# although Sea-ORM and loco-rs turn on the same ones, so the importer does
+# not rely on another crate's features for either:
+# - `runtime-tokio`, Loco's runtime.
+# - `tls-rustls-ring-webpki`, rustls with ring, the backend loco-rs already
+#   enables, so naming it changes neither the graph nor Cargo.lock. The
+#   importer needs TLS to sign in at all whenever the server asks for full
+#   authentication: MySQL 8.4's default plugin, caching_sha2_password, then
+#   takes the password only over TLS or encrypted with the server's RSA key,
+#   and sqlx-mysql without its `mysql-rsa` feature refuses the second way.
+#   `mysql-rsa` stays off: it would put the `rsa` crate to use, and deny.toml
+#   ignores RUSTSEC-2023-0071 only because RSA is unused. The URL's `ssl-mode`
+#   decides whether a session uses TLS.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Names the full key path (`settings.admin_ui.dist_dir`) in settings errors
@@ -402,6 +423,20 @@ miniz_oxide = { workspace = true }
 crc32fast = { workspace = true }
 webpx = { workspace = true }
 gif = { workspace = true }
+# The importer's MySQL driver, only with the `import-mysql` feature below.
+sqlx = { workspace = true, optional = true, features = ["mysql"] }
+
+[features]
+# `import-mysql`: the legacy importer, the `import_mysql` task and its MySQL
+# driver (data-migration.md §3.3, ADR 0017 §1, ADR 0022 §2). It is a default
+# feature, so the PAC production image (`cargo build --release --locked` in
+# the Containerfile) and the CI checks build it, and the image can run the
+# cut-over import. A build without it (`--no-default-features`) has no
+# `import_mysql` task and no MySQL driver, which proves that the rest of
+# backend3 does not depend on them. The PR that removes the importer
+# (data-migration.md §13 item 9) removes this feature.
+default = ["import-mysql"]
+import-mysql = ["dep:sqlx"]
 
 [[bin]]
 name = "backend3-cli"

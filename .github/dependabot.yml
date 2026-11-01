@@ -180,7 +180,8 @@ updates:
       # the `import-mysql` Cargo feature (ADR 0022 section 2). It must be the
       # sqlx that Sea-ORM 2.0 and loco-rs 1.2.0 use (0.9), so that the feature
       # unifies into that one copy (ADR 0002). A new 0.x minor line comes with
-      # Loco. Not a dependency yet: the importer slice adds it.
+      # Loco. A dependency of backend3 since the import_mysql task, optional
+      # behind that feature (Cargo.toml).
       - dependency-name: sqlx
         update-types: ["version-update:semver-major"]
       # chrono-tz is pinned exactly (ADR 0010 point 5) on the 0.10 line that

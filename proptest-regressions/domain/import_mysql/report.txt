@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c5520398d6a5a27988e0921d29b0f541bc3378432903e4bc6235de01656671dc # shrinks to run = RunSummary { options: ImportOptions { mode: DryRun, snapshot_at: 1970-01-01T00:00:00Z, resolutions: "", storage_root: "", report: "", canteen_audit_local_before: All }, started_at: 1970-01-01T00:00:00Z, finished_at: 1970-01-01T00:00:00Z, outcome: Failed { message: "\n```" } }
+cc 9491deac031c1c25fe4b3fcd311d5968126009928e884f5fd6644619f5dd9f49 # shrinks to run = RunSummary { options: ImportOptions { mode: DryRun, snapshot_at: 1970-01-01T00:00:00Z, resolutions: "", storage_root: "", report: "\r", canteen_audit_local_before: All }, started_at: 1970-01-01T00:00:00Z, finished_at: 1970-01-01T00:00:00Z, outcome: Completed }

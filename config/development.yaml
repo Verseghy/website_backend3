@@ -124,3 +124,11 @@ settings:
     png:
       threshold_pixels: 6000000
       large_preset: 0
+  # The legacy import's source (data-migration.md §3.3, §4.1): a local
+  # throwaway MySQL loaded from a synthetic fixture, never a production
+  # database. The guard hook blocks cargo commands whose
+  # IMPORT_SOURCE_DATABASE_URL is not local (ADR 0024 §4). Unset by default;
+  # the import_mysql task then refuses to start, naming this key. Quoted and
+  # escaped like production's, so any value reaches the task's own check.
+  import:
+    source_database_url: "<%= get_env(name='IMPORT_SOURCE_DATABASE_URL', default='') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>"

@@ -10,6 +10,9 @@
 //! [`ConnectionProbe`]: crate::support::ConnectionProbe
 
 mod database_guard;
+// The legacy import exists only with its Cargo feature (data-migration.md §3.3).
+#[cfg(feature = "import-mysql")]
+mod import_mysql;
 mod metrics_port;
 mod png_effort;
 mod precheck;
