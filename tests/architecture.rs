@@ -41,6 +41,11 @@
 //! `register_tasks` is gone. It checks that the call is there, not that all
 //! of the task's database work runs inside it: review checks that.
 //!
+//! A fifth check, in [`sql_dates`], reads the SQL in `src/` and `migration/`
+//! and fails where it takes a day from an instant without naming the
+//! school's zone, Europe/Budapest (ADR 0010 points 4 and 10). It reuses this
+//! file's scanners for comments and literals.
+//!
 //! The scan is a text check, so a determined bypass is possible (ADR 0008,
 //! Consequences); it exists to catch honest mistakes early.
 
@@ -48,6 +53,12 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+// This file is the root of its test crate, so a plain `mod` would look in
+// `tests/`, where Cargo would also build a `.rs` file as a test crate of its
+// own; `#[path]` keeps the module beside this file instead.
+#[path = "architecture/sql_dates.rs"]
+mod sql_dates;
 
 /// Identifiers that must not appear as tokens in `src/domain/`.
 const BANNED_IDENTIFIERS: &[&str] = &["loco_rs", "sea_orm", "sqlx", "tokio", "rand", "AppContext"];

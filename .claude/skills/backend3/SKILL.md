@@ -39,14 +39,25 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
 2. **Schema**: a migration in `migration/src/` (`cargo loco generate migration`
    or `generate model`), following ADR 0009 (naming, `bigint` identity ids,
    `timestamptz`, `CHECK`s, an index on every foreign key) and ADR 0010 for
-   instants. If the entity is admin-editable, it joins the safety net in this
-   PR: recipe 2. The slice adds only its own tables to `App::truncate` in
-   `src/app.rs`, never `users`, `activity_log` or `revisions` (the
-   `AGENTS.md` commands say why and how to start a development database
-   over). Every migration updates the schema snapshot in the same PR
-   (ADR 0009): `tests/schema/snapshot.rs` reads the migrated schema from
-   `pg_catalog` and fails until `tests/schema/snapshots/schema.snap` matches.
-   Read the `.snap.new` it writes (each object is one line that starts with
+   instants. SQL that takes a date, hour, month or year from a
+   `timestamptz`, in a migration or a model, names the school's zone (ADR
+   0010 points 4 and 10): `(date AT TIME ZONE 'Europe/Budapest')::date`, or
+   `date_trunc('month', starts_at, 'Europe/Budapest')`, or a zone bound as a
+   parameter from `budapest::ZONE_NAME`. The SQL date lint,
+   `tests/architecture/sql_dates.rs`, fails on a cast to `date` (`::date`,
+   `CAST(... AS date)`, `date(x)`), a `date_trunc(` or a `current_date` that
+   names no zone or another zone, such as `'UTC'`, in a string literal or
+   `.sql` file under `src/` or `migration/`. Its module documentation lists
+   what it cannot see and what stays a review rule (the hour, `extract`,
+   `to_char`). If the entity is admin-editable, it joins the
+   safety net in this PR: recipe 2. The slice adds only its own tables to
+   `App::truncate` in `src/app.rs`, never `users`, `activity_log` or
+   `revisions` (the `AGENTS.md` commands say why and how to start a
+   development database over). Every migration updates the schema snapshot
+   in the same PR (ADR 0009): `tests/schema/snapshot.rs` reads the migrated
+   schema from `pg_catalog` and fails until
+   `tests/schema/snapshots/schema.snap` matches. Read the `.snap.new` it
+   writes (each object is one line that starts with
    its kind and name), accept it with `cargo insta review`, and commit it.
    The snapshot shows only what the module doc of `tests/schema/catalog.rs`
    lists. Before it compares, the test runs the guard of
@@ -94,7 +105,19 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    `serde::de::value::MapAccessDeserializer`, as
    `dtos::admin::auth::LoginRequest` does. Never read a `serde_json::Map` or
    `Value` first: that builds the whole body in memory before any member is
-   checked, and keeps the last of two members with the same name.
+   checked, and keeps the last of two members with the same name. A calendar
+   day (`posts.date`, a canteen day) is a `dtos::shared::CalendarDate` and an
+   event's start or end an `EventWallTime`, in both APIs (ADR 0005 §3): build
+   one from the stored instant with `CalendarDate::from_midnight` or
+   `EventWallTime::from_instant`, whose error is a defect in the stored data
+   (a server error), and turn a received one into an instant with
+   `to_midnight` or `to_instant`, whose error (a spring-gap time, a day
+   without a midnight) is a validation error on the field (ADR 0010 point 6).
+   Never format or parse these forms in a handler. `src/domain/date_text.rs`
+   holds the strict text forms, which other pure code may reuse; whether the
+   date part of the public keyset cursor reads them, or backend2's
+   `%Y-%m-%d` that public-api.md §5.2 names, is for `public-posts-list` to
+   decide with its cursor.
 7. **Admin API**: thin handlers in `src/controllers/admin/<name>.rs`. Every
    route is declared with its permission in the admin route table (deny by
    default, ADR 0007 sections 4-5); errors use the envelope and `ErrorCode`
@@ -202,11 +225,18 @@ public DTOs and operations that steps 2 and 5 follow.
 2. **DTOs** in `src/dtos/v1/`: responses with `utoipa::ToSchema`, query and
    path parameters with `utoipa::IntoParams`, camelCase through serde (ADR
    0005 sections 2-3). Instants, dates and event wall times use the forms of
-   ADR 0010 and the shared newtypes. Every `Option` field carries
-   `#[schema(required = true)]`, documented ranges are stated with `minimum`
-   and `maximum`, and a newtype states its pattern on the derive with
-   `#[schema(value_type = String, pattern = ...)]` (openapi-spike.md section
-   3, rules 1, 3 and 4).
+   ADR 0010 and the shared newtypes of `src/dtos/shared.rs` (recipe 1 step
+   6); the first public DTO that uses `CalendarDate` or `EventWallTime` adds
+   its `ToSchema` derive with the pattern of the form. The derive publishes
+   the type's doc comment as the schema's `description` (rule 3), which is
+   written for API users (rule 5), while today's doc comment is written for
+   the admin, whose TypeScript binding carries it too: that slice rewords
+   the comment for both readers, or gives the schema its own text with
+   `#[schema(description = ...)]`. Every `Option` field
+   carries `#[schema(required = true)]`, documented ranges are stated with
+   `minimum` and `maximum`, and a newtype states its pattern on the derive
+   with `#[schema(value_type = String, pattern = ...)]` (openapi-spike.md
+   section 3, rules 1, 3 and 4).
 3. **Pure parts first** in `src/domain/` (parameter parsing per section 2.5,
    the keyset cursor `src/domain/cursor.rs`, date ranges), with unit tests for
    every documented row and the proptest properties of `public-api.md`

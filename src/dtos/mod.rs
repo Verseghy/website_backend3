@@ -6,9 +6,12 @@
 //! when the committed bindings differ. Public API types live in [`v1`]; they
 //! derive `utoipa::ToSchema` or `utoipa::IntoParams`, and the OpenAPI document
 //! of `crate::controllers::v1::openapi` describes them (ADR 0005 §2, and the
-//! rules the spike found in `docs/design/openapi-spike.md`). Each API has its
-//! own error body: [`admin::error`] and [`v1::error`]. Sea-ORM entities never
+//! rules the spike found in `docs/design/openapi-spike.md`). Types that both
+//! APIs use live in [`shared`] (ADR 0005 §2, the last row): so far the
+//! calendar day and the event wall time of ADR 0010. Each API has its own
+//! error body: [`admin::error`] and [`v1::error`]. Sea-ORM entities never
 //! serialize to a client; handlers convert them into DTOs.
 
 pub mod admin;
+pub mod shared;
 pub mod v1;
