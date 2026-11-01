@@ -7,22 +7,24 @@
 //! whether its current element was foreign. [`check`] compares that with the
 //! scan's own trace. The tree builder runs twice, once with a tree that
 //! treats an HTML-encoded `annotation-xml` as an integration point, as
-//! ammonia's tree does, and once with one that does not, as scraper's does,
-//! because the sanitiser parses the same input with both.
+//! ammonia's tree does, and once with one that does not, as scraper's own
+//! tree does, so the scan's answers hold whichever of the two a parse builds
+//! (both are [`IntegrationPointSink`], which can answer either way).
 
-use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use html5ever::interface::{ElementFlags, NodeOrText, QuirksMode, TreeSink, create_element};
+use html5ever::interface::{TreeSink, create_element};
 use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::states::RawKind;
 use html5ever::tokenizer::{
     BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
 };
 use html5ever::tree_builder::{TreeBuilder, TreeBuilderOpts};
-use html5ever::{Attribute, QualName, TokenizerResult, local_name, ns};
-use scraper::{Html, HtmlTreeSink};
+use html5ever::{QualName, TokenizerResult, local_name, ns};
+use scraper::HtmlTreeSink;
+
+use super::super::report::IntegrationPointSink;
 
 /// The tokenizer state a start tag leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,11 +112,7 @@ pub(super) fn start_tags(input: &str) -> usize {
 /// Runs the tree builder over `input` as `parse_fragment` does for a `div`
 /// context, and returns its observations and the number of start tags.
 fn record(input: &str, annotation_points: bool) -> (Vec<Observation>, usize) {
-    let sink = Flavour {
-        inner: HtmlTreeSink::new(Html::new_fragment()),
-        annotation_points,
-        points: RefCell::new(Vec::new()),
-    };
+    let sink = IntegrationPointSink::new(annotation_points);
     let context = create_element(
         &sink,
         QualName::new(None, ns!(html), local_name!("div")),
@@ -145,7 +143,7 @@ fn record(input: &str, annotation_points: bool) -> (Vec<Observation>, usize) {
 
 /// A token sink that forwards to the tree builder and records its answers.
 struct Recorder {
-    builder: TreeBuilder<<HtmlTreeSink as TreeSink>::Handle, Flavour>,
+    builder: TreeBuilder<<HtmlTreeSink as TreeSink>::Handle, IntegrationPointSink>,
     cdata_possible: bool,
     trace: RefCell<Vec<Observation>>,
     tokens: Cell<usize>,
@@ -190,159 +188,6 @@ impl TokenSink for Recorder {
                 .push(Observation::Cdata(self.tokens.get(), answer));
         }
         answer
-    }
-}
-
-/// scraper's tree sink, which can also answer the `annotation-xml`
-/// integration-point question as ammonia's tree does.
-struct Flavour {
-    inner: HtmlTreeSink,
-    /// Answer like ammonia's tree (`true`) or like scraper's (`false`).
-    annotation_points: bool,
-    /// The elements created as HTML integration points.
-    points: RefCell<Vec<<HtmlTreeSink as TreeSink>::Handle>>,
-}
-
-impl TreeSink for Flavour {
-    type Handle = <HtmlTreeSink as TreeSink>::Handle;
-    type Output = Html;
-    type ElemName<'a>
-        = <HtmlTreeSink as TreeSink>::ElemName<'a>
-    where
-        Self: 'a;
-
-    fn finish(self) -> Html {
-        self.inner.finish()
-    }
-
-    fn parse_error(&self, message: Cow<'static, str>) {
-        self.inner.parse_error(message);
-    }
-
-    fn get_document(&self) -> Self::Handle {
-        self.inner.get_document()
-    }
-
-    fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
-        self.inner.elem_name(target)
-    }
-
-    fn create_element(
-        &self,
-        name: QualName,
-        attrs: Vec<Attribute>,
-        flags: ElementFlags,
-    ) -> Self::Handle {
-        let point = flags.mathml_annotation_xml_integration_point;
-        let handle = self.inner.create_element(name, attrs, flags);
-        if point {
-            self.points.borrow_mut().push(handle);
-        }
-        handle
-    }
-
-    fn create_comment(&self, text: StrTendril) -> Self::Handle {
-        self.inner.create_comment(text)
-    }
-
-    fn create_pi(&self, target: StrTendril, data: StrTendril) -> Self::Handle {
-        self.inner.create_pi(target, data)
-    }
-
-    fn append(&self, parent: &Self::Handle, child: NodeOrText<Self::Handle>) {
-        self.inner.append(parent, child);
-    }
-
-    fn append_based_on_parent_node(
-        &self,
-        element: &Self::Handle,
-        prev_element: &Self::Handle,
-        child: NodeOrText<Self::Handle>,
-    ) {
-        self.inner
-            .append_based_on_parent_node(element, prev_element, child);
-    }
-
-    fn append_doctype_to_document(
-        &self,
-        name: StrTendril,
-        public_id: StrTendril,
-        system_id: StrTendril,
-    ) {
-        self.inner
-            .append_doctype_to_document(name, public_id, system_id);
-    }
-
-    fn mark_script_already_started(&self, node: &Self::Handle) {
-        self.inner.mark_script_already_started(node);
-    }
-
-    fn pop(&self, node: &Self::Handle) {
-        self.inner.pop(node);
-    }
-
-    fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
-        self.inner.get_template_contents(target)
-    }
-
-    fn same_node(&self, x: &Self::Handle, y: &Self::Handle) -> bool {
-        self.inner.same_node(x, y)
-    }
-
-    fn set_quirks_mode(&self, mode: QuirksMode) {
-        self.inner.set_quirks_mode(mode);
-    }
-
-    fn append_before_sibling(&self, sibling: &Self::Handle, new_node: NodeOrText<Self::Handle>) {
-        self.inner.append_before_sibling(sibling, new_node);
-    }
-
-    fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<Attribute>) {
-        self.inner.add_attrs_if_missing(target, attrs);
-    }
-
-    fn associate_with_form(
-        &self,
-        target: &Self::Handle,
-        form: &Self::Handle,
-        nodes: (&Self::Handle, Option<&Self::Handle>),
-    ) {
-        self.inner.associate_with_form(target, form, nodes);
-    }
-
-    fn remove_from_parent(&self, target: &Self::Handle) {
-        self.inner.remove_from_parent(target);
-    }
-
-    fn reparent_children(&self, node: &Self::Handle, new_parent: &Self::Handle) {
-        self.inner.reparent_children(node, new_parent);
-    }
-
-    fn is_mathml_annotation_xml_integration_point(&self, handle: &Self::Handle) -> bool {
-        self.annotation_points && self.points.borrow().contains(handle)
-    }
-
-    fn set_current_line(&self, line_number: u64) {
-        self.inner.set_current_line(line_number);
-    }
-
-    fn allow_declarative_shadow_roots(&self, intended_parent: &Self::Handle) -> bool {
-        self.inner.allow_declarative_shadow_roots(intended_parent)
-    }
-
-    fn attach_declarative_shadow(
-        &self,
-        location: &Self::Handle,
-        template: &Self::Handle,
-        attrs: &[Attribute],
-    ) -> bool {
-        self.inner
-            .attach_declarative_shadow(location, template, attrs)
-    }
-
-    fn maybe_clone_an_option_into_selectedcontent(&self, option: &Self::Handle) {
-        self.inner
-            .maybe_clone_an_option_into_selectedcontent(option);
     }
 }
 

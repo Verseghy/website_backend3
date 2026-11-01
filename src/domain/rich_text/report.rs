@@ -1,22 +1,26 @@
 //! The removal report: what the sanitiser removed or rewrote, counted per
 //! rule (editor.md §7.2).
 //!
-//! `validate_content` turns some of these counts into admin errors (an image
-//! whose source was dropped is `image_src_rejected`), the drift canary
-//! returns them when an admin write changed, and the importer and
-//! `content_normalize` record them (editor.md §7.6, §7.7).
+//! [`super::validate::validate_content`] turns some of these counts into
+//! admin errors (every `img` that the structural pass removed is one
+//! `image_src_rejected`, every `iframe` whose children it removed one
+//! `iframe_content`), the drift canary returns them when an admin write
+//! changed, and the importer and `content_normalize` record them (editor.md
+//! §7.6, §7.7).
 //!
 //! ammonia reports nothing about what it removes, and its own allow-list
 //! step runs before any callback of ours, so the report cannot be collected
 //! while ammonia runs. [`explain`] derives it instead: it parses the input
 //! exactly as ammonia does (the same html5ever, a fragment in a `div`
-//! context) and walks the tree with the same tables, the same namespace
-//! check, the same scheme check, the same filter and the same relative-URL
-//! rule, in ammonia's order. The sanitiser's proptests compare the report
-//! with ammonia's real output: the attribute entries of single elements,
-//! and, over nested trees with table cells, the removed and unwrapped
-//! elements, the comments and the rejected image sources. An ammonia upgrade
-//! that changes the order or the namespace lists fails them.
+//! context, and a tree that answers the parser's one tree-dependent
+//! question as ammonia's does, [`parse_like_ammonia`]) and walks the tree
+//! with the same tables, the same namespace check, the same scheme check,
+//! the same filter and the same relative-URL rule, in ammonia's order. The
+//! sanitiser's proptests compare the report with ammonia's real output: the
+//! attribute entries of single elements, and, over nested trees with table
+//! cells, the removed and unwrapped elements, the comments and the rejected
+//! image sources. An ammonia upgrade that changes the order or the namespace
+//! lists fails them.
 //!
 //! [`explain`] covers the ammonia step only. The structural pass (editor.md
 //! §7.5) runs on a tree this crate builds, so it records its own removals
@@ -30,11 +34,14 @@
 //! styles that ammonia appends nor the image style that the structural pass
 //! gives an `img` without one.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use html5ever::driver::{ParseOpts, parse_fragment};
-use html5ever::tendril::TendrilSink;
-use html5ever::{QualName, local_name, ns};
+use html5ever::interface::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
+use html5ever::tendril::{StrTendril, TendrilSink};
+use html5ever::{Attribute, QualName, local_name, ns};
 use scraper::{Html, HtmlTreeSink, Node};
 
 use super::attrs::{self, Decision};
@@ -244,19 +251,217 @@ pub const AMMONIA_FOREIGN_TAGS: &[&str] = &[
 ];
 
 /// Parses `input` the way ammonia 4.2.4 does (ammonia@4.2.4:src/lib.rs,
-/// `make_parser`): an HTML fragment in a `div` context, default options.
+/// `make_parser`): an HTML fragment in a `div` context, default options,
+/// into a tree that treats an HTML-encoded `annotation-xml` as an
+/// integration point, as ammonia's own tree does
+/// ([`IntegrationPointSink`]).
 ///
 /// - `input`: the HTML to parse.
 #[must_use]
 pub fn parse_like_ammonia(input: &str) -> Html {
     parse_fragment(
-        HtmlTreeSink::new(Html::new_fragment()),
+        IntegrationPointSink::new(true),
         ParseOpts::default(),
         QualName::new(None, ns!(html), local_name!("div")),
         Vec::new(),
         false,
     )
     .one(input)
+}
+
+/// scraper's tree sink, which can also answer the one question of the tree
+/// builder where scraper's tree and ammonia's differ: whether an
+/// `annotation-xml` element is an HTML integration point.
+///
+/// The tree builder asks the sink, because the answer depends on how the
+/// element was created: an `annotation-xml` whose `encoding` is `text/html`
+/// or `application/xhtml+xml` is one, and html5ever passes that in the
+/// creation flags. ammonia's tree keeps the flag and answers with it
+/// (ammonia@4.2.4:src/rcdom.rs, `is_mathml_annotation_xml_integration_point`);
+/// scraper's always answers no (`scraper@0.29.0:src/html/tree_sink.rs`). The
+/// trees then differ: `<math><annotation-xml encoding="text/html"><img>`
+/// keeps the `img` inside the `math` in ammonia's tree, which removes it
+/// with the `math`, while scraper's tree lets the `img` break out of the
+/// `math` and keeps it. A report from scraper's tree counted an
+/// `image_src_rejected` there for an image that ammonia never kept.
+///
+/// - With `like_ammonia` set, the sink answers as ammonia's tree does. Every
+///   parse outside the tests uses that, through [`parse_like_ammonia`]: the
+///   sanitiser's passes, the removal report, the structural pass, the
+///   validator and the search text.
+/// - Without it, the sink answers as scraper's own tree does. Only tests
+///   use that: the depth scan's oracle and its `tree_depth` check the scan
+///   against both trees, so the scan stays correct whichever tree a parse
+///   builds, and the test of this sink shows the two trees differ.
+///
+/// The created integration points are kept in a `BTreeSet`, so a body with
+/// many `annotation-xml` elements costs a logarithmic lookup per question,
+/// and no hash seed is read (ADR 0008 rule 1).
+pub(super) struct IntegrationPointSink {
+    inner: HtmlTreeSink,
+    /// Answer like ammonia's tree (`true`) or like scraper's (`false`).
+    like_ammonia: bool,
+    /// The elements created as HTML integration points.
+    points: RefCell<BTreeSet<<HtmlTreeSink as TreeSink>::Handle>>,
+}
+
+impl IntegrationPointSink {
+    /// A sink over a new scraper fragment.
+    ///
+    /// - `like_ammonia`: answer the integration-point question as ammonia's
+    ///   tree does (`true`) or as scraper's does (`false`).
+    pub(super) fn new(like_ammonia: bool) -> Self {
+        Self {
+            inner: HtmlTreeSink::new(Html::new_fragment()),
+            like_ammonia,
+            points: RefCell::new(BTreeSet::new()),
+        }
+    }
+}
+
+// Every method but `create_element` and
+// `is_mathml_annotation_xml_integration_point` forwards to scraper's sink.
+impl TreeSink for IntegrationPointSink {
+    type Handle = <HtmlTreeSink as TreeSink>::Handle;
+    type Output = Html;
+    type ElemName<'a>
+        = <HtmlTreeSink as TreeSink>::ElemName<'a>
+    where
+        Self: 'a;
+
+    fn finish(self) -> Html {
+        self.inner.finish()
+    }
+
+    fn parse_error(&self, message: Cow<'static, str>) {
+        self.inner.parse_error(message);
+    }
+
+    fn get_document(&self) -> Self::Handle {
+        self.inner.get_document()
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> Self::ElemName<'a> {
+        self.inner.elem_name(target)
+    }
+
+    fn create_element(
+        &self,
+        name: QualName,
+        attrs: Vec<Attribute>,
+        flags: ElementFlags,
+    ) -> Self::Handle {
+        let point = flags.mathml_annotation_xml_integration_point;
+        let handle = self.inner.create_element(name, attrs, flags);
+        if point {
+            self.points.borrow_mut().insert(handle);
+        }
+        handle
+    }
+
+    fn create_comment(&self, text: StrTendril) -> Self::Handle {
+        self.inner.create_comment(text)
+    }
+
+    fn create_pi(&self, target: StrTendril, data: StrTendril) -> Self::Handle {
+        self.inner.create_pi(target, data)
+    }
+
+    fn append(&self, parent: &Self::Handle, child: NodeOrText<Self::Handle>) {
+        self.inner.append(parent, child);
+    }
+
+    fn append_based_on_parent_node(
+        &self,
+        element: &Self::Handle,
+        prev_element: &Self::Handle,
+        child: NodeOrText<Self::Handle>,
+    ) {
+        self.inner
+            .append_based_on_parent_node(element, prev_element, child);
+    }
+
+    fn append_doctype_to_document(
+        &self,
+        name: StrTendril,
+        public_id: StrTendril,
+        system_id: StrTendril,
+    ) {
+        self.inner
+            .append_doctype_to_document(name, public_id, system_id);
+    }
+
+    fn mark_script_already_started(&self, node: &Self::Handle) {
+        self.inner.mark_script_already_started(node);
+    }
+
+    fn pop(&self, node: &Self::Handle) {
+        self.inner.pop(node);
+    }
+
+    fn get_template_contents(&self, target: &Self::Handle) -> Self::Handle {
+        self.inner.get_template_contents(target)
+    }
+
+    fn same_node(&self, x: &Self::Handle, y: &Self::Handle) -> bool {
+        self.inner.same_node(x, y)
+    }
+
+    fn set_quirks_mode(&self, mode: QuirksMode) {
+        self.inner.set_quirks_mode(mode);
+    }
+
+    fn append_before_sibling(&self, sibling: &Self::Handle, new_node: NodeOrText<Self::Handle>) {
+        self.inner.append_before_sibling(sibling, new_node);
+    }
+
+    fn add_attrs_if_missing(&self, target: &Self::Handle, attrs: Vec<Attribute>) {
+        self.inner.add_attrs_if_missing(target, attrs);
+    }
+
+    fn associate_with_form(
+        &self,
+        target: &Self::Handle,
+        form: &Self::Handle,
+        nodes: (&Self::Handle, Option<&Self::Handle>),
+    ) {
+        self.inner.associate_with_form(target, form, nodes);
+    }
+
+    fn remove_from_parent(&self, target: &Self::Handle) {
+        self.inner.remove_from_parent(target);
+    }
+
+    fn reparent_children(&self, node: &Self::Handle, new_parent: &Self::Handle) {
+        self.inner.reparent_children(node, new_parent);
+    }
+
+    fn is_mathml_annotation_xml_integration_point(&self, handle: &Self::Handle) -> bool {
+        self.like_ammonia && self.points.borrow().contains(handle)
+    }
+
+    fn set_current_line(&self, line_number: u64) {
+        self.inner.set_current_line(line_number);
+    }
+
+    fn allow_declarative_shadow_roots(&self, intended_parent: &Self::Handle) -> bool {
+        self.inner.allow_declarative_shadow_roots(intended_parent)
+    }
+
+    fn attach_declarative_shadow(
+        &self,
+        location: &Self::Handle,
+        template: &Self::Handle,
+        attrs: &[Attribute],
+    ) -> bool {
+        self.inner
+            .attach_declarative_shadow(location, template, attrs)
+    }
+
+    fn maybe_clone_an_option_into_selectedcontent(&self, option: &Self::Handle) {
+        self.inner
+            .maybe_clone_an_option_into_selectedcontent(option);
+    }
 }
 
 /// The removal report that sanitising `input` with ammonia under `policy`
@@ -281,7 +486,7 @@ pub fn explain(policy: &SanitizePolicy, input: &str) -> RemovalReport {
                 // every element the walk reaches is in the HTML namespace,
                 // which is the case where ammonia's namespace check reduces
                 // to the name list.
-                if REMOVED_WITH_CONTENT.contains(&name) || AMMONIA_FOREIGN_TAGS.contains(&name) {
+                if removed_with_content(name) {
                     report.record(RemovalRule::ElementRemoved, name, None);
                     continue;
                 }
@@ -295,6 +500,18 @@ pub fn explain(policy: &SanitizePolicy, input: &str) -> RemovalReport {
         }
     }
     report
+}
+
+/// Whether ammonia removes an HTML element named `name` together with its
+/// content: it is in `clean_content_tags` ([`REMOVED_WITH_CONTENT`]), or on
+/// ammonia's SVG and `MathML` name lists ([`AMMONIA_FOREIGN_TAGS`], editor.md
+/// §3.5). The removal report and the validator's walk of the input both skip
+/// such an element's subtree with this one test.
+///
+/// - `name`: the local name, as the HTML parser reports it.
+#[must_use]
+pub(super) fn removed_with_content(name: &str) -> bool {
+    REMOVED_WITH_CONTENT.contains(&name) || AMMONIA_FOREIGN_TAGS.contains(&name)
 }
 
 /// The removals among the attributes of one kept element, in ammonia's
@@ -356,26 +573,57 @@ fn explain_attributes<'a>(
                     .any(|allowed| allowed.to_lowercase() == value.to_lowercase()) =>
             {
                 record(RemovalRule::AttributeValueRejected);
-                continue;
             }
-            rule if rule.is_url() && !url_rules::scheme_admitted(value) => {
-                record(rejected_url);
-                continue;
-            }
-            _ => {}
+            rule if rule.is_url() => match url_outcome(policy, tag, name, value) {
+                None => record(rejected_url),
+                Some(kept) if kept != value => record(RemovalRule::ValueCanonicalised),
+                Some(_) => {}
+            },
+            _ => match attrs::decide(policy, tag, name, value) {
+                Decision::Drop(rule) => record(rule),
+                Decision::Keep(kept) if kept != value => record(RemovalRule::ValueCanonicalised),
+                Decision::Keep(_) => {}
+            },
         }
-        match attrs::decide(policy, tag, name, value) {
-            Decision::Drop(rule) => record(rule),
-            Decision::Keep(kept)
-                if attribute.rule.is_url()
-                    && url_rules::is_relative(&kept)
-                    && url_rules::same_origin_relative(&kept).is_none() =>
-            {
-                record(rejected_url);
-            }
-            Decision::Keep(kept) if kept != value => record(RemovalRule::ValueCanonicalised),
-            Decision::Keep(_) => {}
+    }
+}
+
+/// What ammonia, configured from `policy`, stores for the URL attribute
+/// `name` of the element `tag`: the value it writes, or `None` when one of
+/// its three steps removes the attribute. The steps run in ammonia's order:
+/// the scheme check of the allow-list, then the attribute filter
+/// ([`attrs::decide`], with the URL rules of editor.md §3.6), then the
+/// same-origin rule for a relative value ([`url_rules::same_origin_relative`]),
+/// which ammonia applies to the filter's output.
+///
+/// The removal report and [`super::validate::validate_content`] both decide
+/// image and embed sources here, so the index the validator gives a removed
+/// image cannot disagree with the report's count of removed images.
+///
+/// - `policy`: supplies the hosts and prefixes of the URL rules.
+/// - `tag`: the element, as the HTML parser reports it; its rule must list
+///   `name` as a URL attribute (`img[src]`, `iframe[src]`, `a[href]`).
+/// - `name`: the attribute name.
+/// - `value`: the value after character references are decoded.
+#[must_use]
+pub(super) fn url_outcome<'a>(
+    policy: &SanitizePolicy,
+    tag: &str,
+    name: &str,
+    value: &'a str,
+) -> Option<Cow<'a, str>> {
+    if !url_rules::scheme_admitted(value) {
+        return None;
+    }
+    match attrs::decide(policy, tag, name, value) {
+        Decision::Drop(_) => None,
+        Decision::Keep(kept)
+            if url_rules::is_relative(&kept)
+                && url_rules::same_origin_relative(&kept).is_none() =>
+        {
+            None
         }
+        Decision::Keep(kept) => Some(kept),
     }
 }
 
@@ -680,6 +928,102 @@ mod tests {
         assert_eq!(first.per_rule().values().sum::<usize>(), 4);
     }
 
+    /// The names of the root's children and grandchildren, as `parent/child`.
+    fn shape(html: &Html) -> Vec<String> {
+        html.root_element()
+            .descendants()
+            .filter_map(|node| {
+                let element = node.value().as_element()?;
+                let parent = node.parent()?.value().as_element()?;
+                Some(format!("{}/{}", parent.name(), element.name()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_html_annotation_is_an_integration_point_as_in_ammonia() {
+        let input = r#"<math><annotation-xml encoding="text/html"><img src="data:x" alt="a"><p>szöveg</p></annotation-xml></math>"#;
+        // ammonia's tree keeps the HTML inside the annotation ...
+        assert_eq!(
+            shape(&parse_like_ammonia(input)),
+            [
+                "html/math",
+                "math/annotation-xml",
+                "annotation-xml/img",
+                "annotation-xml/p"
+            ]
+        );
+        // ... where scraper's own tree lets it break out of the `math`.
+        let plain = parse_fragment(
+            IntegrationPointSink::new(false),
+            ParseOpts::default(),
+            QualName::new(None, ns!(html), local_name!("div")),
+            Vec::new(),
+            false,
+        )
+        .one(input);
+        assert_eq!(
+            shape(&plain),
+            ["html/math", "math/annotation-xml", "html/img", "html/p"]
+        );
+        // So the report names only the `math` that ammonia removed.
+        assert_eq!(
+            report(input)
+                .entries()
+                .map(|(r, n)| (r.clone(), n))
+                .collect::<Vec<_>>(),
+            [(entry(RemovalRule::ElementRemoved, "math", None), 1)]
+        );
+        // Without an HTML encoding the annotation is no integration point in
+        // either tree.
+        let xml = r#"<math><annotation-xml encoding="application/mathml+xml"><img src="data:x"></annotation-xml></math>"#;
+        assert_eq!(report(xml).count(RemovalRule::ImageSrcRejected), 1);
+    }
+
+    #[test]
+    fn removed_with_content_covers_both_lists() {
+        for name in REMOVED_WITH_CONTENT.iter().chain(AMMONIA_FOREIGN_TAGS) {
+            assert!(removed_with_content(name), "{name}");
+        }
+        for element in ELEMENTS {
+            assert!(!removed_with_content(element.name), "{}", element.name);
+        }
+        assert!(!removed_with_content("div"));
+        assert!(!removed_with_content("clipPath"));
+    }
+
+    #[test]
+    fn url_outcomes_follow_ammonias_three_steps() {
+        let policy = SanitizePolicy::content_v1();
+        let outcome =
+            |tag, value| url_outcome(&policy, tag, if tag == "a" { "href" } else { "src" }, value);
+        // The scheme check of the allow-list.
+        assert_eq!(outcome("img", "data:image/png;base64,AA"), None);
+        assert_eq!(outcome("a", "javascript:alert(1)"), None);
+        // The filter, which also rewrites own-host image URLs.
+        assert_eq!(outcome("img", "https://evil.example/a.jpg"), None);
+        assert_eq!(
+            outcome(
+                "img",
+                "https://verseghy-gimnazium.net/storage/uploads/a.png"
+            )
+            .as_deref(),
+            Some("/storage/uploads/a.png")
+        );
+        assert_eq!(outcome("iframe", "https://evil.example/embed/x"), None);
+        assert_eq!(
+            outcome("iframe", "https://padlet.com/embed/k").as_deref(),
+            Some("https://padlet.com/embed/k")
+        );
+        // The same-origin rule for what stays relative.
+        assert_eq!(outcome("a", "//evil.example/x"), None);
+        assert_eq!(outcome("a", "#top").as_deref(), Some("#top"));
+        assert_eq!(
+            outcome("img", "/storage/uploads/a.jpg").as_deref(),
+            Some("/storage/uploads/a.jpg")
+        );
+    }
+
     #[test]
     fn the_walk_survives_deep_nesting() {
         let deep = "<div>".repeat(5_000);
@@ -690,6 +1034,19 @@ mod tests {
         #[test]
         fn explain_never_panics(input in any::<String>()) {
             let _ = report(&input);
+        }
+
+        // `url_outcome` itself is checked against ammonia's real output, in
+        // the sanitiser's tests (`url_outcome_matches_ammonia`): the report
+        // decides URL attributes with it, so comparing the two here would
+        // compare the function with itself.
+
+        #[test]
+        fn removed_with_content_is_the_union_of_the_lists(name in "[a-z-]{1,14}") {
+            prop_assert_eq!(
+                removed_with_content(&name),
+                REMOVED_WITH_CONTENT.contains(&name.as_str()) || AMMONIA_FOREIGN_TAGS.contains(&name.as_str())
+            );
         }
 
         // Text without markup, references, CR or NUL is one text node, kept

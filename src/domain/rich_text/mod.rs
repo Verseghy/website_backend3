@@ -23,8 +23,10 @@
 //! This module holds the policy tables, the URL rules, the attribute filter,
 //! the per-element CSS grammar with the canonical style string of §3.1 and
 //! the cases of `css-vectors.jsonl` ([`css`]), the ammonia builder, the
-//! structural pass with its tree-level style rules, the depth scan and the
-//! removal report.
+//! structural pass with its tree-level style rules, the depth scan, the
+//! removal report, the checks of an admin write ([`validate`], editor.md
+//! §7.6) and the plain-text copy that search matches against
+//! ([`search_text`], ADR 0020 §2).
 //!
 //! Like everything under `src/domain/`, the module is pure (ADR 0008): the
 //! policy comes in as an argument, built once at boot from the settings.
@@ -48,10 +50,14 @@ pub mod depth;
 pub mod policy;
 pub mod report;
 pub mod sanitize;
+pub mod search_text;
 pub mod structure;
 pub mod url_rules;
+pub mod validate;
 
 pub use policy::{POLICY_VERSION, PolicyError, SanitizePolicy};
 pub use report::{Removal, RemovalReport, RemovalRule};
 pub use sanitize::{MAX_PASSES, SanitizeError, Sanitized, SanitizedHtml, Sanitizer};
+pub use search_text::html_to_search_text;
 pub use structure::Violation;
+pub use validate::{ContentError, Measured, refusal, validate_content};

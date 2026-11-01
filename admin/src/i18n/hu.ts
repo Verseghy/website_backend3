@@ -26,6 +26,9 @@
  *   restoring from the trash, so "reset" is „alaphelyzetbe állítás”.
  * - Variables: only those ra-core and the kit pass (`%{name}`, `%{smart_count}`
  *   …). A test rejects placeholders that the English string does not have.
+ *   An `errors.*` message uses only the names the server sends with its code:
+ *   the envelope's `params`, or the `index` and `detail` of a rich-text
+ *   finding (`ContentError`); `hu.test.ts` lists them per code.
  *
  * Namespaces (ADR 0021 §2, amended by ADR 0030): `ra.*` holds exactly the
  * keys of `ra-language-english` plus the three kit-only keys; `kit.*` holds the
@@ -375,8 +378,33 @@ export const hu = {
   errors: {
     not_found: "A keresett elem nem található.",
     invalid_credentials: "Hibás e-mail-cím vagy jelszó.",
-    invalid_body: "A kérés formátuma hibás. Frissítsd az oldalt, és próbáld újra!",
+    invalid_body:
+      "A kérés formátuma hibás. Frissítsd az oldalt, és próbáld újra!",
     body_too_large: "Az elküldött adat túl nagy.",
+    // A refused rich-text body (editor.md §7.6). Each finding is a
+    // `ContentError` ({code, index, detail}); the editor fills these with its
+    // `index` (the image's or embed's position) and its `detail` values.
+    // - The four image and embed messages need `index`. It is null only for
+    //   a finding the server could not trace back to the body, which cannot
+    //   happen by construction; the editor then shows the finding without a
+    //   position instead of filling these with a null `index`.
+    // - `content_too_large` gets `actual` and `limit` in bytes, which the
+    //   editor fills in as sizes („2 MB”, ADR 0021 §5), so the message has no
+    //   unit of its own. Both numbers measure the same thing (`measured`:
+    //   the submitted body, or what the sanitiser wrote from it), so the
+    //   message never sets a limit against a size it does not apply to.
+    image_alt_missing: "A(z) %{index}. képnek nincs alternatív szövege.",
+    image_src_rejected:
+      "A(z) %{index}. kép forrása nem engedélyezett. Képet a Kép gombbal tölthetsz fel, vagy választhatsz a médiatárból.",
+    embed_rejected:
+      "A(z) %{index}. beágyazás nem engedélyezett: csak YouTube- és Padlet-beágyazás használható.",
+    iframe_content: "A(z) %{index}. beágyazás nem tartalmazhat szöveget.",
+    content_too_large:
+      "A tartalom túl nagy (%{actual}): legfeljebb %{limit} lehet.",
+    content_too_deep:
+      "A tartalomban túl mélyen vannak egymásba ágyazva az elemek (%{line}. sor): legfeljebb %{limit} szint lehet.",
+    content_not_normalisable:
+      "A szerver nem tudta egységes formára hozni a tartalmat. Kérlek, jelezd ezt a hibát a honlap üzemeltetőjének!",
   } satisfies Record<ErrorCode, string>,
 } as const satisfies MessageTree
 

@@ -13,7 +13,12 @@
 //! unknown `/api/admin` paths, `invalid_credentials` for every failed
 //! sign-in (ADR 0006 §4), and `invalid_body` and `body_too_large` for a
 //! request body that cannot be read as the endpoint's JSON DTO (the
-//! maintainer's answer of 2026-10-25, research: DECISIONS R15 (D74)).
+//! maintainer's answer of 2026-10-25, research: DECISIONS R15 (D74)). The
+//! seven codes of a refused rich-text body (editor.md §7.6) came with the
+//! validator that finds them, `domain::rich_text::validate_content`, before
+//! the post and page writes that answer them: each finding is a
+//! [`super::content::ContentError`], `{code, index, detail}`, and the codes
+//! needed their Hungarian messages first.
 
 use std::collections::BTreeMap;
 
@@ -46,6 +51,24 @@ pub enum ErrorCode {
     InvalidBody,
     /// `413`: the request body is larger than the request body limit.
     BodyTooLarge,
+    /// `422`: an image of a rich-text body has no alt text, or only white
+    /// space (ADR 0013 §2).
+    ImageAltMissing,
+    /// `422`: the sanitiser removed an image of a rich-text body, because
+    /// its source is not an uploaded image (editor.md §3.6) or it had none.
+    ImageSrcRejected,
+    /// `422`: an embed of a rich-text body is not a `YouTube` or Padlet embed.
+    EmbedRejected,
+    /// `422`: an embed of a rich-text body holds content.
+    IframeContent,
+    /// `422`: a rich-text body, or the sanitiser's output for it, is larger
+    /// than its limit.
+    ContentTooLarge,
+    /// `422`: a rich-text body nests elements deeper than the limit.
+    ContentTooDeep,
+    /// `422`: the sanitiser could not bring a rich-text body to a fixed
+    /// point; the server logs it as an error.
+    ContentNotNormalisable,
 }
 
 impl ErrorCode {
@@ -55,13 +78,23 @@ impl ErrorCode {
         match self {
             Self::NotFound => 404,
             Self::InvalidCredentials => 401,
-            // ADR 0021 §4's row for submitted values that fail validation.
-            // A body that is not the DTO's JSON is read as such a value
-            // (research: DECISIONS R15 (D74)).
-            Self::InvalidBody => 422,
             // ADR 0021 §4 has no row for it; 413 with the JSON envelope
             // follows ADR 0015 §6, whose upload limit answers it (D74).
             Self::BodyTooLarge => 413,
+            // ADR 0021 §4's row for submitted values that fail validation.
+            // A body that is not the DTO's JSON is read as such a value
+            // (research: DECISIONS R15 (D74)). The size and depth limits of
+            // a rich-text body are content rules, checked after the request
+            // body limit let the request in, so they are 422 like the other
+            // findings of a body (editor.md §7.6), not 413.
+            Self::InvalidBody
+            | Self::ImageAltMissing
+            | Self::ImageSrcRejected
+            | Self::EmbedRejected
+            | Self::IframeContent
+            | Self::ContentTooLarge
+            | Self::ContentTooDeep
+            | Self::ContentNotNormalisable => 422,
         }
     }
 
@@ -75,6 +108,15 @@ impl ErrorCode {
             Self::InvalidCredentials => "The e-mail address or the password is wrong",
             Self::InvalidBody => "The request body is not the JSON this endpoint takes",
             Self::BodyTooLarge => "The request body is larger than the limit",
+            Self::ImageAltMissing => "An image has no alt text",
+            Self::ImageSrcRejected => {
+                "An image has no source that is an uploaded image under the upload prefix"
+            }
+            Self::EmbedRejected => "An embed is not a YouTube or Padlet embed",
+            Self::IframeContent => "An embed holds content",
+            Self::ContentTooLarge => "The content is larger than the limit",
+            Self::ContentTooDeep => "The content nests elements deeper than the limit",
+            Self::ContentNotNormalisable => "The content did not reach a fixed point",
         }
     }
 }
@@ -164,6 +206,17 @@ mod tests {
             (ErrorCode::InvalidCredentials, 401, "invalid_credentials"),
             (ErrorCode::InvalidBody, 422, "invalid_body"),
             (ErrorCode::BodyTooLarge, 413, "body_too_large"),
+            (ErrorCode::ImageAltMissing, 422, "image_alt_missing"),
+            (ErrorCode::ImageSrcRejected, 422, "image_src_rejected"),
+            (ErrorCode::EmbedRejected, 422, "embed_rejected"),
+            (ErrorCode::IframeContent, 422, "iframe_content"),
+            (ErrorCode::ContentTooLarge, 422, "content_too_large"),
+            (ErrorCode::ContentTooDeep, 422, "content_too_deep"),
+            (
+                ErrorCode::ContentNotNormalisable,
+                422,
+                "content_not_normalisable",
+            ),
         ] {
             assert_eq!(code.status(), status, "{code:?}");
             assert_eq!(serde_json::to_value(code).expect("serializes"), json!(wire));
@@ -196,7 +249,7 @@ mod tests {
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");

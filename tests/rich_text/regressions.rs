@@ -30,7 +30,7 @@ fn fixtures_dir() -> PathBuf {
 
 /// Every fixture as `name -> (input, expected output)`. A missing half of a
 /// pair is an error, so a fixture cannot silently stop being checked.
-fn fixtures() -> BTreeMap<String, (String, String)> {
+pub(super) fn fixtures() -> BTreeMap<String, (String, String)> {
     let dir = fixtures_dir();
     let mut inputs = BTreeMap::new();
     let mut outputs = BTreeMap::new();
