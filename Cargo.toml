@@ -336,7 +336,7 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 # schema uses. MIT, like most of the 21 crates it adds to Cargo.lock; each
 # has a licence that deny.toml allows. Test-only: none of it is built into
 # backend3-cli or the image.
-jsonschema = { version = "0.60", default-features = false }
+jsonschema = { version = "0.61", default-features = false }
 
 [package]
 name = "backend3"
