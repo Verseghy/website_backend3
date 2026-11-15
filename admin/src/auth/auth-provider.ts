@@ -49,6 +49,25 @@
  *   session that has ended meets its `401` on the next real request, where
  *   `checkError` handles it. It gives up on an answer that has not come
  *   after {@link REFRESH_TIMEOUT_MS}, so the tracker can call again.
+ * - `canAccess` answers from the last `/auth/me` answer, without a request
+ *   of its own (ADR 0007 §7): `checkAuth` reads `/auth/me` before ra-core
+ *   renders a page, and the provider keeps that answer. Only when it holds
+ *   none yet does `canAccess` read it, once for all the questions that wait.
+ *   The answer is `decideAccess` (`./access.ts`): the access map the server
+ *   computed, and the record-level rules that the admin mirrors.
+ * - A `403` refetches `/auth/me` (ADR 0007 §7): the server refused although
+ *   the access map allowed the call, which happens when the account's roles
+ *   or grants changed since the last answer, for example from another
+ *   session. The refetch is a read sent after the refusal, never one that
+ *   was already in flight and may carry the old access (`refetchMe`).
+ *   `checkError` then keeps the user signed in, and when the new
+ *   answer differs, {@link AuthProviderOptions.onAccessChange} lets ra-core
+ *   ask its cached access questions again, so the sidebar and the screens
+ *   follow at once. The refused call's own notification shows the Hungarian
+ *   message (`refusalError`, `src/api/error-envelope.ts`). Only a `401`,
+ *   from the call or from that refetch, signs the user out.
+ * - The kept answer belongs to one session: a sign-in, a sign-out and a
+ *   `401` drop it, so the next account never sees the previous one's access.
  *
  * Configuration arrives as explicit options ({@link AuthProviderOptions}),
  * the `fetch` function included, so tests drive the provider against a stub
@@ -69,7 +88,8 @@ import type { LoginStep } from "@/bindings/LoginStep"
 import type { MeResponse } from "@/bindings/MeResponse"
 import type { MessageKey } from "@/i18n/keys"
 
-import { readPermissions, readRoles } from "./authz"
+import { decideAccess } from "./access"
+import { readAccess, readPermissions, readRoles } from "./authz"
 
 /** The sign-in endpoint, relative to the API base path. */
 export const LOGIN_PATH = "/auth/login"
@@ -142,6 +162,15 @@ export interface AuthProviderOptions {
    * otherwise.
    */
   readonly refreshTimeoutMs?: number
+  /**
+   * Called after a `/auth/me` answer changed what the signed-in account
+   * may do (its access map, permissions, admin flag or scope), so that the
+   * answers ra-core cached for `canAccess` are asked again. `main.tsx`
+   * passes `invalidateAccessChecks` (`./access-checks.ts`) over the query
+   * client it gives `<Admin>`; without it, ra-core re-asks only when a
+   * component mounts again. Never called for the first answer of a session.
+   */
+  readonly onAccessChange?: () => void
 }
 
 /**
@@ -344,12 +373,13 @@ export function parseLoginResponse(body: unknown): LoginResponse | undefined {
  * Reads a `200` answer of `/auth/me`.
  *
  * @param body - the parsed JSON body.
- * @returns the account with its roles, effective permissions and admin flag
- *   (ADR 0007 §7), or `undefined` when the body is not a `MeResponse`: a
- *   member is missing or of the wrong type, or a role or permission is one
- *   this build does not know (`./authz.ts`). The server and this build ship
- *   together in one image, so an unknown value means a broken build, and the
- *   provider treats the answer as a server failure rather than guess.
+ * @returns the account with its roles, effective permissions, admin flag and
+ *   access map (ADR 0007 §7), or `undefined` when the body is not a
+ *   `MeResponse`: a member is missing or of the wrong type, or a role,
+ *   permission or action is one this build does not know (`./authz.ts`).
+ *   The server and this build ship together in one image, so an unknown
+ *   value means a broken build, and the provider treats the answer as a
+ *   server failure rather than guess.
  */
 export function parseMeResponse(body: unknown): MeResponse | undefined {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -359,6 +389,7 @@ export function parseMeResponse(body: unknown): MeResponse | undefined {
   const { pid, name, email, scope, is_admin } = member
   const roles = readRoles(member.roles)
   const permissions = readPermissions(member.permissions)
+  const access = readAccess(member.access)
   if (
     typeof pid !== "string" ||
     pid === "" ||
@@ -367,11 +398,27 @@ export function parseMeResponse(body: unknown): MeResponse | undefined {
     (scope !== "admin" && scope !== "password_change") ||
     roles === undefined ||
     permissions === undefined ||
-    typeof is_admin !== "boolean"
+    typeof is_admin !== "boolean" ||
+    access === undefined
   ) {
     return undefined
   }
-  return { pid, name, email, scope, roles, permissions, is_admin }
+  return { pid, name, email, scope, roles, permissions, is_admin, access }
+}
+
+/**
+ * Whether two `/auth/me` answers let the account do the same things.
+ *
+ * @param before - the answer the provider held.
+ * @param after - the answer that replaces it.
+ * @returns `true` when the account, the scope, the permissions, the admin
+ *   flag and the access map are the same. The server sends each list and
+ *   each map in one fixed order, so comparing their JSON is exact.
+ */
+export function sameAccess(before: MeResponse, after: MeResponse): boolean {
+  const facts = (me: MeResponse) =>
+    JSON.stringify([me.pid, me.scope, me.is_admin, me.permissions, me.access])
+  return facts(before) === facts(after)
 }
 
 /**
@@ -438,13 +485,13 @@ async function readJson(response: Response): Promise<unknown> {
 /**
  * Builds backend3's auth provider.
  *
- * @param options - the API base path, the `fetch` to use and the refresh's
- *   timeout; see {@link AuthProviderOptions}.
+ * @param options - the API base path, the `fetch` to use, the refresh's
+ *   timeout and the access-change callback; see {@link AuthProviderOptions}.
  * @returns an ra-core `AuthProvider` with `login`, `logout`, `checkAuth`,
- *   `checkError` and `getIdentity`, and backend3's `refreshSession`. It has
- *   no `getPermissions` or `canAccess` yet: the admin API decides every
- *   permission itself (ADR 0007), and the gated navigation comes with the
- *   authorization slices.
+ *   `checkError`, `getIdentity` and `canAccess`, and backend3's
+ *   `refreshSession`. It has no `getPermissions`: the access map of
+ *   `/auth/me` answers every access question, and the admin API decides
+ *   every request itself (ADR 0007).
  * @throws {AuthProviderConfigError} when the options are invalid.
  */
 export function createAuthProvider(
@@ -465,7 +512,39 @@ export function createAuthProvider(
       `refreshTimeoutMs must be a finite number of milliseconds, at least 1; got ${String(refreshTimeoutMs)}. The admin uses REFRESH_TIMEOUT_MS (30 seconds).`
     )
   }
-  const { apiBaseUrl, fetch } = options
+  if (
+    options.onAccessChange !== undefined &&
+    typeof options.onAccessChange !== "function"
+  ) {
+    throw new AuthProviderConfigError(
+      "onAccessChange must be a function or left out; main.tsx passes one that invalidates ra-core's cached canAccess answers."
+    )
+  }
+  const { apiBaseUrl, fetch, onAccessChange } = options
+
+  /** The last `/auth/me` answer of this session, or `undefined`. */
+  let current: MeResponse | undefined
+  /** The `/auth/me` read in flight, which every caller shares. */
+  let reading: Promise<MeResponse> | undefined
+  /**
+   * The refetch that waits for the read in flight to settle before it
+   * sends its own: what a `403` asks for while a read is already on its
+   * way ({@link refetchMe}). Every refusal that arrives meanwhile shares it.
+   */
+  let queued: Promise<void> | undefined
+  /**
+   * Counts the sign-ins and sign-outs, so a read that was sent before one
+   * of them never stores its answer after it.
+   */
+  let generation = 0
+
+  /** Drops the kept answer: the session it belonged to is over. */
+  const forget = () => {
+    generation += 1
+    current = undefined
+    reading = undefined
+    queued = undefined
+  }
 
   /**
    * Asks `/auth/me` for the signed-in account.
@@ -474,7 +553,7 @@ export function createAuthProvider(
    * @throws {SessionCheckError} with `ra.auth.auth_check_error` for a `401`
    *   and `ra.notification.http_error` for any other failure.
    */
-  const readMe = async (): Promise<MeResponse> => {
+  const askMe = async (): Promise<MeResponse> => {
     let response: Response
     try {
       response = await fetch(`${apiBaseUrl}${ME_PATH}`, {
@@ -495,6 +574,89 @@ export function createAuthProvider(
       throw new SessionCheckError(response.status, CHECK_FAILED_KEY)
     }
     return me
+  }
+
+  /**
+   * Reads `/auth/me` and keeps the answer; callers that ask while a read is
+   * in flight share it. A `401` drops the kept answer; any other failure
+   * leaves it, since the session may still hold. When the new answer lets
+   * the account do something else than the kept one, `onAccessChange` runs.
+   *
+   * @returns the account.
+   * @throws {SessionCheckError} as {@link askMe} does.
+   */
+  const readMe = (): Promise<MeResponse> => {
+    if (reading !== undefined) {
+      return reading
+    }
+    const sentIn = generation
+    const read = askMe().then(
+      (me) => {
+        if (sentIn === generation) {
+          const before = current
+          current = me
+          if (before !== undefined && !sameAccess(before, me)) {
+            onAccessChange?.()
+          }
+        }
+        return me
+      },
+      (error: unknown) => {
+        if (
+          sentIn === generation &&
+          error instanceof SessionCheckError &&
+          error.status === 401
+        ) {
+          current = undefined
+        }
+        throw error
+      }
+    )
+    const shared = read.finally(() => {
+      if (reading === shared) {
+        reading = undefined
+      }
+    })
+    reading = shared
+    return shared
+  }
+
+  /**
+   * Reads `/auth/me` with a request sent after this call, for a `403`: the
+   * server refused although the kept answer allowed the call, so only an
+   * answer that the server wrote after the refusal can say what changed.
+   *
+   * A read in flight was sent before the refusal (as far as the provider
+   * can tell) and may carry the old access, so the refetch is not that
+   * read: it waits for it to settle and then reads again ({@link readMe},
+   * which a read started meanwhile serves, since that one was sent after
+   * the refusal too). Refusals that arrive while such a refetch waits share
+   * it, so a burst of `403`s sends one more read, not one each. A sign-in
+   * or sign-out while it waits cancels it: that session's access is no
+   * longer the question.
+   *
+   * @returns a promise that settles when the new answer is kept.
+   * @throws {SessionCheckError} as {@link askMe} does.
+   */
+  const refetchMe = (): Promise<void> => {
+    if (reading === undefined) {
+      return readMe().then(() => undefined)
+    }
+    if (queued !== undefined) {
+      return queued
+    }
+    const queuedIn = generation
+    const ignore = () => undefined
+    const next: Promise<void> = reading.then(ignore, ignore).then(async () => {
+      if (queued === next) {
+        queued = undefined
+      }
+      if (queuedIn === generation) {
+        await readMe()
+      }
+    })
+    queued = next
+    return next
   }
 
   return {
@@ -528,6 +690,9 @@ export function createAuthProvider(
       if (parseLoginResponse(answer)?.step !== "done") {
         throw new SignInError(response.status, keyMessage(SIGN_IN_FAILED_KEY))
       }
+      // A new session, perhaps of another account: nothing kept from before
+      // may answer for it. The next checkAuth reads its /auth/me.
+      forget()
       // Resolving without `redirectTo` lets ra-core go back to the page that
       // sent the user here, or to the dashboard.
       return undefined
@@ -535,8 +700,9 @@ export function createAuthProvider(
 
     async logout(params: unknown) {
       // ra-core's own calls come after it found no session: nothing to end
-      // on the server (see the module documentation).
+      // on the server (see the module documentation), and nothing to keep.
       if (!isSignOutRequest(params)) {
+        forget()
         return undefined
       }
       let response: Response
@@ -553,6 +719,7 @@ export function createAuthProvider(
       // 401: there was no session left to end. Either way the user is
       // signed out, and ra-core shows the sign-in page.
       if (response.status === 204 || response.status === 401) {
+        forget()
         return undefined
       }
       // Anything else, a 2xx other than 204 included, is not the server's
@@ -568,8 +735,25 @@ export function createAuthProvider(
     },
 
     async checkError(error: unknown) {
-      if (errorStatus(error) === 401) {
+      const status = errorStatus(error)
+      if (status === 401) {
         throw new SessionCheckError(401, SESSION_ENDED_KEY)
+      }
+      if (status === 403) {
+        // The access map allowed a call that the server refused: the
+        // account's roles or grants may have changed (ADR 0007 §7). Ask
+        // again, with a read sent after the refusal; readMe tells ra-core
+        // to re-ask its access questions when the answer changed.
+        try {
+          await refetchMe()
+        } catch (failure) {
+          // The session ended in between: that, not the 403, signs out.
+          if (failure instanceof SessionCheckError && failure.status === 401) {
+            throw new SessionCheckError(401, SESSION_ENDED_KEY)
+          }
+          // Any other failure keeps the session and the kept answer; the
+          // next checkAuth asks again.
+        }
       }
       // Every other error, 403 included, leaves the session alone: the
       // screen shows it, and the user stays signed in.
@@ -596,6 +780,27 @@ export function createAuthProvider(
         return "failed"
       }
       return refreshOutcome(response.status)
+    },
+
+    async canAccess(params: {
+      action: string
+      resource: string
+      record?: unknown
+    }) {
+      // The kept answer when there is one: no request per question
+      // (ADR 0007 §7). Before the first one, every waiting question shares
+      // one read. Its failure rejects, and ra-core then hides what it asked
+      // about (useCanAccess) or, for a page (useRequireAccess), sends the
+      // user to /authentication-error, never to a screen it could not
+      // check; a plain "no" sends a page to /access-denied. App.tsx gives
+      // both routes backend3's Hungarian pages (ra-core renders nothing
+      // there by default).
+      const me = current ?? (await readMe())
+      return decideAccess(me, {
+        action: params.action,
+        resource: params.resource,
+        record: params.record,
+      })
     },
   }
 }

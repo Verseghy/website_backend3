@@ -36,6 +36,7 @@ const ME: MeResponse = {
   roles: ["writer"],
   permissions: ["edit posts", "edit labels", "edit authors", "manage media"],
   is_admin: false,
+  access: {},
 }
 
 /**

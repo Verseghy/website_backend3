@@ -21,7 +21,8 @@
 //! `auth/me` answers the account of the request's admin session
 //! ([`super::session::AdminSession`]) as a [`MeResponse`], with the roles,
 //! effective permissions and admin flag that the session read for the
-//! request (ADR 0007 §7). It is one of the
+//! request, and the access map computed from them, from which the admin's
+//! `authProvider.canAccess` answers (ADR 0007 §7). It is one of the
 //! three routes that a `password_change` session may reach (ADR 0006 §4), so
 //! the admin UI can tell such a session to set a new password. Without a
 //! valid session it answers `401 unauthorized`.
@@ -106,6 +107,7 @@ use super::{
 use crate::{
     app::clock,
     domain::{
+        authz::RESOURCE_ACCESS,
         session::explicit_renewal,
         session_cookie::{cleared_session_cookie, session_cookie},
     },
@@ -227,8 +229,8 @@ async fn refuse_known_account(
 }
 
 /// `GET /api/admin/auth/me`: the account of the request's admin session, the
-/// session's scope, and the account's roles, effective permissions and admin
-/// flag (ADR 0007 §7).
+/// session's scope, and the account's roles, effective permissions, admin
+/// flag and access map (ADR 0007 §7).
 ///
 /// - `session`: the checked admin session; an `admin` or a `password_change`
 ///   one (ADR 0006 §4). Without one the route table's guard has already
@@ -256,6 +258,7 @@ pub async fn me(session: AdminSession<AdminOrPasswordChange>) -> Result<Response
         user.email,
         session.scope,
         &session.grants,
+        RESOURCE_ACCESS,
     )
     .map_err(Error::wrap)?;
     format::json(me)

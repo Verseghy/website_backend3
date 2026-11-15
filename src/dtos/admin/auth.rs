@@ -9,7 +9,7 @@
 //! what the session may do; it never carries a secret column of the account
 //! (ADR 0005, ADR 0011 §4).
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use loco_rs::prelude::Uuid;
 use serde::{
@@ -21,8 +21,11 @@ use ts_rs::TS;
 // The domain's scope and grants only: DTOs depend on `domain/` and on no
 // model (ADR 0008, "Allowed dependencies"). The handler takes the account's
 // columns apart and passes them in.
-use super::authz::{Permission, Role};
-use crate::domain::{authz::AccountGrants, session};
+use super::authz::{AccessAction, Permission, Role};
+use crate::domain::{
+    authz::{AccessMap, AccountGrants, ResourceAccess, session_access_map},
+    session,
+};
 
 /// The body of a browser sign-in: the account's e-mail address and password.
 ///
@@ -141,8 +144,7 @@ pub enum SessionScope {
 /// signed in, to send a `password_change` session to the password form, and
 /// to hide what the account may not use. The server decides every access
 /// itself; these fields only spare the UI a refused request (ADR 0007 §7).
-// Exported doc comment above. ADR 0007 §7 also lists the access map, which
-// the access-map slice adds here.
+// Exported doc comment above.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../admin/src/bindings/")]
 pub struct MeResponse {
@@ -165,6 +167,12 @@ pub struct MeResponse {
     /// accounts and figures about individual people (ADR 0007 §2). All
     /// sixteen permissions as extra grants still make no admin.
     pub is_admin: bool,
+    /// What this session may do on each ra-core resource: the resource
+    /// name, and the actions in the order of `AccessAction`. A resource on
+    /// which the session may do nothing is left out, and a
+    /// `password_change` session, which reaches no resource, gets `{}`.
+    /// `authProvider.canAccess` answers from it without asking the server.
+    pub access: BTreeMap<String, Vec<AccessAction>>,
 }
 
 /// Why a [`MeResponse`] could not be built. Either one is a defect, never a
@@ -220,13 +228,24 @@ impl MeResponse {
     /// - `scope`: the session's scope, which the route accepted.
     /// - `grants`: the account's roles and extra grants, as the session
     ///   extractor read them for this request; the answer carries the roles,
-    ///   the effective permissions and the admin flag computed from them.
+    ///   the effective permissions, the admin flag and the access map
+    ///   computed from them.
+    /// - `table`: the access table the map is computed from:
+    ///   `domain::authz::RESOURCE_ACCESS` in the application (the `auth/me`
+    ///   handler passes it), a probe table in the tests.
     ///
     /// It takes these values, never the account's row, so nothing else can
     /// go out: not the password hash, the TOTP secret or the database id
     /// (ADR 0005, ADR 0011 §4). The extra grants are not sent apart from the
     /// effective set: the admin needs what the account may do, not where
     /// each permission came from.
+    ///
+    /// The access map is [`session_access_map`]'s: the account's map over
+    /// `table` for an `admin` session, and an empty one for a
+    /// `password_change` session, which the route table opens only to the
+    /// three own-account routes of ADR 0006 §4, so that every resource
+    /// route answers it `401` and a sidebar entry there would sign the user
+    /// out instead of opening a screen.
     ///
     /// # Errors
     ///
@@ -239,11 +258,14 @@ impl MeResponse {
         email: Option<String>,
         scope: session::SessionScope,
         grants: &AccountGrants,
+        table: &[ResourceAccess],
     ) -> Result<Self, MeResponseError> {
+        let access = wire_access_map(session_access_map(scope, table, grants));
         let scope = SessionScope::try_from(scope)?;
         let email = email.ok_or(MeResponseError::NoEmail)?;
         // Both sets are ordered by the domain enums' declaration order, so
-        // the lists come out in id order and in ADR 0007 §1 order.
+        // the lists come out in id order and in ADR 0007 §1 order, and the
+        // access map's actions in `AccessAction` order.
         Ok(Self {
             pid: pid.to_string(),
             name,
@@ -256,8 +278,24 @@ impl MeResponse {
                 .map(Permission::from)
                 .collect(),
             is_admin: grants.is_admin(),
+            access,
         })
     }
+}
+
+/// The wire form of a domain access map: the same resources, each with its
+/// actions in `AccessAction` order.
+///
+/// - `map`: the map that [`session_access_map`] computed.
+fn wire_access_map(map: AccessMap) -> BTreeMap<String, Vec<AccessAction>> {
+    map.into_iter()
+        .map(|(resource, actions)| {
+            (
+                resource.to_owned(),
+                actions.into_iter().map(AccessAction::from).collect(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -384,8 +422,31 @@ mod tests {
         me_holding(email, scope, &AccountGrants::default())
     }
 
+    /// A probe access table in the shape of ADR 0007 §4, so that the access
+    /// map's tests here can fail while the application's table is still
+    /// empty: a list for `edit posts`, a publish that also needs `publish
+    /// posts`, and a purge for the `admin` role. Invented names: no resource
+    /// slice owns them. Every action needs something, so an account with no
+    /// role and no grant gets `{}`.
+    const PROBE_ACCESS: &[ResourceAccess] = {
+        use crate::domain::authz::{
+            AccessAction as A, ActionRule, Permission as P, Requirement as Q,
+        };
+        &[ResourceAccess {
+            resource: "probe-posts",
+            rules: &[
+                ActionRule::new(A::List, &[Q::Permission(P::EditPosts)]),
+                ActionRule::new(
+                    A::Publish,
+                    &[Q::Permission(P::EditPosts), Q::Permission(P::PublishPosts)],
+                ),
+                ActionRule::new(A::Purge, &[Q::AdminRole]),
+            ],
+        }]
+    };
+
     /// [`MeResponse::new`] for the invented account with `email`, `scope`
-    /// and `grants`.
+    /// and `grants`, over [`PROBE_ACCESS`].
     fn me_holding(
         email: Option<&str>,
         scope: session::SessionScope,
@@ -397,6 +458,7 @@ mod tests {
             email.map(str::to_owned),
             scope,
             grants,
+            PROBE_ACCESS,
         )
     }
 
@@ -444,7 +506,8 @@ mod tests {
                 "scope": "admin",
                 "roles": [],
                 "permissions": [],
-                "is_admin": false
+                "is_admin": false,
+                "access": {}
             })
         );
         let password_change = me(
@@ -530,6 +593,94 @@ mod tests {
     }
 
     #[test]
+    fn me_sends_the_access_map_of_an_admin_session() {
+        use crate::domain::authz::Role as R;
+
+        // ADR 0007 §2: a writer edits posts, a supervisor also publishes
+        // them, and only the admin role purges.
+        for (roles, expected) in [
+            (&[][..], json!({})),
+            (&[R::Secretary][..], json!({})),
+            (&[R::Writer][..], json!({"probe-posts": ["list"]})),
+            (
+                &[R::Supervisor][..],
+                json!({"probe-posts": ["list", "publish"]}),
+            ),
+            (
+                &[R::Admin][..],
+                json!({"probe-posts": ["list", "publish", "purge"]}),
+            ),
+        ] {
+            let grants = AccountGrants {
+                roles: roles.iter().copied().collect(),
+                extra: [].into(),
+            };
+            let me = me_holding(
+                Some("szerkeszto@example.test"),
+                session::SessionScope::Admin,
+                &grants,
+            )
+            .expect("valid");
+            assert_eq!(
+                serde_json::to_value(&me.access).expect("serializes"),
+                expected,
+                "{roles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_password_change_session_reaches_no_resource() {
+        use crate::domain::authz::{Permission as P, Role as R};
+
+        // ADR 0006 §4: such a session reaches only auth/me,
+        // auth/change-password and auth/logout, so it is offered nothing,
+        // whatever the account holds.
+        let everything = AccountGrants {
+            roles: [R::Admin].into(),
+            extra: P::ALL.into(),
+        };
+        let me = me_holding(
+            Some("szerkeszto@example.test"),
+            session::SessionScope::PasswordChange,
+            &everything,
+        )
+        .expect("valid");
+        assert_eq!(me.access, BTreeMap::new());
+        assert!(me.is_admin, "the account's own facts are still sent");
+        // The same account in a full session is offered the whole probe
+        // row, so the empty map above is the scope's doing.
+        let full = me_holding(
+            Some("szerkeszto@example.test"),
+            session::SessionScope::Admin,
+            &everything,
+        )
+        .expect("valid");
+        assert_eq!(
+            serde_json::to_value(&full.access).expect("serializes"),
+            json!({"probe-posts": ["list", "publish", "purge"]})
+        );
+    }
+
+    #[test]
+    fn the_wire_access_map_keeps_the_resources_and_the_action_order() {
+        use crate::domain::authz::{AccessAction as A, AccessMap};
+
+        let map = AccessMap::from([
+            ("probe-b", [A::History, A::List, A::Purge].into()),
+            ("probe-a", [A::Edit].into()),
+        ]);
+        assert_eq!(
+            serde_json::to_value(wire_access_map(map)).expect("serializes"),
+            json!({
+                "probe-a": ["edit"],
+                "probe-b": ["list", "purge", "history"]
+            })
+        );
+        assert_eq!(wire_access_map(AccessMap::new()), BTreeMap::new());
+    }
+
+    #[test]
     fn me_refuses_an_mfa_scope_and_an_account_without_an_address() {
         assert_eq!(
             me(Some("szerkeszto@example.test"), session::SessionScope::Mfa),
@@ -569,6 +720,7 @@ mod tests {
             "roles: Array<Role>",
             "permissions: Array<Permission>",
             "is_admin: boolean",
+            "access: { [key in string]: Array<AccessAction> }",
         ] {
             assert!(me.contains(field), "{field}: {me}");
         }

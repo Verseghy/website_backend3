@@ -6,7 +6,9 @@
  * admin's Hungarian i18n provider.
  *
  * The screen shows the Hungarian 403 message, never an empty list, and the
- * user stays signed in: `checkError` signs out on `401` only (ADR 0006).
+ * user stays signed in: `checkError` signs out on `401` only (ADR 0006). The
+ * 403 makes the auth provider ask `/auth/me` again, since the account's
+ * access may have changed since its last answer (ADR 0007 §7).
  */
 import { render, screen, waitFor } from "@testing-library/react"
 import {
@@ -34,6 +36,9 @@ const ME: MeResponse = {
   roles: ["secretary"],
   permissions: ["edit events", "edit canteens", "edit colleagues"],
   is_admin: false,
+  // The access map still lists the probes, as it did before a role change
+  // in another session took them away: the admin asks, the server refuses.
+  access: { probes: ["list"] },
 }
 
 /**
@@ -175,6 +180,13 @@ describe("a list the admin API refuses with 403 forbidden", () => {
       )
     })
     expect(logout).not.toHaveBeenCalled()
+    // checkAuth read /auth/me once before the list; the 403 read it again.
+    await waitFor(() => {
+      expect(
+        fetchStub.mock.calls.filter(([url]) => String(url).endsWith("/auth/me"))
+          .length
+      ).toBeGreaterThanOrEqual(2)
+    })
     expect(
       fetchStub.mock.calls.some(([url]) => String(url).endsWith("/auth/logout"))
     ).toBe(false)

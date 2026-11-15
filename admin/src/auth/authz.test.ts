@@ -1,16 +1,34 @@
 /**
- * The run-time role and permission readers of `/auth/me` (ADR 0007 §1, §2,
- * §7): they accept exactly the generated unions' values, each once.
+ * The run-time role, permission and access-map readers of `/auth/me`
+ * (ADR 0007 §1, §2, §7): they accept exactly the generated unions' values,
+ * each once, and never find a name on the object prototype.
  */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 
 import {
+  accessActionsOf,
+  isAccessAction,
+  KNOWN_ACCESS_ACTIONS,
   KNOWN_PERMISSIONS,
   KNOWN_ROLES,
+  readAccess,
   readPermissions,
   readRoles,
 } from "./authz"
+
+/** The nine actions of ADR 0007 §7, in the server's order. */
+const ADR_ACTIONS = [
+  "list",
+  "show",
+  "create",
+  "edit",
+  "delete",
+  "publish",
+  "restore",
+  "purge",
+  "history",
+]
 
 /** The sixteen permission identifiers of ADR 0007 §1, in its order. */
 const ADR_PERMISSIONS = [
@@ -119,6 +137,123 @@ describe("readPermissions", () => {
         }
         readRoles(value)
       })
+    )
+  })
+})
+
+describe("the access actions", () => {
+  it("are ra-core's five and backend3's four, in the server's order", () => {
+    expect(Object.keys(KNOWN_ACCESS_ACTIONS)).toEqual(ADR_ACTIONS)
+  })
+
+  it("are known exactly by their own names", () => {
+    for (const action of ADR_ACTIONS) {
+      expect(isAccessAction(action)).toBe(true)
+    }
+    for (const other of [
+      "List",
+      "list ",
+      "read",
+      "export",
+      "clone",
+      "*",
+      "",
+      "toString",
+      "__proto__",
+      1,
+      null,
+      undefined,
+      ["list"],
+    ]) {
+      expect(isAccessAction(other)).toBe(false)
+    }
+    fc.assert(
+      fc.property(fc.string(), (name) => {
+        expect(isAccessAction(name)).toBe(ADR_ACTIONS.includes(name))
+      })
+    )
+  })
+})
+
+describe("readAccess", () => {
+  it("reads a map of resources to known actions, each once, as sent", () => {
+    const access = { labels: ["list", "show", "history"], posts: ["purge"] }
+    expect(readAccess(access)).toBe(access)
+    expect(readAccess({})).toEqual({})
+    // A resource with no action is no defect: it simply allows nothing.
+    expect(readAccess({ labels: [] })).toEqual({ labels: [] })
+    expect(readAccess(Object.create(null))).toEqual({})
+  })
+
+  it.each([
+    ["null", null],
+    ["a list", [["list"]]],
+    ["a string", "labels"],
+    ["an unknown action", { labels: ["export"] }],
+    ["an action twice", { labels: ["list", "list"] }],
+    ["actions that are not a list", { labels: "list" }],
+    ["a list of booleans", { labels: [true] }],
+    ["an instance of a class", new Map([["labels", ["list"]]])],
+  ])("refuses %s", (_case, value) => {
+    expect(readAccess(value)).toBeUndefined()
+  })
+
+  it("never throws on any JSON value, and keeps only known actions", () => {
+    fc.assert(
+      fc.property(fc.jsonValue(), (value) => {
+        const read = readAccess(value)
+        if (read !== undefined) {
+          for (const actions of Object.values(read)) {
+            expect(actions.every((action) => isAccessAction(action))).toBe(true)
+          }
+        }
+      })
+    )
+  })
+})
+
+describe("accessActionsOf", () => {
+  it("lists a resource's own actions and nothing for any other name", () => {
+    const access = { labels: ["list", "edit"] } as const
+    expect(
+      accessActionsOf({ ...access, labels: [...access.labels] }, "labels")
+    ).toEqual(["list", "edit"])
+    for (const name of [
+      "posts",
+      "",
+      "Labels",
+      "constructor",
+      "toString",
+      "__proto__",
+      "hasOwnProperty",
+    ]) {
+      expect(accessActionsOf({ labels: ["list"] }, name)).toEqual([])
+    }
+  })
+
+  it("finds a resource named __proto__ only as an own member", () => {
+    const access = readAccess(JSON.parse('{"__proto__": ["list"]}'))
+    expect(access).toBeDefined()
+    expect(accessActionsOf(access ?? {}, "__proto__")).toEqual(["list"])
+    expect(accessActionsOf({}, "__proto__")).toEqual([])
+  })
+
+  it("answers exactly the own members of any map", () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(
+          fc.string(),
+          fc.uniqueArray(fc.constantFrom(...ADR_ACTIONS))
+        ),
+        fc.string(),
+        (map, resource) => {
+          const access = readAccess(map)
+          expect(access).toBeDefined()
+          expect(accessActionsOf(access ?? {}, resource)).toEqual(
+            Object.hasOwn(map, resource) ? map[resource] : []
+          )
+        }
+      )
     )
   })
 })

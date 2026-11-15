@@ -24,6 +24,16 @@
 //!   and only `App::routes` reaches [`routes`] or [`build`]. Its module
 //!   documentation lists what a text check cannot see.
 //!
+//! The access map that `/auth/me` sends (ADR 0007 §7) is computed from a
+//! second table, `domain::authz::RESOURCE_ACCESS`, one row per ra-core
+//! resource. [`AdminRoute::serving`] marks the routes each row stands for,
+//! and this module's tests hold the two tables together: every action of a
+//! row has a route that serves it, a route serves only actions that a row
+//! offers, and a row offers an action only to accounts that every route
+//! serving it lets in. Without that, the sidebar could show an entry that
+//! answers `403`, and the `/auth/me` refetch after the refusal would bring
+//! the same map back.
+//!
 //! The table enforces each requirement itself, in a guard that runs before
 //! the handler: the handler of every entry is wrapped so that its
 //! requirement is checked whatever the handler takes. For a requirement
@@ -110,7 +120,11 @@ use super::{
     },
 };
 use crate::{
-    domain::{api_path::ADMIN_API_PREFIX, authz::Requirement, session::SessionScope},
+    domain::{
+        api_path::ADMIN_API_PREFIX,
+        authz::{AccessAction, Requirement},
+        session::SessionScope,
+    },
     dtos::admin::error::ErrorCode,
 };
 
@@ -210,8 +224,22 @@ pub struct AdminRoute {
     scopes: &'static [SessionScope],
     /// How large the request body may be.
     body: RequestBody,
+    /// The actions of the access table that the route serves, by resource
+    /// ([`AdminRoute::serving`]); empty for a route that no row describes.
+    serves: Vec<ServedAccess>,
     /// Builds the guarded method router.
     mount: Mount,
+}
+
+/// What an admin route serves of one row of the access table
+/// (`domain::authz::RESOURCE_ACCESS`, ADR 0007 §4, §7): the ra-core
+/// resource and the actions of it that the admin takes through the route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServedAccess {
+    /// The ra-core resource name, as the access table's row names it.
+    pub resource: &'static str,
+    /// The actions of that row the route serves.
+    pub actions: &'static [AccessAction],
 }
 
 impl AdminRoute {
@@ -316,6 +344,7 @@ impl AdminRoute {
             requirement,
             scopes: accepted_scopes::<AdminScope>(),
             body: RequestBody::Json,
+            serves: Vec::new(),
             mount: Box::new(move |guard| on(filter, Guarded { handler, guard })),
         }
     }
@@ -339,6 +368,27 @@ impl AdminRoute {
     #[must_use]
     pub fn upload(mut self) -> Self {
         self.body = RequestBody::Upload;
+        self
+    }
+
+    /// The route, marked as the one the admin calls to take `actions` on
+    /// the ra-core resource `resource` (ADR 0007 §7).
+    ///
+    /// - `resource`: the ra-core resource name, as its row of the access
+    ///   table (`domain::authz::RESOURCE_ACCESS`) names it.
+    /// - `actions`: the actions of that row the route serves, such as
+    ///   `&[AccessAction::List]` for the list route.
+    ///
+    /// The mark changes nothing in what the guard checks. It ties the
+    /// access map that `/auth/me` sends to the routes it stands for: this
+    /// module's tests fail when an action of a row has no route that
+    /// serves it, when a route serves an action that no row offers, and
+    /// when a row offers an action to an account that a route serving it
+    /// refuses, so the sidebar never shows an entry that answers `403`.
+    /// Call it once per resource the route serves.
+    #[must_use]
+    pub fn serving(mut self, resource: &'static str, actions: &'static [AccessAction]) -> Self {
+        self.serves.push(ServedAccess { resource, actions });
         self
     }
 
@@ -373,6 +423,13 @@ impl AdminRoute {
         self.body
     }
 
+    /// The actions of the access table the route serves, by resource, in
+    /// the order [`AdminRoute::serving`] added them.
+    #[must_use]
+    pub fn serves(&self) -> &[ServedAccess] {
+        &self.serves
+    }
+
     /// The route's method router, its handler behind the guard of its
     /// requirement and scopes.
     fn into_method_router(self) -> MethodRouter<AppContext> {
@@ -395,6 +452,7 @@ impl fmt::Debug for AdminRoute {
             .field("requirement", &self.requirement)
             .field("scopes", &self.scopes)
             .field("body", &self.body)
+            .field("serves", &self.serves)
             .finish_non_exhaustive()
     }
 }
@@ -638,5 +696,345 @@ mod tests {
                 ("/y/{id}".to_owned(), vec![Method::POST]),
             ]
         );
+    }
+
+    // The access table against the route table (ADR 0007 §4, §7).
+
+    use std::collections::BTreeSet;
+
+    use crate::domain::authz::{
+        AccountGrants, ActionRule, Permission, RESOURCE_ACCESS, ResourceAccess, Role,
+    };
+
+    /// The accounts the access check tries: every set of roles, each with
+    /// no extra grant, with every single grant and with every pair of
+    /// grants. That finds a stricter route for every rule of at most two
+    /// permissions, which is every rule ADR 0007 §4 reads; the weakest
+    /// account of each rule ([`weakest_account`]) covers longer ones.
+    fn probe_accounts() -> Vec<AccountGrants> {
+        let mut grant_sets: Vec<BTreeSet<Permission>> = vec![BTreeSet::new()];
+        for (index, first) in Permission::ALL.iter().enumerate() {
+            grant_sets.push(BTreeSet::from([*first]));
+            for second in &Permission::ALL[index + 1..] {
+                grant_sets.push(BTreeSet::from([*first, *second]));
+            }
+        }
+        let mut accounts = Vec::new();
+        for mask in 0..(1_u32 << Role::ALL.len()) {
+            let roles: BTreeSet<Role> = Role::ALL
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, role)| *role)
+                .collect();
+            for extra in &grant_sets {
+                accounts.push(AccountGrants {
+                    roles: roles.clone(),
+                    extra: extra.clone(),
+                });
+            }
+        }
+        accounts
+    }
+
+    /// The account that holds exactly what `rule` names: its permissions
+    /// as extra grants, and the `admin` role when the rule asks for it.
+    fn weakest_account(rule: &ActionRule) -> AccountGrants {
+        AccountGrants {
+            roles: if rule.requires.contains(&Requirement::AdminRole) {
+                BTreeSet::from([Role::Admin])
+            } else {
+                BTreeSet::new()
+            },
+            extra: rule
+                .requires
+                .iter()
+                .filter_map(|requirement| match requirement {
+                    Requirement::Permission(permission) => Some(*permission),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// What is wrong between the access table `access` and the route table
+    /// `routes`, one line per defect; empty when they agree.
+    ///
+    /// - `access`: the access rows; `RESOURCE_ACCESS`, or a probe table.
+    /// - `routes`: the admin routes; [`table`], or probe routes.
+    ///
+    /// Only one direction of the requirements is checked: a row may offer
+    /// an action to fewer accounts than its routes let in (a picker that
+    /// another permission may read, ADR 0007 §4), never to more.
+    fn access_route_problems(access: &[ResourceAccess], routes: &[AdminRoute]) -> Vec<String> {
+        let accounts = probe_accounts();
+        let mut problems = Vec::new();
+        for route in routes {
+            let at = format!("{} {}", route.method(), route.path());
+            for served in route.serves() {
+                let resource = served.resource;
+                if served.actions.is_empty() {
+                    problems.push(format!("{at}: serves no action of {resource:?}"));
+                }
+                for action in served.actions {
+                    let Some(rule) = access
+                        .iter()
+                        .filter(|row| row.resource == resource)
+                        .flat_map(|row| row.rules)
+                        .find(|rule| rule.action == *action)
+                    else {
+                        problems.push(format!(
+                            "{at}: serves {resource:?}/{action}, which no row of the access \
+                             table offers"
+                        ));
+                        continue;
+                    };
+                    let requirement = route.requirement();
+                    if let Some(account) = accounts
+                        .iter()
+                        .cloned()
+                        .chain([weakest_account(rule)])
+                        .find(|account| rule.is_met_by(account) && !requirement.is_met_by(account))
+                    {
+                        problems.push(format!(
+                            "{resource:?}/{action}: the access map offers it to {account:?}, but \
+                             {at}, which serves it, asks for {requirement}"
+                        ));
+                    }
+                }
+            }
+        }
+        for row in access {
+            for rule in row.rules {
+                let served = routes.iter().any(|route| {
+                    route.serves().iter().any(|served| {
+                        served.resource == row.resource && served.actions.contains(&rule.action)
+                    })
+                });
+                if !served {
+                    problems.push(format!(
+                        "{:?}/{}: no route of the admin route table serves it; mark the route \
+                         the admin calls for it with .serving({:?}, &[...])",
+                        row.resource, rule.action, row.resource
+                    ));
+                }
+            }
+        }
+        problems
+    }
+
+    #[test]
+    fn every_access_row_agrees_with_the_routes_it_stands_for() {
+        assert_eq!(
+            access_route_problems(RESOURCE_ACCESS, &table()),
+            Vec::<String>::new()
+        );
+    }
+
+    const EDIT_POSTS: Requirement = Requirement::Permission(Permission::EditPosts);
+    const PUBLISH_POSTS: Requirement = Requirement::Permission(Permission::PublishPosts);
+    const EDIT_LABELS: Requirement = Requirement::Permission(Permission::EditLabels);
+
+    /// A probe access table: invented names that no resource slice owns.
+    const PROBE_ACCESS: &[ResourceAccess] = &[
+        ResourceAccess {
+            resource: "probe-posts",
+            rules: &[
+                ActionRule::new(AccessAction::List, &[EDIT_POSTS]),
+                ActionRule::new(AccessAction::Publish, &[EDIT_POSTS, PUBLISH_POSTS]),
+                ActionRule::new(AccessAction::Purge, &[Requirement::AdminRole]),
+            ],
+        },
+        ResourceAccess {
+            resource: "probe-labels",
+            rules: &[ActionRule::new(AccessAction::List, &[EDIT_LABELS])],
+        },
+    ];
+
+    /// Probe routes that serve every action of [`PROBE_ACCESS`] with the
+    /// requirements its rules ask for, the labels' list for `edit posts`
+    /// too, as a stand-in for a requirement that also lets the picker in.
+    fn agreeing_routes() -> Vec<AdminRoute> {
+        async fn probe() {}
+        vec![
+            AdminRoute::get("/probe-posts", EDIT_POSTS, probe)
+                .serving("probe-posts", &[AccessAction::List]),
+            AdminRoute::post("/probe-posts/{id}/publish", PUBLISH_POSTS, probe)
+                .serving("probe-posts", &[AccessAction::Publish]),
+            AdminRoute::delete("/probe-posts/{id}/purge", Requirement::AdminRole, probe)
+                .serving("probe-posts", &[AccessAction::Purge]),
+            AdminRoute::get("/probe-labels", Requirement::AnyActiveUser, probe)
+                .serving("probe-labels", &[AccessAction::List]),
+            // A route that no row describes needs no mark.
+            AdminRoute::get("/probe-other", Requirement::AdminRole, probe),
+        ]
+    }
+
+    #[test]
+    fn the_access_check_accepts_routes_that_let_in_at_least_the_row_s_accounts() {
+        assert_eq!(
+            access_route_problems(PROBE_ACCESS, &agreeing_routes()),
+            Vec::<String>::new()
+        );
+        // Nothing to check on either side.
+        assert_eq!(access_route_problems(&[], &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_access_check_names_every_disagreement() {
+        async fn probe() {}
+        let cases: [(Vec<AdminRoute>, &str); 5] = [
+            // The purge route is gone: the map would offer an action that
+            // no route serves.
+            (
+                agreeing_routes()
+                    .into_iter()
+                    .filter(|route| !route.path().ends_with("/purge"))
+                    .collect(),
+                r#""probe-posts"/purge: no route of the admin route table serves it"#,
+            ),
+            // A route claims an action the row does not offer.
+            (
+                vec![
+                    AdminRoute::delete("/probe-posts/{id}", EDIT_POSTS, probe)
+                        .serving("probe-posts", &[AccessAction::Delete]),
+                ],
+                r#"DELETE /api/admin/probe-posts/{id}: serves "probe-posts"/delete, which no row"#,
+            ),
+            // A route claims a resource without a row.
+            (
+                vec![
+                    AdminRoute::get("/probe-none", EDIT_POSTS, probe)
+                        .serving("probe-none", &[AccessAction::List]),
+                ],
+                r#"serves "probe-none"/list, which no row"#,
+            ),
+            // A mark without an action.
+            (
+                vec![
+                    AdminRoute::get("/probe-posts", EDIT_POSTS, probe).serving("probe-posts", &[]),
+                ],
+                r#"GET /api/admin/probe-posts: serves no action of "probe-posts""#,
+            ),
+            // The list route asks for more than the row: a writer would see
+            // the entry and get 403.
+            (
+                vec![
+                    AdminRoute::get("/probe-posts", Requirement::AdminRole, probe)
+                        .serving("probe-posts", &[AccessAction::List]),
+                ],
+                r#""probe-posts"/list: the access map offers it to"#,
+            ),
+        ];
+        for (routes, expected) in cases {
+            let problems = access_route_problems(PROBE_ACCESS, &routes);
+            assert!(
+                problems.iter().any(|problem| problem.contains(expected)),
+                "{expected}: {problems:?}"
+            );
+        }
+        // Publishing asks for two permissions; a route that wants a third
+        // is found too (a supervisor holds both and not `edit users`).
+        let stricter_publish = vec![
+            AdminRoute::post(
+                "/probe-posts/{id}/publish",
+                Requirement::Permission(Permission::EditUsers),
+                probe,
+            )
+            .serving("probe-posts", &[AccessAction::Publish]),
+        ];
+        assert!(
+            access_route_problems(PROBE_ACCESS, &stricter_publish)
+                .iter()
+                .any(|problem| problem.contains(r#""probe-posts"/publish: the access map offers"#)),
+        );
+    }
+
+    #[test]
+    fn the_weakest_account_finds_a_stricter_route_behind_a_long_rule() {
+        async fn probe() {}
+        // Four permissions that only the admin role holds together, so no
+        // account of the matrix but an admin meets the rule, and the admin
+        // role meets every permission route as well. Only the account with
+        // exactly the four as grants shows the route's `edit notices`.
+        const LONG: &[ResourceAccess] = &[ResourceAccess {
+            resource: "probe-long",
+            rules: &[ActionRule::new(
+                AccessAction::List,
+                &[
+                    Requirement::Permission(Permission::EditUsers),
+                    Requirement::Permission(Permission::ViewLogs),
+                    Requirement::Permission(Permission::EditPages),
+                    Requirement::Permission(Permission::EditMenu),
+                ],
+            )],
+        }];
+        let routes = vec![
+            AdminRoute::get(
+                "/probe-long",
+                Requirement::Permission(Permission::EditNotices),
+                probe,
+            )
+            .serving("probe-long", &[AccessAction::List]),
+        ];
+        let rule = &LONG[0].rules[0];
+        assert!(
+            probe_accounts()
+                .iter()
+                .all(|account| !rule.is_met_by(account)
+                    || routes[0].requirement().is_met_by(account)),
+            "the matrix alone would miss it"
+        );
+        let problems = access_route_problems(LONG, &routes);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("asks for the permission \"edit notices\""));
+    }
+
+    #[test]
+    fn serving_records_the_resource_and_actions_in_order() {
+        async fn probe() {}
+        let route = AdminRoute::get("/probe", EDIT_POSTS, probe);
+        assert_eq!(route.serves(), &[] as &[ServedAccess]);
+        let route = route
+            .serving("probe-a", &[AccessAction::List, AccessAction::Show])
+            .serving("probe-b", &[AccessAction::History]);
+        assert_eq!(
+            route.serves(),
+            &[
+                ServedAccess {
+                    resource: "probe-a",
+                    actions: &[AccessAction::List, AccessAction::Show],
+                },
+                ServedAccess {
+                    resource: "probe-b",
+                    actions: &[AccessAction::History],
+                },
+            ]
+        );
+        let shown = format!("{route:?}");
+        assert!(shown.contains(r#"resource: "probe-a""#), "{shown}");
+        // The mark leaves the guard's facts alone.
+        assert_eq!(route.requirement(), EDIT_POSTS);
+        assert_eq!(route.scopes(), &[SessionScope::Admin]);
+    }
+
+    #[test]
+    fn the_probe_accounts_hold_every_role_set_with_up_to_two_grants() {
+        let accounts = probe_accounts();
+        // 16 role sets, each with no grant, 16 single grants and 120 pairs.
+        assert_eq!(accounts.len(), 16 * (1 + 16 + 120));
+        assert!(accounts.contains(&AccountGrants::default()));
+        assert!(accounts.iter().any(|account| account.roles.len() == 4
+            && account.extra == BTreeSet::from([Permission::EditPosts, Permission::EditDiaktoll])));
+        let weakest = weakest_account(&ActionRule::new(
+            AccessAction::Purge,
+            &[
+                Requirement::AdminRole,
+                EDIT_POSTS,
+                Requirement::AnyActiveUser,
+            ],
+        ));
+        assert_eq!(weakest.roles, BTreeSet::from([Role::Admin]));
+        assert_eq!(weakest.extra, BTreeSet::from([Permission::EditPosts]));
     }
 }

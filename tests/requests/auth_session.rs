@@ -32,7 +32,9 @@ use backend3::{
         session::{AcceptedScopes, AdminOrPasswordChange, AdminScope, AdminSession},
     },
     domain::{
-        authz::{Permission, Requirement, Role},
+        authz::{
+            AccessAction, AccountGrants, Permission, RESOURCE_ACCESS, Requirement, Role, access_map,
+        },
         session::SessionScope,
         session_cookie::SESSION_COOKIE_NAME,
     },
@@ -193,8 +195,27 @@ fn me_body(user: &Model, scope: &str) -> Value {
         "scope": scope,
         "roles": [],
         "permissions": [],
-        "is_admin": false
+        "is_admin": false,
+        "access": {}
     })
+}
+
+/// The access map that `/auth/me` sends an `admin` session of an account
+/// with `roles` and the extra grants `extra`, as JSON: the domain's map over
+/// the application's access table (ADR 0007 §7).
+fn access_of(roles: &[Role], extra: &[Permission]) -> Value {
+    let grants = AccountGrants {
+        roles: roles.iter().copied().collect(),
+        extra: extra.iter().copied().collect(),
+    };
+    access_map(RESOURCE_ACCESS, &grants)
+        .into_iter()
+        .map(|(resource, actions)| {
+            let names: Vec<&str> = actions.into_iter().map(AccessAction::name).collect();
+            (resource.to_owned(), json!(names))
+        })
+        .collect::<Map<String, Value>>()
+        .into()
 }
 
 /// Gives `user` the roles `role_ids` and the extra grants `permissions`, in
@@ -634,6 +655,10 @@ async fn me_answers_the_roles_the_effective_permissions_and_the_admin_flag() {
             "manage media",
             "view logs"
         ]);
+        expected["access"] = access_of(
+            &[Role::Writer, Role::Secretary],
+            &[Permission::ViewLogs, Permission::EditPosts],
+        );
         assert_eq!(response.json::<Value>(), expected);
 
         // The admin role: all sixteen and the flag.
@@ -645,6 +670,7 @@ async fn me_answers_the_roles_the_effective_permissions_and_the_admin_flag() {
         assert_eq!(body["roles"], json!(["admin"]));
         assert_eq!(body["permissions"].as_array().map(Vec::len), Some(16));
         assert_eq!(body["is_admin"], json!(true));
+        assert_eq!(body["access"], access_of(&[Role::Admin], &[]));
 
         // Every permission as an extra grant is no admin (ADR 0007 §2).
         let granted = account(&ctx, "mind@example.test", |_| {}).await;
@@ -659,6 +685,35 @@ async fn me_answers_the_roles_the_effective_permissions_and_the_admin_flag() {
         assert_eq!(body["roles"], json!([]));
         assert_eq!(body["permissions"], json!(names));
         assert_eq!(body["is_admin"], json!(false));
+        assert_eq!(body["access"], access_of(&[], &Permission::ALL));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_password_change_session_is_offered_no_resource() {
+    // ADR 0006 §4: such a session reaches only the own-account routes, so
+    // its access map is empty even for an admin-role account, while the
+    // account's own facts are still sent (ADR 0007 §7).
+    with_server(|server, ctx| async move {
+        let user = account(&ctx, "jelszocsere@example.test", |_| {}).await;
+        give(&ctx, &user, &[4], &[]).await;
+        let token = token_with(
+            &ctx,
+            &user.pid.to_string(),
+            &session_claims(user.token_version, SessionScope::PasswordChange),
+        );
+        let response = me_with_cookie(&server, &token).await;
+        assert_eq!(response.status_code(), StatusCode::OK);
+        let body = response.json::<Value>();
+        assert_eq!(body["scope"], json!("password_change"));
+        assert_eq!(body["is_admin"], json!(true));
+        assert_eq!(body["access"], json!({}));
+        // The same account in a full session gets the admin role's map.
+        let full = me_with_cookie(&server, &admin_token(&ctx, &user))
+            .await
+            .json::<Value>();
+        assert_eq!(full["access"], access_of(&[Role::Admin], &[]));
     })
     .await;
 }

@@ -41,11 +41,26 @@
 //! (`controllers::admin::routes`) declares one for every route, and its
 //! guard answers `403 forbidden` when [`Requirement::is_met_by`] says no.
 //!
+//! [`RESOURCE_ACCESS`] is the access table of ADR 0007 §4 in the admin UI's
+//! words: for each ra-core resource, the [`AccessAction`]s the admin offers
+//! on it and what each asks of the account. [`access_map`] turns it into an
+//! account's access map, and [`session_access_map`] into the one that
+//! `/auth/me` sends a session (ADR 0007 §7), so that the admin's
+//! `authProvider.canAccess` answers from it without asking the server. The map only spares the UI a refused request: the route table
+//! still decides every request itself. Each resource slice adds its row
+//! here, together with its routes, and its cases in
+//! `tests/fixtures/authz_cases.json`, the case table that the Rust test
+//! (`tests/domain/authz_cases.rs`) and the admin's Vitest test run alike.
+//!
 //! The record-level rules of ADR 0007 §5 (published posts, the user guards
-//! of §6) and the per-resource access map of §7 join this module with the
-//! slices that need them.
+//! of §6) join this module with the slices that need them.
 
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
+
+use super::session::SessionScope;
 
 /// A permission of ADR 0007 §1.
 ///
@@ -422,7 +437,9 @@ impl AccountGrants {
 ///
 /// The ADR's "any of" rows (the labels and authors pickers that `edit posts`
 /// may read, the page picker of `edit menu`) are not variants yet: the first
-/// slice that mounts such a route adds one, with its tests here.
+/// slice that mounts such a route adds one, with its tests here. Only routes
+/// take it; an [`ActionRule`] asks for the resource's own permission alone
+/// (research: DECISIONS R35 (D153)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Requirement {
     /// No session at all: the sign-in steps that issue one (ADR 0006 §3,
@@ -485,6 +502,243 @@ impl fmt::Display for Requirement {
                 write!(formatter, "the permission {:?}", permission.name())
             }
         }
+    }
+}
+
+/// An action that the admin UI asks `authProvider.canAccess` about on an
+/// ra-core resource (ADR 0007 §7).
+///
+/// The first five are ra-core's own (its page components and the kit's
+/// sidebar ask for `list`, `show`, `create` and `edit`; backend3's button
+/// wrappers ask for `delete`); the last four are backend3's. The variants
+/// are declared in the ADR's order and derive `Ord`, so an access map lists
+/// a resource's actions in that order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AccessAction {
+    /// `list`: the resource's list screen and its entry in the sidebar.
+    List,
+    /// `show`: one record, read only.
+    Show,
+    /// `create`: a new record (Clone is a create, ADR 0007 §4).
+    Create,
+    /// `edit`: an update of a record (reordering and reverting to a
+    /// revision are updates, ADR 0007 §4).
+    Edit,
+    /// `delete`: the soft delete into the trash, „lomtár” (ADR 0011).
+    Delete,
+    /// `publish`: publishing and unpublishing (posts, ADR 0007 §4).
+    Publish,
+    /// `restore`: „Visszaállítás” from the trash (ADR 0011).
+    Restore,
+    /// `purge`: permanent delete from the trash, „Végleges törlés”, which
+    /// only the `admin` role may do (ADR 0007 §2).
+    Purge,
+    /// `history`: one record's revisions, „Előzmények”, which ask for the
+    /// resource's list permission (ADR 0007 §4).
+    History,
+}
+
+impl AccessAction {
+    /// Every action, in declaration order.
+    pub const ALL: [Self; 9] = [
+        Self::List,
+        Self::Show,
+        Self::Create,
+        Self::Edit,
+        Self::Delete,
+        Self::Publish,
+        Self::Restore,
+        Self::Purge,
+        Self::History,
+    ];
+
+    /// The action's name, as ra-core passes it to `canAccess` and as
+    /// `/auth/me` sends it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Show => "show",
+            Self::Create => "create",
+            Self::Edit => "edit",
+            Self::Delete => "delete",
+            Self::Publish => "publish",
+            Self::Restore => "restore",
+            Self::Purge => "purge",
+            Self::History => "history",
+        }
+    }
+
+    /// The action whose name is exactly `name`, or `None`.
+    ///
+    /// - `name`: an action name as ra-core passes it to `canAccess`.
+    ///
+    /// The comparison is exact: `List` and `list ` name no action, and
+    /// neither does an action that ra-core may ask about but backend3 never
+    /// offers, such as `export` or `clone`. An access check of such a name
+    /// is refused.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|action| action.name() == name)
+    }
+}
+
+impl fmt::Display for AccessAction {
+    /// Writes the action's name, for log lines and test messages.
+    ///
+    /// - `formatter`: where to write.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+/// What one action of a resource asks of the account: every requirement in
+/// [`ActionRule::requires`] (ADR 0007 §4).
+///
+/// More than one requirement is how the ADR's "also need" reads: publishing
+/// a post asks for `edit posts` and `publish posts`. A row never carries an
+/// "or" of ADR 0007 §4 (the labels and authors that `edit posts` may read for
+/// the post form's pickers, the pages that `edit menu` may read): it asks
+/// only for the resource's own permission, and the other permission goes on
+/// the routes the picker calls, with the "any of" [`Requirement`] variant
+/// that recipe 10 of the project skill asks of them. Asked whether such a row
+/// should carry the "or" too, so that an account that holds only the
+/// picker's permission also sees the list screen and is offered the
+/// resource's `history`, the maintainer answered "The row asks for the
+/// resource's own permission; the "or" stays on the routes" on 2026-11-15
+/// (research: DECISIONS R35 (D153)). The route table's tests accept such a
+/// row, which offers its actions to fewer accounts than its routes let in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActionRule {
+    /// The action the rule is about.
+    pub action: AccessAction,
+    /// What the account must meet, all of it. Never empty in the table (a
+    /// test of [`RESOURCE_ACCESS`] says so); an empty list allows nothing.
+    pub requires: &'static [Requirement],
+}
+
+impl ActionRule {
+    /// A rule for `action` that asks for every requirement of `requires`.
+    ///
+    /// - `action`: the action.
+    /// - `requires`: what the account must meet, all of it.
+    #[must_use]
+    pub const fn new(action: AccessAction, requires: &'static [Requirement]) -> Self {
+        Self { action, requires }
+    }
+
+    /// Whether an account with `grants` may take this action.
+    ///
+    /// - `grants`: the account's roles and extra grants.
+    ///
+    /// Every requirement must be met ([`Requirement::is_met_by`]). A rule
+    /// without requirements allows nothing: deny by default (ADR 0007 §5),
+    /// so a row that forgot its requirement hides the action instead of
+    /// offering it to everyone.
+    #[must_use]
+    pub fn is_met_by(&self, grants: &AccountGrants) -> bool {
+        !self.requires.is_empty()
+            && self
+                .requires
+                .iter()
+                .all(|requirement| requirement.is_met_by(grants))
+    }
+}
+
+/// One row of the access table: an ra-core resource and the rule of each
+/// action the admin offers on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResourceAccess {
+    /// The ra-core resource name, as `<Resource name>` registers it and as
+    /// the access map's key: lower-case letters, digits, `-` and `_`,
+    /// starting with a letter (a test of [`RESOURCE_ACCESS`] says so).
+    pub resource: &'static str,
+    /// The resource's actions, each at most once. An action that the row
+    /// does not list is never offered.
+    pub rules: &'static [ActionRule],
+}
+
+/// The access table of ADR 0007 §4, one row per ra-core resource, in the
+/// order the resources are added.
+///
+/// Empty until the first resource screen: each resource slice adds its row
+/// here in the PR that mounts its routes, with the requirements that its
+/// routes carry in the route table, and adds the cases of its row to
+/// `tests/fixtures/authz_cases.json`, whose Rust test fails until every row
+/// has a case that allows and a case that refuses. The tests of this module
+/// hold every row to the shape of ADR 0007 §4: unique resource names, each
+/// action once with at least one requirement and never
+/// [`Requirement::Public`], `purge` only with the `admin` role, and
+/// `history` with exactly the requirements of `list`.
+///
+/// The slice also marks each route the admin calls for an action with
+/// `AdminRoute::serving` in the admin route table
+/// (`controllers::admin::routes`), whose tests hold the rows to the routes:
+/// every action of a row needs a route that serves it, a route may serve
+/// only an action that a row offers, and a row may offer an action only to
+/// accounts that every route serving it lets in, so the sidebar never
+/// shows an entry that answers `403`.
+pub const RESOURCE_ACCESS: &[ResourceAccess] = &[];
+
+/// An account's access map: for each resource, the actions the account may
+/// take, in [`AccessAction`] order (ADR 0007 §7).
+///
+/// A resource on which the account may take no action is left out, so an
+/// account with no role and no grant has an empty map.
+pub type AccessMap = BTreeMap<&'static str, BTreeSet<AccessAction>>;
+
+/// The access map of an account with `grants` over `table`.
+///
+/// - `table`: the access rows; [`RESOURCE_ACCESS`] in the application, a
+///   probe table in the tests.
+/// - `grants`: the account's roles and extra grants, as the route table's
+///   guard read them for the request.
+///
+/// An action is in the map exactly when its [`ActionRule::is_met_by`]
+/// holds, so the map agrees with the route table as long as each row asks
+/// for what its routes ask for. Rows are read in order; the tests of
+/// [`RESOURCE_ACCESS`] rule out a resource or an action listed twice.
+#[must_use]
+pub fn access_map(table: &[ResourceAccess], grants: &AccountGrants) -> AccessMap {
+    let mut map = AccessMap::new();
+    for row in table {
+        let allowed: BTreeSet<AccessAction> = row
+            .rules
+            .iter()
+            .filter(|rule| rule.is_met_by(grants))
+            .map(|rule| rule.action)
+            .collect();
+        if !allowed.is_empty() {
+            map.entry(row.resource).or_default().extend(allowed);
+        }
+    }
+    map
+}
+
+/// The access map that `/auth/me` sends a session of `scope`: the
+/// account's [`access_map`] over `table` for a full `admin` session, and an
+/// empty map for every other scope.
+///
+/// - `scope`: the session's scope, as the session check granted it.
+/// - `table`: the access rows; [`RESOURCE_ACCESS`] in the application, a
+///   probe table in the tests.
+/// - `grants`: the account's roles and extra grants, as the route table's
+///   guard read them for the request.
+///
+/// A `password_change` session reaches only the own-account routes of
+/// ADR 0006 §4: the route table answers it `401` on every resource route,
+/// so a sidebar entry would sign the user out instead of opening a screen.
+/// An `mfa` session reaches no admin route at all. Neither is offered
+/// anything, whatever the account holds.
+#[must_use]
+pub fn session_access_map(
+    scope: SessionScope,
+    table: &[ResourceAccess],
+    grants: &AccountGrants,
+) -> AccessMap {
+    match scope {
+        SessionScope::Admin => access_map(table, grants),
+        SessionScope::PasswordChange | SessionScope::Mfa => AccessMap::new(),
     }
 }
 
@@ -1032,6 +1286,498 @@ mod tests {
                 AccountGrants::from_stored(roles.iter().map(|role| role.id()), names),
                 Err(StoredGrantError::UnknownPermission(unknown_name.clone()))
             );
+        }
+    }
+
+    // The access table and the access map (ADR 0007 §4, §7).
+
+    #[test]
+    fn the_action_names_are_ra_core_s_five_and_backend3_s_four() {
+        assert_eq!(
+            AccessAction::ALL.map(AccessAction::name),
+            [
+                "list", "show", "create", "edit", "delete", "publish", "restore", "purge",
+                "history"
+            ]
+        );
+        // ALL is in declaration order, so an access map lists the actions
+        // in the ADR's order.
+        assert!(AccessAction::ALL.is_sorted());
+        for action in AccessAction::ALL {
+            assert_eq!(AccessAction::from_name(action.name()), Some(action));
+            assert_eq!(action.to_string(), action.name());
+        }
+        // ra-core may ask about actions that backend3 never offers, and
+        // about other spellings: none of them is an action.
+        for other in [
+            "List", "list ", " list", "read", "update", "export", "clone", "*", "",
+        ] {
+            assert_eq!(AccessAction::from_name(other), None, "{other:?}");
+        }
+    }
+
+    const EDIT_POSTS: Requirement = Requirement::Permission(Permission::EditPosts);
+    const PUBLISH_POSTS: Requirement = Requirement::Permission(Permission::PublishPosts);
+    const EDIT_EVENTS: Requirement = Requirement::Permission(Permission::EditEvents);
+
+    /// A probe table in the shape of ADR 0007 §4: a resource with all nine
+    /// actions and the two-permission `publish`, a resource with two, and a
+    /// resource that any active user may read. Invented names: no resource
+    /// slice owns them.
+    const PROBE_TABLE: &[ResourceAccess] = &[
+        ResourceAccess {
+            resource: "probe-posts",
+            rules: &[
+                ActionRule::new(AccessAction::List, &[EDIT_POSTS]),
+                ActionRule::new(AccessAction::Show, &[EDIT_POSTS]),
+                ActionRule::new(AccessAction::Create, &[EDIT_POSTS]),
+                ActionRule::new(AccessAction::Edit, &[EDIT_POSTS]),
+                ActionRule::new(AccessAction::Delete, &[EDIT_POSTS]),
+                ActionRule::new(AccessAction::Publish, &[EDIT_POSTS, PUBLISH_POSTS]),
+                ActionRule::new(AccessAction::Restore, &[EDIT_POSTS]),
+                ActionRule::new(AccessAction::Purge, &[Requirement::AdminRole]),
+                ActionRule::new(AccessAction::History, &[EDIT_POSTS]),
+            ],
+        },
+        ResourceAccess {
+            resource: "probe_events",
+            rules: &[
+                ActionRule::new(AccessAction::Edit, &[EDIT_EVENTS]),
+                ActionRule::new(AccessAction::List, &[EDIT_EVENTS]),
+            ],
+        },
+        ResourceAccess {
+            resource: "probe-account",
+            rules: &[ActionRule::new(
+                AccessAction::Show,
+                &[Requirement::AnyActiveUser],
+            )],
+        },
+    ];
+
+    /// Whether `name` is an ra-core resource name the table accepts.
+    fn is_resource_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        chars.next().is_some_and(|first| first.is_ascii_lowercase())
+            && chars.all(|rest| {
+                rest.is_ascii_lowercase() || rest.is_ascii_digit() || rest == '-' || rest == '_'
+            })
+    }
+
+    /// What is wrong with `table` against ADR 0007 §4, one line per defect;
+    /// empty for a table in the ADR's shape.
+    fn table_problems(table: &[ResourceAccess]) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut seen = BTreeSet::new();
+        for row in table {
+            let resource = row.resource;
+            if !seen.insert(resource) {
+                problems.push(format!("{resource:?}: the resource has two rows"));
+            }
+            if !is_resource_name(resource) {
+                problems.push(format!(
+                    "{resource:?}: not an ra-core resource name (lower-case letters, digits, - \
+                     and _, starting with a letter)"
+                ));
+            }
+            if row.rules.is_empty() {
+                problems.push(format!("{resource:?}: the row offers no action"));
+            }
+            let mut actions = BTreeSet::new();
+            for rule in row.rules {
+                let action = rule.action;
+                if !actions.insert(action) {
+                    problems.push(format!("{resource:?}/{action}: the action is listed twice"));
+                }
+                if rule.requires.is_empty() {
+                    problems.push(format!("{resource:?}/{action}: no requirement"));
+                }
+                if rule.requires.contains(&Requirement::Public) {
+                    problems.push(format!(
+                        "{resource:?}/{action}: public, but every resource action needs a session"
+                    ));
+                }
+            }
+            let requires = |wanted: AccessAction| {
+                row.rules
+                    .iter()
+                    .find(|rule| rule.action == wanted)
+                    .map(|rule| rule.requires)
+            };
+            if requires(AccessAction::Purge)
+                .is_some_and(|purge| !purge.contains(&Requirement::AdminRole))
+            {
+                problems.push(format!(
+                    "{resource:?}/purge: permanent delete needs the admin role (ADR 0007 §2)"
+                ));
+            }
+            if let Some(history) = requires(AccessAction::History)
+                && requires(AccessAction::List) != Some(history)
+            {
+                problems.push(format!(
+                    "{resource:?}/history: a record's history asks for the resource's list \
+                     permission (ADR 0007 §4)"
+                ));
+            }
+        }
+        problems
+    }
+
+    #[test]
+    fn the_access_table_has_the_shape_of_adr_0007_section_4() {
+        assert_eq!(table_problems(RESOURCE_ACCESS), Vec::<String>::new());
+        assert_eq!(table_problems(PROBE_TABLE), Vec::<String>::new());
+    }
+
+    /// A table row with `resource` and `rules`, for the defect cases.
+    const fn row(resource: &'static str, rules: &'static [ActionRule]) -> ResourceAccess {
+        ResourceAccess { resource, rules }
+    }
+
+    #[test]
+    fn the_table_check_names_every_defect() {
+        const LIST: ActionRule = ActionRule::new(AccessAction::List, &[EDIT_POSTS]);
+        const SHOW_FOR_NOBODY: ActionRule = ActionRule::new(AccessAction::Show, &[]);
+        const SHOW_IN_PUBLIC: ActionRule =
+            ActionRule::new(AccessAction::Show, &[Requirement::Public]);
+        const PURGE_BY_PERMISSION: ActionRule = ActionRule::new(AccessAction::Purge, &[EDIT_POSTS]);
+        const HISTORY_ASKING_MORE: ActionRule =
+            ActionRule::new(AccessAction::History, &[EDIT_POSTS, PUBLISH_POSTS]);
+        const HISTORY: ActionRule = ActionRule::new(AccessAction::History, &[EDIT_POSTS]);
+        let defects: [(&[ResourceAccess], &str); 11] = [
+            (&[row("twice", &[LIST]), row("twice", &[LIST])], "two rows"),
+            (&[row("Labels", &[LIST])], "not an ra-core resource name"),
+            (&[row("", &[LIST])], "not an ra-core resource name"),
+            (&[row("1labels", &[LIST])], "not an ra-core resource name"),
+            (&[row("lab els", &[LIST])], "not an ra-core resource name"),
+            (&[row("none", &[])], "offers no action"),
+            (&[row("repeat", &[LIST, LIST])], "listed twice"),
+            (&[row("empty", &[SHOW_FOR_NOBODY])], "no requirement"),
+            (
+                &[row("open", &[SHOW_IN_PUBLIC])],
+                "every resource action needs a session",
+            ),
+            (
+                &[row("purge", &[PURGE_BY_PERMISSION])],
+                "needs the admin role",
+            ),
+            (
+                &[row("history", &[LIST, HISTORY_ASKING_MORE])],
+                "list permission",
+            ),
+        ];
+        for (table, defect) in defects {
+            let problems = table_problems(table);
+            assert!(
+                problems.iter().any(|problem| problem.contains(defect)),
+                "{defect}: {problems:?}"
+            );
+        }
+        // A history without a list is a defect too.
+        let problems = table_problems(&[row("orphan", &[HISTORY])]);
+        assert!(
+            problems.iter().any(|problem| problem.contains("orphan")),
+            "{problems:?}"
+        );
+        // And the names the table accepts.
+        for name in ["labels", "canteen-days", "canteen_days", "a1"] {
+            assert!(is_resource_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_rule_asks_for_every_requirement_and_an_empty_one_allows_nothing() {
+        let publish = ActionRule::new(AccessAction::Publish, &[EDIT_POSTS, PUBLISH_POSTS]);
+        // ADR 0007 §2: a writer edits posts but does not publish them; a
+        // supervisor does both.
+        assert!(!publish.is_met_by(&account(&[Role::Writer], &[])));
+        assert!(publish.is_met_by(&account(&[Role::Supervisor], &[])));
+        // `publish posts` alone is not enough: publishing needs `edit posts`
+        // too (ADR 0007 §1).
+        assert!(!publish.is_met_by(&account(&[], &[Permission::PublishPosts])));
+        assert!(publish.is_met_by(&account(&[Role::Writer], &[Permission::PublishPosts])));
+        // Deny by default, whoever asks.
+        let empty = ActionRule::new(AccessAction::Show, &[]);
+        assert!(!empty.is_met_by(&account(&[Role::Admin], &Permission::ALL)));
+        assert!(!empty.is_met_by(&AccountGrants::default()));
+    }
+
+    /// The access map over [`PROBE_TABLE`] as resource and action names.
+    fn probe_map(grants: &AccountGrants) -> Vec<(&'static str, Vec<&'static str>)> {
+        access_map(PROBE_TABLE, grants)
+            .into_iter()
+            .map(|(resource, actions)| {
+                (
+                    resource,
+                    actions.into_iter().map(AccessAction::name).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_access_map_lists_what_each_account_may_do() {
+        // A writer: every post action but publish and purge, in the ADR's
+        // order (not the row's), and the any-active-user resource.
+        assert_eq!(
+            probe_map(&account(&[Role::Writer], &[])),
+            [
+                ("probe-account", vec!["show"]),
+                (
+                    "probe-posts",
+                    vec![
+                        "list", "show", "create", "edit", "delete", "restore", "history"
+                    ]
+                ),
+            ]
+        );
+        // A supervisor also publishes.
+        assert_eq!(
+            probe_map(&account(&[Role::Supervisor], &[]))[1],
+            (
+                "probe-posts",
+                vec![
+                    "list", "show", "create", "edit", "delete", "publish", "restore", "history"
+                ]
+            )
+        );
+        // A secretary sees the events, listed in the ADR's order.
+        assert_eq!(
+            probe_map(&account(&[Role::Secretary], &[])),
+            [
+                ("probe-account", vec!["show"]),
+                ("probe_events", vec!["list", "edit"]),
+            ]
+        );
+        // The admin role: every action of every row, purge included.
+        let admin = access_map(PROBE_TABLE, &account(&[Role::Admin], &[]));
+        for row in PROBE_TABLE {
+            let every: BTreeSet<AccessAction> = row.rules.iter().map(|rule| rule.action).collect();
+            assert_eq!(admin.get(row.resource), Some(&every), "{}", row.resource);
+        }
+        // Every permission as an extra grant: everything but purge, which
+        // only the admin role gives (ADR 0007 §2).
+        let granted = access_map(PROBE_TABLE, &account(&[], &Permission::ALL));
+        assert!(!granted["probe-posts"].contains(&AccessAction::Purge));
+        assert_eq!(granted["probe-posts"].len(), 8);
+        // No role and no grant: only what any active user may do. A
+        // resource without an allowed action is left out.
+        assert_eq!(
+            probe_map(&AccountGrants::default()),
+            [("probe-account", vec!["show"])]
+        );
+        assert_eq!(
+            access_map(&PROBE_TABLE[..2], &AccountGrants::default()),
+            AccessMap::new()
+        );
+    }
+
+    #[test]
+    fn only_a_full_session_is_offered_the_account_s_access() {
+        // A full session: the account's map, whatever it holds.
+        for grants in [
+            AccountGrants::default(),
+            account(&[Role::Writer], &[]),
+            account(&[Role::Admin], &Permission::ALL),
+        ] {
+            assert_eq!(
+                session_access_map(SessionScope::Admin, PROBE_TABLE, &grants),
+                access_map(PROBE_TABLE, &grants),
+                "{grants:?}"
+            );
+        }
+        // ADR 0006 §4: a password_change session reaches only the own
+        // account's routes, and an mfa one no admin route, so neither is
+        // offered anything, not even what any active user may do, and not
+        // for the admin role with every grant.
+        let everything = account(&[Role::Admin], &Permission::ALL);
+        assert!(!access_map(PROBE_TABLE, &everything).is_empty());
+        for scope in [SessionScope::PasswordChange, SessionScope::Mfa] {
+            assert_eq!(
+                session_access_map(scope, PROBE_TABLE, &everything),
+                AccessMap::new(),
+                "{scope:?}"
+            );
+            assert_eq!(
+                session_access_map(scope, PROBE_TABLE, &AccountGrants::default()),
+                AccessMap::new(),
+                "{scope:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_application_table_gives_an_account_with_nothing_nothing() {
+        // ADR 0007 §3: no role and no grant, so only the own account, which
+        // is no ra-core resource.
+        assert_eq!(
+            access_map(RESOURCE_ACCESS, &AccountGrants::default()),
+            AccessMap::new()
+        );
+        // And the admin role gets every action of every row.
+        let admin = access_map(RESOURCE_ACCESS, &account(&[Role::Admin], &[]));
+        for row in RESOURCE_ACCESS {
+            assert_eq!(
+                admin.get(row.resource).map(BTreeSet::len),
+                Some(row.rules.len()),
+                "{}",
+                row.resource
+            );
+        }
+    }
+
+    /// Any requirement but [`Requirement::Public`], which no resource action
+    /// carries.
+    fn session_requirement() -> impl Strategy<Value = Requirement> {
+        requirement().prop_filter("a resource action needs a session", |requirement| {
+            requirement.needs_session()
+        })
+    }
+
+    /// Any action.
+    fn access_action() -> impl Strategy<Value = AccessAction> {
+        proptest::sample::select(AccessAction::ALL.to_vec())
+    }
+
+    /// Any access table over three resource names, a name possibly twice,
+    /// each rule with up to three requirements. The rows are leaked to get
+    /// the `'static` slices of the real table; a test process ends soon.
+    fn table() -> impl Strategy<Value = &'static [ResourceAccess]> {
+        let rule = (
+            access_action(),
+            proptest::collection::vec(session_requirement(), 0..=3),
+        )
+            .prop_map(|(action, requires)| ActionRule::new(action, Vec::leak(requires)));
+        let row = (
+            proptest::sample::select(vec!["alpha", "beta", "gamma"]),
+            proptest::collection::vec(rule, 0..=6),
+        )
+            .prop_map(|(resource, rules)| ResourceAccess {
+                resource,
+                rules: Vec::leak(rules),
+            });
+        proptest::collection::vec(row, 0..=4).prop_map(|rows| &*Vec::leak(rows))
+    }
+
+    proptest! {
+        #[test]
+        fn the_access_map_holds_exactly_the_rules_the_account_meets(
+            table in table(),
+            roles in roles(),
+            grants in grants(),
+        ) {
+            let account = account(&roles, &grants);
+            let map = access_map(table, &account);
+            for (resource, actions) in &map {
+                // Only resources of the table, never with an empty list.
+                prop_assert!(table.iter().any(|row| row.resource == *resource));
+                prop_assert!(!actions.is_empty(), "{}", resource);
+            }
+            for row in table {
+                for rule in row.rules {
+                    let expected = !rule.requires.is_empty()
+                        && rule.requires.iter().all(|requirement| requirement.is_met_by(&account));
+                    prop_assert_eq!(rule.is_met_by(&account), expected);
+                    if expected {
+                        prop_assert!(map[row.resource].contains(&rule.action));
+                    }
+                }
+            }
+            // An action in the map comes from a rule the account meets.
+            for (resource, actions) in &map {
+                for action in actions {
+                    prop_assert!(table.iter().any(|row| {
+                        row.resource == *resource
+                            && row.rules.iter().any(|rule| {
+                                rule.action == *action && rule.is_met_by(&account)
+                            })
+                    }), "{}/{}", resource, action);
+                }
+            }
+        }
+
+        #[test]
+        fn adding_a_role_or_a_grant_never_takes_an_action_away(
+            table in table(),
+            roles in roles(),
+            grants in grants(),
+            added_role in role(),
+            added_grant in permission(),
+        ) {
+            let before = access_map(table, &account(&roles, &grants));
+            let mut more_roles = roles.clone();
+            more_roles.push(added_role);
+            let mut more_grants = grants.clone();
+            more_grants.push(added_grant);
+            for after in [
+                access_map(table, &account(&more_roles, &grants)),
+                access_map(table, &account(&roles, &more_grants)),
+            ] {
+                for (resource, actions) in &before {
+                    prop_assert!(actions.is_subset(&after[resource]), "{}", resource);
+                }
+            }
+        }
+
+        #[test]
+        fn the_admin_role_gets_every_action_that_has_a_requirement(
+            table in table(),
+            roles in roles(),
+            grants in grants(),
+        ) {
+            let mut roles = roles;
+            roles.push(Role::Admin);
+            let map = access_map(table, &account(&roles, &grants));
+            for row in table {
+                for rule in row.rules.iter().filter(|rule| !rule.requires.is_empty()) {
+                    prop_assert!(map[row.resource].contains(&rule.action));
+                }
+            }
+        }
+
+        #[test]
+        fn the_access_map_reads_only_what_the_requirements_read(
+            table in table(),
+            roles in roles(),
+            grants in grants(),
+        ) {
+            // Two accounts with the same effective permissions and the same
+            // admin flag get the same map, however they got them: the
+            // admin UI receives only those two (ADR 0007 §7), and the case
+            // table describes an account by them.
+            let account = account(&roles, &grants);
+            let effective: Vec<Permission> = account.effective().into_iter().collect();
+            let admin_roles: &[Role] = if account.is_admin() { &[Role::Admin] } else { &[] };
+            let flattened = self::account(admin_roles, &effective);
+            prop_assert_eq!(access_map(table, &account), access_map(table, &flattened));
+        }
+
+        #[test]
+        fn a_session_is_offered_its_account_s_map_only_in_full_scope(
+            table in table(),
+            roles in roles(),
+            grants in grants(),
+            scope in proptest::sample::select(vec![
+                SessionScope::Admin,
+                SessionScope::PasswordChange,
+                SessionScope::Mfa,
+            ]),
+        ) {
+            let account = account(&roles, &grants);
+            let offered = session_access_map(scope, table, &account);
+            if scope == SessionScope::Admin {
+                prop_assert_eq!(offered, access_map(table, &account));
+            } else {
+                prop_assert!(offered.is_empty(), "{:?}: {:?}", scope, offered);
+            }
+        }
+
+        #[test]
+        fn from_name_knows_exactly_the_nine_actions(name in "\\PC{0,10}") {
+            match AccessAction::from_name(&name) {
+                Some(action) => prop_assert_eq!(action.name(), name.as_str()),
+                None => prop_assert!(AccessAction::ALL.iter().all(|action| action.name() != name)),
+            }
         }
     }
 }

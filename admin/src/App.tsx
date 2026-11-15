@@ -15,12 +15,22 @@
  * clicks (ADR 0006 §1): the layout mounts the activity tracker, which calls
  * the auth provider's `refreshSession`, with the event target and the clock
  * that `main.tsx` passes.
+ *
+ * The sidebar lists only the resources whose list the account may open: the
+ * kit's `app-sidebar.tsx` asks `canAccess` for `list`, which the auth
+ * provider answers from the access map of `/auth/me` (ADR 0007 §7). The
+ * dashboard and the custom routes (the about page) are not resources and
+ * ask nothing. A resource page that the map refuses goes to the Hungarian
+ * access-denied page, and one whose question could not be answered to the
+ * authentication-error page (`src/auth/AccessPages.tsx`).
  */
+import type { QueryClient } from "@tanstack/react-query"
 import { useCallback, useMemo, type ReactNode } from "react"
 import { CustomRoutes, type DataProvider, type I18nProvider } from "ra-core"
 import { Route } from "react-router-dom"
 
 import { AboutPage } from "@/about/AboutPage"
+import { AccessDeniedPage, AuthenticationErrorPage } from "@/auth/AccessPages"
 import type { ActivityEventTarget } from "@/auth/activity-refresh"
 import type { BackendAuthProvider } from "@/auth/auth-provider"
 import { createSignInPage } from "@/auth/SignInPage"
@@ -41,6 +51,12 @@ export interface AdminAppProps {
   readonly authProvider: BackendAuthProvider
   /** The Hungarian i18n provider (`createI18nProvider`). */
   readonly i18nProvider: I18nProvider
+  /**
+   * ra-core's react-query client. `main.tsx` makes it, so that the auth
+   * provider's `onAccessChange` can invalidate the cached `canAccess`
+   * answers in it (`src/auth/access-checks.ts`).
+   */
+  readonly queryClient: QueryClient
   /** The build's raw `VITE_SOURCE_COMMIT`, for the source links. */
   readonly sourceCommit: string | undefined
   /**
@@ -69,6 +85,7 @@ export function AdminApp({
   dataProvider,
   authProvider,
   i18nProvider,
+  queryClient,
   sourceCommit,
   developmentRoutes,
   activityTarget,
@@ -93,12 +110,18 @@ export function AdminApp({
       dataProvider={dataProvider}
       authProvider={authProvider}
       i18nProvider={i18nProvider}
+      queryClient={queryClient}
       layout={layout}
       loginPage={signInPage}
       // Without it ra-core would render the layout, the custom routes and
       // the not-found screen to a visitor without a session, and check
       // the session only on the dashboard and the resource pages.
       requireAuth
+      // Where ra-core sends a page that canAccess refused, or could not
+      // answer; without them both paths render nothing
+      // (`src/auth/AccessPages.tsx`).
+      accessDenied={AccessDeniedPage}
+      authenticationError={AuthenticationErrorPage}
       dashboard={Dashboard}
       title={i18nProvider.translate("app.title")}
       // The kit otherwise loads a tracking image from marmelab's server in

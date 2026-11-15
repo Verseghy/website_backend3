@@ -217,7 +217,11 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    (`npm run clean-room` fails on one). Every screen sits behind the sign-in
    (`requireAuth`, ADR 0006); a refused request shows its envelope's message
    through `envelopeMessage` of `admin/src/api/error-envelope.ts` (ADR 0021
-   section 4), and the auth provider signs out on `401` only.
+   section 4), and the auth provider signs out on `401` only. Whether the
+   sidebar lists the resource and its pages open comes from the access map
+   of `/auth/me`, through `authProvider.canAccess`: the slice adds its row
+   to the access table (recipe 10 step 6), never a check of its own in the
+   admin.
 10. **Importer step** for the feature's legacy tables: recipe 4.
 11. **Tests at every layer**: domain unit tests and proptests, in-module;
     domain tests that need fixture files (such as the image corpus in
@@ -1048,7 +1052,9 @@ outside the table; its documentation lists what a text check cannot see.
    pickers that `edit posts` may read, the page picker of `edit menu`)
    needs a new `Requirement` variant in `src/domain/authz.rs`, with its
    unit tests and properties, in the slice that mounts the first such
-   route. Then chain what the route needs:
+   route. Only routes take it: the access row of step 6 asks for the
+   resource's own permission alone (research: DECISIONS R35 (D153)). Then
+   chain what the route needs:
    - `.upload()` for a route that receives a file (128 MiB instead of the
      JSON routes' 4 MiB, ADR 0015 section 6);
    - `.accepting::<AdminOrPasswordChange>()` only for the three routes
@@ -1082,4 +1088,52 @@ outside the table; its documentation lists what a text check cannot see.
    rejects a refused answer with `refusalError` of
    `admin/src/api/error-envelope.ts`, so ra-core's notification shows the
    Hungarian `errors.<code>` message, and a `403` keeps the user signed in
-   (`checkError` signs out on `401` only).
+   (`checkError` signs out on `401` only) and makes the auth provider read
+   `/auth/me` again, so the sidebar and the screens follow a role change
+   (ADR 0007 §7).
+6. **The access row.** A route of an ra-core resource (the resource's
+   list, record, write, trash and history routes) also gives the resource
+   its row in `RESOURCE_ACCESS` of `src/domain/authz.rs` (ADR 0007 §4, §7),
+   in the PR that mounts the first of them: a `ResourceAccess` with the
+   ra-core resource name and one `ActionRule` per action the admin offers
+   (`list`, `show`, `create`, `edit`, `delete`, `publish`, `restore`,
+   `purge`, `history`), each with the requirements its routes carry in the
+   table (all of them; `publish` reads "edit posts and publish posts"). A
+   row asks only for the resource's own permission, also where ADR 0007
+   section 4 reads "or" (the labels and authors that `edit posts` may read
+   for the post form's pickers, the pages that `edit menu` may read): the
+   other permission goes on the routes the picker calls, with the new
+   `Requirement` variant of step 2, never into the row, so every rule
+   stays a list that needs all of its requirements. Asked whether such a
+   row asks only for the resource's own permission or carries the "or"
+   too, so that an account that holds only the picker's permission also
+   sees the list screen and is offered the resource's `history`, the
+   maintainer answered "The row asks for the resource's own permission;
+   the "or" stays on the routes" on 2026-11-15 (research: DECISIONS R35
+   (D153)). An account with `edit posts` alone therefore still gets the
+   post form's picker (ra-core's reference inputs never ask `canAccess`),
+   but not the „Címkék” sidebar entry, the labels list (its address opens
+   the access-denied page) or the labels' `history`. The module's
+   tests refuse a row that names a resource twice, lists an action twice
+   or without a requirement, makes an action public, lets anything but the
+   `admin` role purge, or gives `history` other requirements than `list`.
+   Mark each route the admin calls for an action with
+   `.serving("labels", &[AccessAction::List])` (one call per resource the
+   route serves): the route table's tests (`routes.rs`) fail when an
+   action of a row has no route that serves it, when a route serves an
+   action that no row offers, and when a row offers an action to an
+   account that a route serving it refuses (they try every set of roles
+   with up to two extra grants, and each rule's weakest account), so the
+   sidebar never shows an entry that answers `403`. A route may let in
+   more accounts than its row, never fewer. `/auth/me` then sends the
+   row's actions in each account's access map (`session_access_map`: none
+   to a `password_change` session), and the admin's
+   `authProvider.canAccess` answers from it. Add the row's cases to
+   `tests/fixtures/authz_cases.json` (one that allows and one that
+   refuses at least; `tests/domain/authz_cases.rs` fails without them, and
+   tells you the `access` list `/auth/me` sends for each case), and
+   update the `access` of the cases on that resource that already exist.
+   A record-level rule goes into `src/domain/authz.rs` for the handler,
+   into the case table's Rust dispatcher (`record_rule_allows`), into
+   `RECORD_RULES` of `admin/src/auth/access.ts`, and into cases with a
+   record, which `admin/src/auth/authz-cases.test.ts` requires.
