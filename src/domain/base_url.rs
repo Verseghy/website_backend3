@@ -206,12 +206,59 @@ mod tests {
         );
     }
 
-    /// A canonical base: a lower-case host, an optional port that is not the
-    /// scheme's default, and path segments of unreserved characters.
+    #[test]
+    fn a_host_label_the_parser_refuses_is_not_absolute() {
+        // A label that starts with `xn--` is an IDNA A-label: the parser
+        // decodes the rest as Punycode (UTS 46, which the WHATWG URL
+        // standard applies to the host of an http or https URL) and refuses
+        // the host when that fails, here because nothing follows the
+        // prefix or a hyphen ends the label. So the text is no URL at all,
+        // and the trailing-slash rule is never reached. The property
+        // generator below once produced `http://xn--` and `http://a.xn--`;
+        // it now leaves such labels out.
+        for text in [
+            "http://xn--",
+            "http://a.xn--",
+            "http://xn--/",
+            "http://a.xn--/",
+            "https://xn--a-/storage",
+        ] {
+            assert_eq!(
+                BaseUrl::parse(text),
+                Err(BaseUrlError::NotAbsolute),
+                "{text:?}"
+            );
+        }
+        // A valid A-label is the canonical spelling of its host, so it is
+        // kept as written.
+        assert_eq!(
+            BaseUrl::parse("https://xn--bcher-kva.example/storage").map(|url| url.to_string()),
+            Ok("https://xn--bcher-kva.example/storage".to_owned())
+        );
+    }
+
+    /// A host label of the generator: a lower-case letter, then letters,
+    /// digits and hyphens. A label that starts with `xn--` is left out: the
+    /// parser decodes it as Punycode and refuses an invalid one
+    /// (`a_host_label_the_parser_refuses_is_not_absolute`), and this regex
+    /// cannot tell a valid A-label from an invalid one, so the generator
+    /// leaves them all out; that test checks a valid one. Every other such
+    /// label passes the parser as written: the URL standard places no rule
+    /// on hyphens, and a label that starts with a letter is never read as an
+    /// IPv4 number.
+    fn host_label() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9-]{0,10}".prop_filter("an xn-- label is Punycode", |label| {
+            !label.starts_with("xn--")
+        })
+    }
+
+    /// A canonical base: a lower-case host of one to three labels
+    /// ([`host_label`]), an optional port that is not the scheme's default,
+    /// and path segments of unreserved characters.
     fn canonical_base() -> impl Strategy<Value = String> {
         (
             prop_oneof![Just("http"), Just("https")],
-            "[a-z][a-z0-9-]{0,10}(\\.[a-z][a-z0-9-]{0,10}){0,2}",
+            proptest::collection::vec(host_label(), 1..=3).prop_map(|labels| labels.join(".")),
             proptest::option::of(1024_u16..),
             proptest::collection::vec("[A-Za-z0-9._~-]{1,8}", 0..4),
         )
