@@ -22,12 +22,15 @@
 use std::collections::BTreeMap;
 
 /// A step of data-migration.md §7.1 that records rule hits. The steps that
-/// later slices add (N1, N2, N4, N5, N5b and N7) join this list with their
-/// rules.
+/// later slices add (N1, N2, N4, N5b and N7, and N5's inline rules) join
+/// this list with their rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Step {
     /// N3: `<center>` unwrapped into `text-align: center`.
     N3,
+    /// N5: legacy presentational markup mapped onto content-v1; so far its
+    /// block rules.
+    N5,
     /// N6: links to the dead host rewritten to root-relative.
     N6,
 }
@@ -38,6 +41,7 @@ impl Step {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::N3 => "N3",
+            Self::N5 => "N5",
             Self::N6 => "N6",
         }
     }
@@ -69,6 +73,32 @@ pub enum Rule {
     /// which a reader may not have seen, so the report lists the body for
     /// review.
     CenterAlignmentUnclear,
+    /// N5: a paragraph's `align` attribute, whose value a browser maps to
+    /// `text-align` (`left`, `right`, `center` or `justify`), became that
+    /// `text-align` declaration in front of its `style`.
+    ParagraphAlignMapped,
+    /// N5: a paragraph's `align` attribute was removed without changing
+    /// what the paragraph shows: a browser maps its value to nothing, or
+    /// the paragraph's `style` sets a `text-align` that content-v1 keeps,
+    /// which wins over the attribute.
+    ParagraphAlignDropped,
+    /// N5: a paragraph whose `align` became `text-align` also has a
+    /// `text-align` in its `style` that content-v1 does not keep (such as
+    /// `inherit` or `start`, or one the sanitiser cannot read). The
+    /// attribute's alignment is kept, but a reader may have seen the other
+    /// one, so the report lists the body for review.
+    ParagraphAlignUnclear,
+    /// N5: a table's `align` attribute was removed; both public sites
+    /// centre every content-v1 table.
+    TableAlignDropped,
+    /// N5: an `h5` or `h6` became an `h4`, the smallest heading content-v1
+    /// has.
+    HeadingToH4,
+    /// N5: an `h2` whose `style` makes it italic lost that `font-style`,
+    /// and its content was wrapped in `em`.
+    ItalicHeadingToEm,
+    /// N5: a paragraph's `lang` attribute was removed.
+    ParagraphLangStripped,
     /// N6: a `src` or `href` on the dead host's `/storage/` was rewritten to
     /// the root-relative `/storage/` path.
     DeadHostLinkRewritten,
@@ -76,12 +106,19 @@ pub enum Rule {
 
 impl Rule {
     /// Every rule, in the order of [`Ord`].
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 13] = [
         Self::CenterUnwrapped,
         Self::CenterBlockAligned,
         Self::CenterRunWrapped,
         Self::CenterAlignmentDropped,
         Self::CenterAlignmentUnclear,
+        Self::ParagraphAlignMapped,
+        Self::ParagraphAlignDropped,
+        Self::ParagraphAlignUnclear,
+        Self::TableAlignDropped,
+        Self::HeadingToH4,
+        Self::ItalicHeadingToEm,
+        Self::ParagraphLangStripped,
         Self::DeadHostLinkRewritten,
     ];
 
@@ -94,6 +131,13 @@ impl Rule {
             | Self::CenterRunWrapped
             | Self::CenterAlignmentDropped
             | Self::CenterAlignmentUnclear => Step::N3,
+            Self::ParagraphAlignMapped
+            | Self::ParagraphAlignDropped
+            | Self::ParagraphAlignUnclear
+            | Self::TableAlignDropped
+            | Self::HeadingToH4
+            | Self::ItalicHeadingToEm
+            | Self::ParagraphLangStripped => Step::N5,
             Self::DeadHostLinkRewritten => Step::N6,
         }
     }
@@ -107,6 +151,13 @@ impl Rule {
             Self::CenterRunWrapped => "center_run_wrapped",
             Self::CenterAlignmentDropped => "center_alignment_dropped",
             Self::CenterAlignmentUnclear => "center_alignment_unclear",
+            Self::ParagraphAlignMapped => "paragraph_align_mapped",
+            Self::ParagraphAlignDropped => "paragraph_align_dropped",
+            Self::ParagraphAlignUnclear => "paragraph_align_unclear",
+            Self::TableAlignDropped => "table_align_dropped",
+            Self::HeadingToH4 => "heading_to_h4",
+            Self::ItalicHeadingToEm => "italic_heading_to_em",
+            Self::ParagraphLangStripped => "paragraph_lang_stripped",
             Self::DeadHostLinkRewritten => "dead_host_link_rewritten",
         }
     }
@@ -256,7 +307,8 @@ mod tests {
         for rule in Rule::ALL {
             let name = rule.as_str();
             assert!(
-                name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
                 "{name} is snake_case"
             );
         }
@@ -276,10 +328,18 @@ mod tests {
                 ("center_run_wrapped", "N3"),
                 ("center_alignment_dropped", "N3"),
                 ("center_alignment_unclear", "N3"),
+                ("paragraph_align_mapped", "N5"),
+                ("paragraph_align_dropped", "N5"),
+                ("paragraph_align_unclear", "N5"),
+                ("table_align_dropped", "N5"),
+                ("heading_to_h4", "N5"),
+                ("italic_heading_to_em", "N5"),
+                ("paragraph_lang_stripped", "N5"),
                 ("dead_host_link_rewritten", "N6"),
             ]
         );
         assert_eq!(Step::N3.as_str(), "N3");
+        assert_eq!(Step::N5.as_str(), "N5");
         assert_eq!(Step::N6.as_str(), "N6");
     }
 

@@ -1,5 +1,7 @@
 //! The normaliser's running time on the shapes that once made N3 quadratic
-//! (`src/domain/normalise/center.rs`, "Cost").
+//! (`src/domain/normalise/center.rs`, "Cost"), and on the nested italic
+//! headings that N5 plans in one walk (`src/domain/normalise/blocks.rs`,
+//! "Cost").
 //!
 //! The normaliser has no size or depth limit of its own, because its inputs
 //! are the fixed legacy dump and backend3's own, already bounded, bodies
@@ -48,5 +50,37 @@ fn centres_around_a_deep_inline_chain_do_not_rescan_it() {
     let elapsed = started.elapsed();
     assert!(!out.html.contains("<center"), "{}", out.html);
     assert_eq!(out.report.count(Rule::CenterUnwrapped), depth);
+    assert!(elapsed < BOUND, "{elapsed:?}");
+}
+
+#[test]
+fn nested_italic_headings_do_not_rescan_their_content() {
+    // Only tag soup nests one heading in another, with a `div` between
+    // them. Each italic `h2` asks which `em` and `i` below it hold no block;
+    // asked per heading, that walks the content of every heading once for
+    // each heading around it, so the time grows with the square of the
+    // depth: this body took about 12 seconds that way in a debug build. N5
+    // answers every heading in one walk. Every heading keeps its own `em`
+    // here, because each holds a `div`. The `object` is a scope boundary for
+    // the parser, where html5ever's scope checks stop, so that its parse of
+    // this depth stays linear and the time is the normaliser's own.
+    let depth = 5_000;
+    let body = format!(
+        "{}x{}",
+        r#"<h2 style="font-style: italic"><div><object>"#.repeat(depth),
+        "</object></div></h2>".repeat(depth)
+    );
+    let started = Instant::now();
+    let out = normalise(&body).expect("the body settles");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        out.html,
+        format!(
+            "{}x{}",
+            "<h2><em><div><object>".repeat(depth),
+            "</object></div></em></h2>".repeat(depth)
+        )
+    );
+    assert_eq!(out.report.count(Rule::ItalicHeadingToEm), depth);
     assert!(elapsed < BOUND, "{elapsed:?}");
 }

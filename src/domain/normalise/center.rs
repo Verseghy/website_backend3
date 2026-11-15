@@ -135,9 +135,10 @@ const ALIGNABLE: &[&str] = &["p", "h1", "h2", "h3", "h4", "h5", "h6", "td", "th"
 /// HTML elements that a browser lays out as blocks (or table parts, list
 /// items and other non-inline boxes) by default (WHATWG HTML, "Rendering",
 /// §15.3). Every other element, unknown ones included, is inline content,
-/// as CSS's initial `display: inline` makes it.
+/// as CSS's initial `display: inline` makes it. N5's italic-heading rule
+/// reads blocks the same way.
 #[rustfmt::skip]
-const BLOCKS: &[&str] = &[
+pub(super) const BLOCKS: &[&str] = &[
     "address", "article", "aside", "blockquote", "body", "caption", "center", "col", "colgroup",
     "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
     "footer", "form", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
@@ -200,9 +201,10 @@ enum Kind {
 }
 
 /// How an element is aligned before N3 removes the `center` around it
-/// (see "Own alignment" in the module documentation).
+/// (see "Own alignment" in the module documentation). N5's paragraph rule
+/// reads a `style` the same way, through [`style_alignment`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Alignment {
+pub(super) enum Alignment {
     /// It sets none, so it shows the centre's.
     Inherited,
     /// It sets its own alignment.
@@ -670,7 +672,7 @@ fn alignment(node: NodeRef<'_, Node>) -> Alignment {
 /// reads it, or `None` when it names no `text-align`.
 ///
 /// - `style`: the attribute value, with character references decoded.
-fn style_alignment(style: &str) -> Option<Alignment> {
+pub(super) fn style_alignment(style: &str) -> Option<Alignment> {
     let rule = text_align_rule();
     let read = declarations::read(style);
     let mut kept = None;
@@ -735,7 +737,7 @@ fn text_align_mentions(style: &str) -> usize {
 ///
 /// - `name`: a lower-case HTML tag name.
 /// - `value`: the attribute's value.
-fn align_attribute(name: &str, value: &str) -> Option<bool> {
+pub(super) fn align_attribute(name: &str, value: &str) -> Option<bool> {
     let values: &[&str] = match name {
         "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => &["left", "right", "center", "justify"],
         "div" => &["left", "right", "center", "middle", "justify"],
@@ -751,24 +753,12 @@ fn align_attribute(name: &str, value: &str) -> Option<bool> {
 }
 
 /// Gives `element` `text-align: center` in front of its `style` (see the
-/// module documentation for why in front).
+/// module documentation for why in front). N5 writes a paragraph's mapped
+/// `align` the same way, so both go through [`dom::prepend_declaration`].
 ///
 /// - `element`: a block without an alignment that content-v1 keeps.
 fn centre_style(element: &mut scraper::node::Element) {
-    let value = match element.attr("style") {
-        Some(style)
-            if !style
-                .trim_matches(|c: char| c.is_ascii_whitespace() || c == ';')
-                .is_empty() =>
-        {
-            format!(
-                "{CENTRED}; {}",
-                style.trim_start_matches(|c: char| c.is_ascii_whitespace())
-            )
-        }
-        _ => CENTRED.to_owned(),
-    };
-    dom::set_attribute(element, "style", &value);
+    dom::prepend_declaration(element, CENTRED);
 }
 
 /// The style string N3 writes for a block whose `style` is `style`; the

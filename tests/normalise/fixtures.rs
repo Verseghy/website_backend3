@@ -5,16 +5,18 @@
 //! Each fixture is a pair of files: `<name>.html`, a legacy body, and
 //! `<name>.out.html`, what the normaliser must write for it. Both are read
 //! as bytes, so a trailing newline is part of the fixture. The name starts
-//! with the step it shows (`n0-`, `n3-`, `n6-`, `n8-`, `n9-`) or with `alt-`
-//! for the images without alt text. For every pair the runner checks:
+//! with the step it shows (`n0-`, `n3-`, `n5-`, `n6-`, `n8-`, `n9-`) or
+//! with `alt-` for the images without alt text. For every pair the runner
+//! checks:
 //!
 //! - the output equals the expected file, byte for byte;
 //! - the expected file is the normaliser's fixed point: normalising it
 //!   again returns it with no rule hit and the same observations (P4);
 //! - the step the name gives fired: an `n3-` fixture records an N3 hit, an
-//!   `n6-` fixture an N6 hit or a dead-host occurrence, an `alt-` fixture
-//!   an image without alt text, and an `n0-`, `n8-` or `n9-` fixture no hit
-//!   at all, because parsing and writing are not rule hits;
+//!   `n5-` fixture an N5 hit, an `n6-` fixture an N6 hit or a dead-host
+//!   occurrence, an `alt-` fixture an image without alt text, and an
+//!   `n0-`, `n8-` or `n9-` fixture no hit at all, because parsing and
+//!   writing are not rule hits;
 //! - N9 holds: the expected file is also the sanitiser's fixed point, except
 //!   for the fixtures in [`NOT_YET_CONTENT_V1`], whose output still holds
 //!   markup that a later step changes; for those the sanitiser check must
@@ -50,6 +52,11 @@ const NOT_YET_CONTENT_V1: &[(&str, &str)] = &[
         "n3-center-unclear-alignment",
         "N7 drops the text-align declaration that content-v1 does not keep",
     ),
+    (
+        "n5-table-align",
+        "N5b gives the tables the content-v1 table shape, and N7 drops border, cellpadding and \
+         cellspacing",
+    ),
 ];
 
 /// Fixtures whose output is content-v1 (it passes N9's sanitiser check) but
@@ -64,7 +71,7 @@ const NOT_YET_EDITOR_FORM: &[(&str, &str)] = &[(
 const CRLF_INPUTS: &[&str] = &["n0-upper-case-markup", "n3-center-around-embed"];
 
 /// The name prefixes a fixture may start with.
-const PREFIXES: &[&str] = &["n0-", "n3-", "n6-", "n8-", "n9-", "alt-"];
+const PREFIXES: &[&str] = &["n0-", "n3-", "n5-", "n6-", "n8-", "n9-", "alt-"];
 
 /// The directory of the fixtures.
 fn fixtures_dir() -> PathBuf {
@@ -178,6 +185,7 @@ fn every_fixture_comes_out_as_expected_and_stays_there() {
                 assert!(!once.report.has_hits(), "{name}: {:?}", once.report);
             }
             Some("n3") => assert!(hits(Step::N3) > 0, "{name}: no N3 hit"),
+            Some("n5") => assert!(hits(Step::N5) > 0, "{name}: no N5 hit"),
             Some("n6") => assert!(
                 hits(Step::N6) > 0 || !once.report.dead_host_kept().is_empty(),
                 "{name}: N6 neither rewrote nor reported anything"
@@ -251,6 +259,28 @@ fn the_production_shapes_report_what_the_sign_off_sheet_lists() {
     assert_eq!(n3("n3-center-around-list-and-quote"), [0, 3, 0, 0]);
     assert_eq!(n3("n3-center-around-table"), [3, 0, 0, 0]);
     assert_eq!(n3("n3-center-in-cell"), [1, 0, 0, 0]);
+    let n5 = |name: &str| {
+        report(name)
+            .hits()
+            .filter(|(rule, _)| rule.step() == Step::N5)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        n5("n5-paragraph-align"),
+        [
+            (Rule::ParagraphAlignMapped, 3),
+            (Rule::ParagraphAlignDropped, 2)
+        ],
+        "the attribute that a style overrides and the one that maps to nothing are dropped"
+    );
+    assert_eq!(
+        n5("n5-paragraph-align-in-center"),
+        [(Rule::ParagraphAlignMapped, 1)]
+    );
+    assert_eq!(n5("n5-table-align"), [(Rule::TableAlignDropped, 2)]);
+    assert_eq!(n5("n5-minor-headings"), [(Rule::HeadingToH4, 2)]);
+    assert_eq!(n5("n5-italic-heading"), [(Rule::ItalicHeadingToEm, 2)]);
+    assert_eq!(n5("n5-paragraph-lang"), [(Rule::ParagraphLangStripped, 2)]);
 }
 
 #[test]
