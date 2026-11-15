@@ -4,6 +4,7 @@
  * page once the provider confirms, and otherwise keeps the user where they
  * are and notifies why (ADR 0006 §2, ADR 0021 §4).
  */
+import type { ReactNode } from "react"
 import { act, render, screen, waitFor } from "@testing-library/react"
 import fc from "fast-check"
 import {
@@ -19,7 +20,11 @@ import { keyMessage } from "@/api/error-envelope"
 import { createI18nProvider } from "@/i18n/provider"
 
 import { SIGN_OUT_PARAMS, SignInError, SignOutError } from "./auth-provider"
-import { signOutErrorMessage, useSignOut } from "./use-sign-out"
+import {
+  signOutErrorMessage,
+  useConfirmedSignOut,
+  useSignOut,
+} from "./use-sign-out"
 
 /**
  * Shows the sign-out action as a button, and every queued notification as
@@ -53,9 +58,14 @@ function Probe() {
  * `logout`.
  *
  * @param logout - the stub of `authProvider.logout`.
+ * @param probe - what to render in the admin context; the user menu's
+ *   sign-out probe unless the test says otherwise.
  * @returns a getter of the router's current location.
  */
-function renderProbe(logout: AuthProvider["logout"]) {
+function renderProbe(
+  logout: AuthProvider["logout"],
+  probe: ReactNode = <Probe />
+) {
   let location: Location | undefined
   const authProvider: AuthProvider = {
     login: vi.fn(),
@@ -75,7 +85,7 @@ function renderProbe(logout: AuthProvider["logout"]) {
         authProvider={authProvider}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
       >
-        <Probe />
+        {probe}
       </CoreAdminContext>
     </TestMemoryRouter>
   )
@@ -183,6 +193,77 @@ describe("useSignOut", () => {
       ])
     )
     expect(location()?.pathname).toBe("/admin/about")
+  })
+})
+
+/**
+ * The in-place sign-in's sign-out as a button; what it resolved or rejected
+ * with is shown as text, beside the queued notifications, so a test reads
+ * that the hook itself notifies nothing.
+ */
+function ConfirmedProbe() {
+  const signOut = useConfirmedSignOut()
+  const { notifications: queued } = useNotificationContext()
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          signOut().then(
+            () => {
+              document.body.dataset.outcome = "resolved"
+            },
+            (error: unknown) => {
+              document.body.dataset.outcome =
+                error instanceof Error ? error.name : "other"
+            }
+          )
+        }}
+      >
+        sign-out
+      </button>
+      <p data-testid="queued">{queued.length}</p>
+    </>
+  )
+}
+
+describe("useConfirmedSignOut", () => {
+  it("asks the provider to end the session, resolves, and returns to the page after the next sign-in", async () => {
+    delete document.body.dataset.outcome
+    const logout = vi.fn<AuthProvider["logout"]>(async () => undefined)
+    const location = renderProbe(logout, <ConfirmedProbe />)
+
+    await clickSignOut()
+
+    expect(logout).toHaveBeenCalledExactlyOnceWith(SIGN_OUT_PARAMS)
+    await waitForSignOut(() =>
+      expect(document.body.dataset.outcome).toBe("resolved")
+    )
+    await waitForSignOut(() =>
+      expect(location()?.pathname).toBe("/admin/login")
+    )
+    // As ra-core's own sign-out after an ended session, which runs at the
+    // same time, has it: back to this page after the next sign-in.
+    expect(location()?.state).toEqual({
+      nextPathname: "/admin/about",
+      nextSearch: "",
+    })
+  })
+
+  it("rejects with the provider's error, keeps the user on the page and notifies nothing", async () => {
+    delete document.body.dataset.outcome
+    const logout = vi.fn<AuthProvider["logout"]>(async () => {
+      throw new SignOutError(500, keyMessage("auth.sign_out.failed"))
+    })
+    const location = renderProbe(logout, <ConfirmedProbe />)
+
+    await clickSignOut()
+
+    await waitForSignOut(() =>
+      expect(document.body.dataset.outcome).toBe("SignOutError")
+    )
+    expect(location()?.pathname).toBe("/admin/about")
+    expect(screen.getByTestId("queued")).toHaveTextContent("0")
   })
 })
 

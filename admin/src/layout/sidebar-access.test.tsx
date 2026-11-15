@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { invalidateAccessChecks } from "@/auth/access-checks"
 import { createAuthProvider } from "@/auth/auth-provider"
+import { createSessionExpiry } from "@/auth/session-expiry"
 import type { MeResponse } from "@/bindings/MeResponse"
 import { Admin } from "@/components/admin"
 import { createDataProvider } from "@/data-provider/data-provider"
@@ -67,9 +68,13 @@ function mount(me: () => MeResponse) {
   )
   const missingKeys: string[] = []
   const queryClient = new QueryClient()
+  // One retry queue for both providers and the layout's in-place sign-in,
+  // as main.tsx has it; every answer here is a 200, so nothing waits.
+  const sessionExpiry = createSessionExpiry()
   const authProvider = createAuthProvider({
     apiBaseUrl: "/api/admin",
     fetch,
+    sessionExpiry,
     onAccessChange: () => {
       void invalidateAccessChecks(queryClient)
     },
@@ -79,11 +84,19 @@ function mount(me: () => MeResponse) {
   const canAccess = vi.spyOn(authProvider, "canAccess")
   // The session's activity tracker (ADR 0006 §1) listens on a target that
   // nothing dispatches on, so it never calls the refresh.
-  const AppLayout = createAppLayout(undefined, {
-    target: new EventTarget(),
-    now: () => 0,
-    refresh: () => Promise.resolve(),
-  })
+  const AppLayout = createAppLayout(
+    undefined,
+    {
+      target: new EventTarget(),
+      now: () => 0,
+      refresh: () => Promise.resolve(),
+    },
+    {
+      expiry: sessionExpiry,
+      account: () => authProvider.sessionAccount(),
+      resume: (password) => authProvider.resumeSession(password),
+    }
+  )
   const router = createMemoryRouter(
     adminRoutes(
       <Admin
@@ -92,6 +105,8 @@ function mount(me: () => MeResponse) {
         dataProvider={createDataProvider({
           apiBaseUrl: "/api/admin",
           resources: {},
+          fetch,
+          sessionExpiry,
         })}
         i18nProvider={createI18nProvider({
           reportMissingKeys: true,

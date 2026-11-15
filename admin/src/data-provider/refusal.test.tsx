@@ -23,6 +23,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { refusalError } from "@/api/error-envelope"
 import { createAuthProvider } from "@/auth/auth-provider"
+import { createSessionExpiry } from "@/auth/session-expiry"
 import type { MeResponse } from "@/bindings/MeResponse"
 import { createI18nProvider } from "@/i18n/provider"
 
@@ -130,19 +131,25 @@ describe("a list the admin API refuses with 403 forbidden", () => {
         missingKeys.push(key)
       },
     })
+    // One retry queue for both providers, as main.tsx has it. No dialog is
+    // mounted here, so nothing waits; a 403 never would.
+    const sessionExpiry = createSessionExpiry()
     const authProvider = createAuthProvider({
       apiBaseUrl: "/api/admin",
       fetch: fetchStub,
+      sessionExpiry,
     })
     const logout = vi.spyOn(authProvider, "logout")
     const checkError = vi.spyOn(authProvider, "checkError")
     const dataProvider = createDataProvider({
       apiBaseUrl: "/api/admin",
+      fetch: fetchStub,
+      sessionExpiry,
       resources: {
         // What a slice's list handler does with a refused answer.
         probes: {
           async getList(_params, context) {
-            const response = await fetchStub(`${context.apiBaseUrl}/probes`)
+            const response = await context.request("/probes")
             const body: unknown = await response.json()
             if (!response.ok) {
               throw refusalError(response.status, body)

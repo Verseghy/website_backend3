@@ -15,6 +15,7 @@ import "./index.css"
 import { AdminApp } from "@/App"
 import { invalidateAccessChecks } from "@/auth/access-checks"
 import { createAuthProvider } from "@/auth/auth-provider"
+import { createSessionExpiry } from "@/auth/session-expiry"
 import { createDataProvider } from "@/data-provider/data-provider"
 import { createI18nProvider } from "@/i18n/provider"
 import { shouldReportMissingKeys } from "@/i18n/report-missing-keys"
@@ -37,20 +38,29 @@ const i18nProvider = createI18nProvider({
     flag: import.meta.env.VITE_REPORT_MISSING_KEYS,
   }),
 })
+// The browser's fetch, bound to window: called unbound, it throws
+// "Illegal invocation" in Chromium.
+const browserFetch = window.fetch.bind(window)
+// One retry queue for the in-place sign-in (ADR 0006, "Follow-up work"):
+// both providers send through it, and the app's layout mounts the dialog
+// that answers it. A provider with a queue of its own would hand its 401s
+// back at once, because no dialog is attached to that queue.
+const sessionExpiry = createSessionExpiry()
 const dataProvider = createDataProvider({
   apiBaseUrl: "/api/admin",
   resources: {},
+  fetch: browserFetch,
+  sessionExpiry,
 })
 // ra-core's react-query client, made here so the auth provider can ask it to
 // re-ask its cached access questions when the account's access changed
 // (ADR 0007 §7, `src/auth/access-checks.ts`). The defaults are the ones
 // ra-core would choose itself.
 const queryClient = new QueryClient()
-// The browser's fetch, bound to window: called unbound, it throws
-// "Illegal invocation" in Chromium.
 const authProvider = createAuthProvider({
   apiBaseUrl: "/api/admin",
-  fetch: window.fetch.bind(window),
+  fetch: browserFetch,
+  sessionExpiry,
   onAccessChange: () => {
     void invalidateAccessChecks(queryClient)
   },
@@ -106,6 +116,7 @@ const router = createAdminRouter(
     // the tracker is never restarted by a new identity.
     activityTarget={window}
     now={Date.now}
+    sessionExpiry={sessionExpiry}
   />
 )
 

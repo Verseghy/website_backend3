@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest"
 import { createI18nProvider } from "@/i18n/provider"
 
 import { createAuthProvider, SignInError } from "./auth-provider"
+import { createSessionExpiry } from "./session-expiry"
 import { createSignInPage, signInErrorMessage } from "./SignInPage"
 
 const SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -41,7 +42,11 @@ function renderSignInPage(fetch: typeof globalThis.fetch) {
     <TestMemoryRouter initialEntries={["/admin/login"]}>
       <CoreAdminContext
         basename="/admin"
-        authProvider={createAuthProvider({ apiBaseUrl: "/api/admin", fetch })}
+        authProvider={createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch,
+          sessionExpiry: createSessionExpiry(),
+        })}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
       >
         <SignInPage />

@@ -4,7 +4,7 @@
  * provider over a `fetch` stub that plays the admin API's `/auth` routes.
  */
 import type { ReactNode } from "react"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { QueryClient } from "@tanstack/react-query"
 import { Route, RouterProvider, createMemoryRouter } from "react-router-dom"
@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { AdminApp } from "@/App"
 import { createAuthProvider } from "@/auth/auth-provider"
+import { createSessionExpiry } from "@/auth/session-expiry"
 import type { MeResponse } from "@/bindings/MeResponse"
 import { createDataProvider } from "@/data-provider/data-provider"
 import { createI18nProvider } from "@/i18n/provider"
@@ -53,21 +54,28 @@ function json(status: number, body: unknown): Response {
 }
 
 /**
- * A stand-in for the admin API's `/auth` routes: `/auth/me` answers the
- * account while `signedIn` is true and `401 unauthorized` otherwise,
- * `/auth/login` signs in with `password`, `/auth/logout` ends the
+ * A stand-in for the admin API's `/auth` routes: `/auth/me` answers
+ * `account` while `signedIn` is true and `401 unauthorized` otherwise,
+ * `/auth/login` signs `loginAs` in with `password`, `/auth/logout` ends the
  * session (`204`), or answers `401` when there is none, and `/auth/refresh`
  * renews it (`204`), or answers `401` when there is none.
  */
 class FakeAuthApi {
   /** Whether the browser holds a session cookie. */
   signedIn: boolean
+  /** The account whose session the cookie holds. */
+  account: MeResponse = ME
+  /**
+   * The account that the next sign-in yields: `ME`, unless a test plays a
+   * sign-in in another tab that overwrites the cookie in the meantime.
+   */
+  loginAs: MeResponse = ME
   /** The `fetch` stub to hand to the auth provider. */
   readonly fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const url = String(input)
     if (url === "/api/admin/auth/me") {
       return this.signedIn
-        ? json(200, ME)
+        ? json(200, this.account)
         : json(401, {
             error: "unauthorized",
             description: "d",
@@ -88,6 +96,7 @@ class FakeAuthApi {
         })
       }
       this.signedIn = true
+      this.account = this.loginAs
       return json(200, { step: "done" })
     }
     if (url === "/api/admin/auth/refresh" && init?.method === "POST") {
@@ -150,16 +159,21 @@ function mountAdmin(
     now: () => 0,
   }
 ) {
+  // One retry queue for both providers and the app, as main.tsx has it.
+  const sessionExpiry = createSessionExpiry()
   const router = createMemoryRouter(
     adminRoutes(
       <AdminApp
         dataProvider={createDataProvider({
           apiBaseUrl: "/api/admin",
           resources: {},
+          fetch: api.fetch,
+          sessionExpiry,
         })}
         authProvider={createAuthProvider({
           apiBaseUrl: "/api/admin",
           fetch: api.fetch,
+          sessionExpiry,
         })}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
         queryClient={new QueryClient()}
@@ -167,6 +181,7 @@ function mountAdmin(
         developmentRoutes={developmentRoutes}
         activityTarget={activity.target}
         now={activity.now}
+        sessionExpiry={sessionExpiry}
       />
     ),
     { initialEntries: [entry] }
@@ -498,15 +513,82 @@ describe("AdminApp with a session", () => {
     // ra-core's default `afterLoginUrl` ("/") under the basename.
     expect(router.state.location.pathname).toBe("/admin/")
   })
+})
 
-  it("lets ra-core send the user to the sign-in page when the session ends", async () => {
+/**
+ * Signs in again in the session-expiry dialog with the fake API's password.
+ *
+ * @returns the dialog that was answered.
+ */
+async function signInAgain(): Promise<HTMLElement> {
+  const dialog = await screen.findByRole("dialog", {
+    name: "Lejárt a munkamenet",
+  })
+  const user = userEvent.setup()
+  await user.type(within(dialog).getByLabelText("Jelszó"), "helyes jelszó")
+  await user.click(
+    within(dialog).getByRole("button", { name: "Bejelentkezés" })
+  )
+  return dialog
+}
+
+describe("AdminApp when the session ends under a signed-in page (ADR 0006)", () => {
+  it("asks for the password in place when the tab comes back, and keeps the page mounted", async () => {
+    const api = new FakeAuthApi(true)
+    const router = mountAdmin("/admin/about", undefined, api)
+    const page = await screen.findByTestId("about-page")
+
+    // The session ends (expiry, revocation); the user returns to the tab,
+    // and react-query asks ra-core's session check again.
+    api.signedIn = false
+    act(() => {
+      window.dispatchEvent(new Event("visibilitychange"))
+    })
+    const dialog = await signInAgain()
+
+    await waitFor(() => expect(dialog).not.toBeInTheDocument())
+    expect(api.signedIn).toBe(true)
+    // The very same page, never unmounted, and never the sign-in page.
+    expect(screen.getByTestId("about-page")).toBe(page)
+    expect(router.state.location.pathname).toBe("/admin/about")
+    expect(screen.queryByTestId("sign-in-page")).not.toBeInTheDocument()
+    expect(
+      api.fetch.mock.calls.filter(
+        ([url, init]) =>
+          url === "/api/admin/auth/login" &&
+          JSON.parse(String(init?.body)).email === ME.email
+      )
+    ).toHaveLength(1)
+  })
+
+  it("asks in place on the next page too, and opens it after the sign-in", async () => {
     const api = new FakeAuthApi(true)
     const router = mountAdmin("/admin/about", undefined, api)
     await screen.findByTestId("about-page")
 
-    // The session ends (expiry, deactivation); the next page checks it.
     api.signedIn = false
-    await router.navigate("/admin/")
+    await act(() => router.navigate("/admin/"))
+    const dialog = await signInAgain()
+
+    await waitFor(() => expect(dialog).not.toBeInTheDocument())
+    expect(await screen.findByTestId("dashboard")).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe("/admin/")
+  })
+
+  it("signs out with the server's word and shows the sign-in page when the user leaves the dialog", async () => {
+    const api = new FakeAuthApi(true)
+    const router = mountAdmin("/admin/about", undefined, api)
+    await screen.findByTestId("about-page")
+
+    api.signedIn = false
+    await act(() => router.navigate("/admin/"))
+    const dialog = await screen.findByRole("dialog", {
+      name: "Lejárt a munkamenet",
+    })
+    await userEvent
+      .setup()
+      .click(within(dialog).getByRole("button", { name: "Kilépés" }))
+
     await waitFor(
       () => expect(router.state.location.pathname).toBe("/admin/login"),
       AFTER_SIGN_OUT
@@ -514,5 +596,80 @@ describe("AdminApp with a session", () => {
     expect(
       await screen.findByTestId("sign-in-page", {}, AFTER_SIGN_OUT)
     ).toBeInTheDocument()
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+    // One sign-out, which the server answered 401: the session had ended
+    // already, so no session is left.
+    expect(logoutPosts(api)).toBe(1)
+  })
+
+  it("ends a session that another tab started while the dialog was open, before the sign-in page shows", async () => {
+    const api = new FakeAuthApi(true)
+    const router = mountAdmin("/admin/about", undefined, api)
+    await screen.findByTestId("about-page")
+
+    api.signedIn = false
+    act(() => {
+      window.dispatchEvent(new Event("visibilitychange"))
+    })
+    const dialog = await screen.findByRole("dialog", {
+      name: "Lejárt a munkamenet",
+    })
+    // Someone signs in in another tab: the shared cookie holds a session.
+    api.signedIn = true
+    await userEvent
+      .setup()
+      .click(within(dialog).getByRole("button", { name: "Kilépés" }))
+
+    await screen.findByTestId("sign-in-page", {}, AFTER_SIGN_OUT)
+    expect(router.state.location.pathname).toBe("/admin/login")
+    expect(logoutPosts(api)).toBe(1)
+    expect(api.signedIn).toBe(false)
+  })
+
+  it("never leaves another account's session behind a signed-out page after a restart", async () => {
+    // A sign-in in another tab overwrites the cookie between the dialog's
+    // sign-in and its check of who holds the session.
+    const other: MeResponse = {
+      ...ME,
+      pid: "1c8d5b63-8f4e-4d66-8b80-5c4d3e2f1a0b",
+      name: "Másik Fiók",
+      email: "masik@example.test",
+    }
+    const api = new FakeAuthApi(true)
+    api.loginAs = other
+    const router = mountAdmin("/admin/about", undefined, api)
+    await screen.findByTestId("about-page")
+
+    api.signedIn = false
+    act(() => {
+      window.dispatchEvent(new Event("visibilitychange"))
+    })
+    const dialog = await signInAgain()
+
+    await screen.findByTestId("sign-in-page", {}, AFTER_SIGN_OUT)
+    expect(router.state.location.pathname).toBe("/admin/login")
+    expect(dialog).not.toBeInTheDocument()
+    // The dialog's sign-out ended the other account's session on the
+    // server: nothing waits behind the sign-in page for the next person.
+    expect(logoutPosts(api)).toBe(1)
+    expect(api.signedIn).toBe(false)
+    await router.navigate("/admin/")
+    await waitFor(
+      () => expect(router.state.location.pathname).toBe("/admin/login"),
+      AFTER_SIGN_OUT
+    )
+    expect(screen.queryByTestId("dashboard")).not.toBeInTheDocument()
   })
 })
+
+/**
+ * Counts the sign-outs that reached the fake API.
+ *
+ * @param api - the fake `/auth` routes.
+ * @returns how many `POST /auth/logout` requests it received.
+ */
+function logoutPosts(api: FakeAuthApi): number {
+  return api.fetch.mock.calls.filter(
+    ([url, init]) => url === "/api/admin/auth/logout" && init?.method === "POST"
+  ).length
+}

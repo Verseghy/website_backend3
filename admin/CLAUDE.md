@@ -16,7 +16,14 @@ ADR 0005 (bindings) before changing anything here.
   `/api/admin` (ADR 0004 §1). Never install or use `ra-data-json-server`,
   `ra-data-simple-rest` or JSONPlaceholder, and never use the kit's
   `example-admin` block. A slice adds a resource by registering
-  `ResourceHandlers` for it, typed against `src/bindings/`.
+  `ResourceHandlers` for it, typed against `src/bindings/`. A handler sends
+  every request with its context's `request(path, init)`, never with
+  `fetch` itself: that is what holds a `401 unauthorized` for the in-place
+  sign-in (Authentication, below). Its body must be one that can be sent
+  twice (a string, `Blob` or `FormData`, never a stream), and a query
+  handler passes ra-core's `params.signal` on: the provider declares
+  `supportAbortSignal`, so the signal is there, and it ends the request and
+  its wait when the screen unmounts (`src/data-provider/abort-signal.test.tsx`).
 - **TypeScript config.** Keep `verbatimModuleSyntax: true`; the kit's advice
   to set it to `false` does not apply (the copied files use `import type`, and
   `npm run typecheck` passes with it on).
@@ -121,6 +128,55 @@ ADR 0005 (bindings) before changing anything here.
   any other `Origin`, and never serve the admin with `no-referrer`: either
   would let a page on another origin write, or refuse the admin's own
   writes.
+  A session that ends under an open page never drops the page (ADR 0006,
+  "Follow-up work"): `main.tsx` creates one retry queue
+  (`src/auth/session-expiry.ts`) and passes the same queue to both
+  providers and to the app, whose layout mounts
+  `src/auth/SessionExpiryDialog.tsx` beside the page. While it is mounted,
+  a `401 unauthorized` of a data-provider request, of `checkAuth` or of the
+  `/auth/me` refetch of a `403` (Access, below) waits there (react-query
+  repeats the session check whenever the tab comes back into view, so the
+  check must wait too, or ra-core would swap the layout for the sign-in
+  page). Only that code waits: ADR 0021 §4 keeps `401` for
+  a request without a valid session, and a `401` with any other code (an
+  `invalid_credentials` for a wrong current password, say) is handed back
+  at once as the request's own answer, never opening the dialog over a
+  session that holds. The dialog asks for the password of the account
+  whose session ended (`sessionAccount`; the address is shown, not typed),
+  signs it in again with `resumeSession` (bounded by `RESUME_TIMEOUT_MS`),
+  and every waiting request is sent again, unchanged, while the form keeps
+  what was typed. „Kilépés” is a sign-out that the server confirms
+  (`useConfirmedSignOut` of `src/auth/use-sign-out.ts`, `POST
+  /auth/logout`, whose `401` for the ended session counts as done); so is
+  a `restart`, a sign-in after which `/auth/me` names another account or a
+  scope other than `admin`; the waiting requests are not sent under it.
+  Only after the server's word do the waiting requests get their `401`,
+  and so does every later one until the next layout mounts, so
+  `checkError` signs out as before
+  (`src/data-provider/expired-session-edit.test.tsx`); like the user
+  menu's, the dialog never shows the sign-in page while the cookie may
+  still hold a session. These three rules are the maintainer's answer,
+  since ADR 0006 does not say who may sign in there. Asked "Should the
+  three rules stay as built? (a) Only the account whose session ended
+  signs in. (b) After a sign-in that leaves another account, or a session
+  that is not `admin`, in the cookie, nothing waiting is sent and that
+  session is ended. (c) „Kilépés” is the confirmed sign-out. Or should the
+  dialog continue the page as whichever account signs in? Or should it
+  keep (a) but leave without a server sign-out, as the admin does when
+  ra-core signs out on a 401?", the maintainer answered "Confirm all three
+  as built" on 2026-11-15 (research: DECISIONS R37 (D158)). The answer
+  ranks above the ADRs (ADR 0001 §5), so changing any of the three needs
+  a new answer from the maintainer. Its accepted cost: with the dialog
+  open in two tabs of one account, a sign-in in one and „Kilépés” in the
+  other sign both out, with every other session of that account (ADR 0006
+  §2). Every `logout` gives the in-place sign-in up.
+  `getIdentity` and `canAccess` never wait; a `401` that waits keeps the
+  provider's access answer, so `canAccess` goes on answering the open
+  page's questions, and a resumed session replaces it with the answer that
+  `resumeSession` read. `/auth/login` answers only the `done` step
+  so far: a `change_password` or `totp` step is a failed sign-in in the
+  dialog as on the sign-in screen, until the slices that add those steps
+  handle them in both.
 - **Access (ADR 0007 §7).** `authProvider.canAccess` answers from the
   access map of the last `/auth/me` answer, which the provider keeps, and
   never asks the server per question: `decideAccess` in
@@ -134,11 +190,13 @@ ADR 0005 (bindings) before changing anything here.
   backend3's Hungarian pages of `src/auth/AccessPages.tsx` (`<Admin>`
   would otherwise render nothing there). A `403` makes `checkError` read
   `/auth/me` again, with a read sent after the refusal, and keep the user
-  signed in; when the answer changed, the provider's `onAccessChange`
-  (`invalidateAccessChecks` of `src/auth/access-checks.ts`, wired in
-  `src/main.tsx` over the `queryClient` that `<Admin>` gets) makes ra-core
-  re-ask its cached questions. A slice that adds a record-level rule adds
-  it to `RECORD_RULES`, the same rule in Rust (`src/domain/authz.rs`), and
+  signed in (a `401 unauthorized` of that read waits for the in-place
+  sign-in first, as `checkAuth`'s does); when the answer changed, the
+  provider's `onAccessChange` (`invalidateAccessChecks` of
+  `src/auth/access-checks.ts`, wired in `src/main.tsx` over the
+  `queryClient` that `<Admin>` gets) makes ra-core re-ask its cached
+  questions. A slice that adds a record-level rule adds it to
+  `RECORD_RULES`, the same rule in Rust (`src/domain/authz.rs`), and
   cases with a record to `../tests/fixtures/authz_cases.json`, which
   `src/auth/authz-cases.test.ts` and the Rust test
   `tests/domain/authz_cases.rs` both run; a rule that reads a field that
@@ -262,7 +320,11 @@ error (`e2e/fixtures.ts`). A test of a page with a session calls
 `signIn(page)` from `e2e/fixtures.ts` first. A test that expects an HTTP
 error answer, such as the `401` of `/auth/me` before the sign-in, lists it in
 `expectedHttpErrors` (status and path): Chromium logs every such answer as a
-console error, and the guard ignores only the listed ones. A test that signs
+console error, and the guard ignores only the listed ones. A list of two or
+more answers goes in Playwright's `[value, options]` form,
+`test.use({ expectedHttpErrors: [[...], { scope: "test" }] })`: Playwright
+takes any array whose second item is an object for that form, and would read
+only the first answer (`e2e/session-expiry.spec.ts`). A test that signs
 out ends every session of the seed account, which the other tests share in
 parallel, so it goes into `e2e/sign-out.spec.ts`: `playwright.config.ts` runs
 that file in its own `sign-out` project, after every other admin test has passed,
