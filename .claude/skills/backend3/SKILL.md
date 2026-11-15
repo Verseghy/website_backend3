@@ -247,7 +247,10 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
     domain tests that need fixture files (such as the image corpus in
     `tests/fixtures/images/`) in `tests/domain/`, because `src/domain/` may
     not read files; model tests in `tests/models/`; request tests in
-    `tests/requests/`; admin unit tests next to the components (`npm test`);
+    `tests/requests/`; admin unit tests next to the components (`npm test`),
+    and for paste code also in Chromium, Firefox and WebKit
+    (`npm run test:browser`, `admin/vitest.browser.config.ts`, editor.md
+    §13.5);
     one Playwright test of the main flow
     (`npm run e2e`), which signs the seed account in first with `signIn(page)`
     of `admin/e2e/fixtures.ts` and lists any HTTP error answer it expects in
@@ -277,7 +280,9 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
     golden files in `tests/fixtures/e1/`, and commits them: the same
     job checks them, and `tests/rich_text/golden.rs` checks that the server
     stores each one unchanged (editor.md §13.6, P2 and P3). A new editor
-    feature or paste fixture joins `admin/src/test/editor-fixtures.ts`, so
+    feature joins `admin/src/test/editor-fixtures.ts`, and a paste fixture
+    joins `admin/test/fixtures/paste/` (the `paste-` golden group of
+    `admin/src/test/golden-e1.ts`), so
     the server checks what it writes.
 13. **Docs**: update the ADR or spec the slice changes, and `AGENTS.md`,
     `CLAUDE.md` or this skill if a rule, command or path changed.

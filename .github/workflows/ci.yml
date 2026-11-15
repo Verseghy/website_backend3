@@ -357,7 +357,10 @@ jobs:
   admin-test:
     name: Admin test
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # The browser install (with its system packages) and the three-engine
+    # paste run come after the unit tests; the margin keeps a slow mirror
+    # from failing the job.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: admin
@@ -372,6 +375,17 @@ jobs:
           cache-dependency-path: admin/package-lock.json
       - run: npm ci
       - run: npm test
+      - name: Install the Playwright browsers
+        # The paste tests run in Chromium, Firefox and WebKit too
+        # (editor.md §13.5): Vitest's browser mode drives Playwright's
+        # browsers, the same three that the E2E job installs for
+        # admin/e2e/storage.spec.ts.
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: The paste tests in Chromium, Firefox and WebKit
+        # vitest.browser.config.ts: the paste filter's tests, the
+        # degrade-safely suite among them, and the paste extension's tests,
+        # in each engine's CSSOM and HTML parser.
+        run: npm run test:browser
 
   admin-licenses:
     name: Admin licenses
@@ -498,7 +512,9 @@ jobs:
         # admin/e2e/storage.spec.ts: files under /storage, which this server
         # serves with the fallback router (config/e2e.yaml), opened in
         # Chromium, Firefox and WebKit (editor.md §13 P9). `chromium` installs
-        # both the headless shell and the full build that spec runs in.
+        # both the headless shell and the full build that spec runs in. The
+        # Admin test job installs the same three for the paste tests
+        # (editor.md §13.5).
         working-directory: admin
         run: npx playwright install --with-deps chromium firefox webkit
       - name: Playwright

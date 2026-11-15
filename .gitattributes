@@ -4,3 +4,8 @@
 # ends, whatever `core.autocrlf` or `core.eol` says; the fixture runner also
 # fails if one loses them.
 /tests/fixtures/normalise/*.html -text
+
+# The roosterjs paste samples are the clipboard strings of Excel and Word for
+# the web byte for byte, `\r\n` line ends included (their README); no
+# checkout converts them.
+/admin/test/fixtures/third_party/roosterjs/*.html -text

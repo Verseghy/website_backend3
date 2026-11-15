@@ -5,7 +5,7 @@
  * Every route that turns YouTube input into a video goes through this
  * module, so the routes cannot read the same input differently: the node's
  * parse rules (an iframe's `src`), the lone-URL paste rule, the insert
- * dialog, and, from `paste-generic`, the plain-text route for embed code.
+ * dialog, and the plain-text route for embed code (`extensions/office-paste.ts`).
  * What it reads:
  *
  * - **Embed addresses** (`/embed/<id>`, `/embed/videoseries?list=`, and

@@ -7,7 +7,9 @@ import { defineConfig } from "vitest/config"
  *
  * Kept apart from `vite.config.ts` so tests never depend on build-only
  * settings (base path, dev proxy, source-commit validation). Playwright's
- * end-to-end tests in `e2e/` are not unit tests and are excluded.
+ * end-to-end tests in `e2e/` are not unit tests and are excluded. Every
+ * test here runs under jsdom; `vitest.browser.config.ts` runs the paste
+ * tests again in Chromium, Firefox and WebKit (`npm run test:browser`).
  */
 export default defineConfig({
   plugins: [react()],

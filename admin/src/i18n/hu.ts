@@ -425,8 +425,9 @@ export const hu = {
     saved:
       "Letöltve: %{file}. Típusok: %{types}. Kitakart mappanevek: %{scrubbed}.",
   },
-  // The rich-text editor (ADR 0013, editor.md §4.3 rows 8-10): the image's
-  // controls in the editor, and the YouTube and Padlet insert dialogs.
+  // The rich-text editor (ADR 0013, editor.md §4.3 rows 8-11): the image's
+  // controls in the editor, the YouTube and Padlet insert dialogs, and the
+  // paste extension's notices.
   editor: {
     image: {
       // editor.md §4.3 row 8 names the badge's text.
@@ -462,6 +463,12 @@ export const hu = {
         "Videót csak önálló bekezdésbe lehet beágyazni, listába, táblázatba, idézetbe vagy címsorba nem, ezért a YouTube-cím szövegként maradt.",
       insert: "Beillesztés",
     },
+    // The paste filter (editor.md §5.5): shown once when the filter could
+    // not process a paste and only its text was pasted.
+    paste: {
+      fallback:
+        "A beillesztett tartalom formázását nem sikerült feldolgozni, ezért csak a szövege került be.",
+    },
     padlet: {
       title: "Padlet beillesztése",
       description:
@@ -469,6 +476,10 @@ export const hu = {
       input_label: "Padlet-cím",
       not_padlet:
         "Ez nem Padlet beágyazási cím. A címnek így kell kezdődnie: https://padlet.com/embed/",
+      // The paste extension's plain-text route (editor.md §5.1): Padlet's
+      // embed code pasted where media cannot go stays text.
+      not_top_level:
+        "Padletet csak önálló bekezdésbe lehet beágyazni, listába, táblázatba, idézetbe vagy címsorba nem, ezért a beágyazási kód szövegként maradt.",
       insert: "Beillesztés",
     },
   },
