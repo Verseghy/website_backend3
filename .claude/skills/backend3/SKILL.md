@@ -471,7 +471,19 @@ of `.github/dependabot.yml`).
 5. **Dependabot rule**: if the crate's types cross Loco's API or an ADR pins
    its major, add an ignore rule with its reason to the cargo entry of
    `.github/dependabot.yml`, following the rules in that file's header.
-6. **Check**: `bash scripts/ci/check-workspace-deps.sh` (the `Toolchain`
+6. **Licence notices**: `bash scripts/crate-notices.sh --out target/licenses`
+   (after `rm -rf target/licenses`), which writes the notices that the image
+   ships and fails on a gap, as the `cargo-deny check bans licenses sources`
+   job does (ADR 0042). If it says that a crate gets the standard text
+   although it ships a licence file, or that a file a clarification names
+   has changed, read the file and add or renew the crate's clarification in
+   `about.toml` with the SHA-256 it prints, in the one form `about.toml`
+   uses (its comment says which). A licence that `deny.toml` allows for one
+   crate only goes into that crate's `accepted` in `about.toml` too. A new
+   `-sys` crate that compiles bundled C code under a licence its `license`
+   field does not declare (as libwebp-sys and libdeflate-sys do) gets a
+   clarification that names the bundled licence file.
+7. **Check**: `bash scripts/ci/check-workspace-deps.sh` (the `Toolchain`
    job runs it), `cargo deny --workspace --all-features check bans licenses
    sources`, then the `AGENTS.md` gate.
 

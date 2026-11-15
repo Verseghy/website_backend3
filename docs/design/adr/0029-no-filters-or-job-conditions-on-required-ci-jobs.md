@@ -1,6 +1,6 @@
 # 0029. No filters or job conditions on required CI jobs
 
-- Status: Accepted (2026-10-25)
+- Status: Amended by [0042](0042-licence-notices-of-the-crates-linked-into-the-backend3-binary.md) (2026-11-01)
 - Decision questions: none: amends two rows of the table in [ADR 0022](0022-builds-and-ci-pac-for-production-images-github-actions-for-p.md) §3, which records Q34b. It records the maintainer's answers of 2026-10-25 to decision-register items D31 and D66 (research: DECISIONS R9) and to the second register's items D70 and D83 (research: DECISIONS R15).
 
 ## Context

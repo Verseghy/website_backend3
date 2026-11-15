@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Tests for scripts/ci/check-toolchain.sh (ADR 0004 section 2, ADR 0022
-# sections 2 and 3).
+# sections 2 and 3, ADR 0042).
 #
 # Builds fixture repositories (rust-toolchain.toml, Containerfile,
-# admin/.node-version) in a temporary directory: a consistent one, and one
-# per broken rule. Run from the repository root:
+# admin/.node-version, a workflow that installs cargo-about) in a temporary
+# directory: a consistent one, and one per broken rule; the last rule-5 case
+# runs the script on the repository itself. Run from the repository root:
 #   bash scripts/tests/test-check-toolchain.sh
 # Needs mikefarah yq v4; no network access.
 # Single-quoted fixtures and sed/jq programs hold a literal `$` on purpose.
@@ -48,6 +49,40 @@ trap 'rm -rf "$WORK"' EXIT
 D1=sha256:1111111111111111111111111111111111111111111111111111111111111111
 D2=sha256:2222222222222222222222222222222222222222222222222222222222222222
 D3=sha256:3333333333333333333333333333333333333333333333333333333333333333
+S1=4444444444444444444444444444444444444444444444444444444444444444
+
+# A workflow that installs cargo-about the way .github/workflows/cargo-deny.yml
+# does (rule 5).
+GOOD_WORKFLOW='name: cargo-deny
+on: pull_request
+jobs:
+  bans:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@0000000000000000000000000000000000000000 # v7
+      - uses: taiki-e/install-action@1111111111111111111111111111111111111111 # v2
+        with:
+          tool: cargo-deny@0.20.2
+      - uses: taiki-e/install-action@1111111111111111111111111111111111111111 # v2
+        with:
+          tool: cargo-about@0.9.3
+          fallback: none
+      - run: bash scripts/crate-notices.sh --out "$RUNNER_TEMP/licenses"
+'
+
+# A workflow that installs cargo-about only inside a comma-separated tool
+# list, with blanks around the entries, so the list alone decides rule 5.
+LIST_WORKFLOW='name: cargo-deny
+on: pull_request
+jobs:
+  bans:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: taiki-e/install-action@1111111111111111111111111111111111111111 # v2
+        with:
+          tool: cargo-nextest@0.9.149 ,  cargo-about@0.9.3
+      - run: bash scripts/crate-notices.sh --out "$RUNNER_TEMP/licenses"
+'
 
 # A consistent Containerfile in the shape of the real one.
 GOOD_CONTAINERFILE="# comment lines are ignored: ARG RUST_VERSION=0.0.0
@@ -62,15 +97,18 @@ RUN npm ci \\
 
 FROM registry.access.redhat.com/ubi9/ubi@$D2 AS rust
 ARG RUST_VERSION
+ARG CARGO_ABOUT_VERSION=0.9.3
+ARG CARGO_ABOUT_SHA256=$S1
 RUN echo \"\$RUST_VERSION\"
 
 FROM registry.access.redhat.com/ubi9/ubi-micro@$D3 AS runtime
 COPY --from=rust /src/target/release/backend3-cli /app/backend3-cli
 "
 
-# repo NAME CHANNEL NODE_VERSION_FILE CONTAINERFILE: create a fixture
-# repository and print its path. An empty CHANNEL or NODE_VERSION_FILE omits
-# that file.
+# repo NAME CHANNEL NODE_VERSION_FILE CONTAINERFILE [WORKFLOW]: create a
+# fixture repository and print its path. An empty CHANNEL or
+# NODE_VERSION_FILE omits that file. WORKFLOW (default GOOD_WORKFLOW) becomes
+# .github/workflows/cargo-deny.yml; `none` writes no workflow.
 repo() {
   local dir="$WORK/$1"
   mkdir -p "$dir/admin"
@@ -81,6 +119,10 @@ repo() {
     printf '%s\n' "$3" >"$dir/admin/.node-version"
   fi
   printf '%s' "$4" >"$dir/Containerfile"
+  if [[ ${5-} != none ]]; then
+    mkdir -p "$dir/.github/workflows"
+    printf '%s' "${5-$GOOD_WORKFLOW}" >"$dir/.github/workflows/cargo-deny.yml"
+  fi
   printf '%s' "$dir"
 }
 
@@ -160,6 +202,43 @@ run_case "FROM a stage declared later is not a stage reference" 1 --contains "ba
   bash "$SCRIPT" --root "$(repo stage-later 1.99.1 24 "FROM later AS first
 $GOOD_CONTAINERFILE
 FROM registry.access.redhat.com/ubi9/ubi@$D2 AS later")"
+
+# Rule 5: the cargo-about pin and the workflows that install it.
+run_case "the consistent fixture names cargo-about" 0 --contains "install the Containerfile's cargo-about 0.9.3" -- \
+  bash "$SCRIPT" --root "$(repo about-good 1.99.1 24 "$GOOD_CONTAINERFILE")"
+run_case "cargo-about inside a comma-separated tool list counts as installed" 0 -- \
+  bash "$SCRIPT" --root "$(repo about-list 1.99.1 24 "$GOOD_CONTAINERFILE" "$LIST_WORKFLOW")"
+run_case "another cargo-about version inside a tool list fails" 1 \
+  --contains "cargo-deny.yml installs cargo-about@0.9.2, but the Containerfile's ARG CARGO_ABOUT_VERSION is '0.9.3'" -- \
+  bash "$SCRIPT" --root "$(repo about-list-mismatch 1.99.1 24 "$GOOD_CONTAINERFILE" "${LIST_WORKFLOW//cargo-about@0.9.3/cargo-about@0.9.2}")"
+run_case "a .yaml workflow is read too" 1 --contains "cargo-x.yaml installs cargo-about@0.9.2" -- \
+  bash -c 'printf "%s" "$2" >"$1/.github/workflows/cargo-x.yaml" && bash "$3" --root "$1"' _ \
+  "$(repo about-yaml 1.99.1 24 "$GOOD_CONTAINERFILE")" "${GOOD_WORKFLOW//cargo-about@0.9.3/cargo-about@0.9.2}" "$SCRIPT"
+run_case "a workflow with another cargo-about version fails" 1 \
+  --contains "cargo-deny.yml installs cargo-about@0.9.4, but the Containerfile's ARG CARGO_ABOUT_VERSION is '0.9.3'" -- \
+  bash "$SCRIPT" --root "$(repo about-mismatch 1.99.1 24 "$GOOD_CONTAINERFILE" "${GOOD_WORKFLOW//cargo-about@0.9.3/cargo-about@0.9.4}")"
+run_case "a workflow with an unversioned cargo-about fails" 1 --contains "installs cargo-about without a version; write cargo-about@0.9.3" -- \
+  bash "$SCRIPT" --root "$(repo about-unversioned 1.99.1 24 "$GOOD_CONTAINERFILE" "${GOOD_WORKFLOW//cargo-about@0.9.3/cargo-about}")"
+run_case "no workflow that installs cargo-about fails" 1 --contains "no workflow installs cargo-about" -- \
+  bash "$SCRIPT" --root "$(repo about-no-install 1.99.1 24 "$GOOD_CONTAINERFILE" "${GOOD_WORKFLOW//tool: cargo-about@0.9.3/tool: cargo-hack@0.6.0}")"
+run_case "no workflows at all fails" 1 --contains "no workflow installs cargo-about" -- \
+  bash "$SCRIPT" --root "$(repo about-no-workflows 1.99.1 24 "$GOOD_CONTAINERFILE" none)"
+run_case "cargo-about installed by another action does not count" 1 --contains "no workflow installs cargo-about" -- \
+  bash "$SCRIPT" --root "$(repo about-other-action 1.99.1 24 "$GOOD_CONTAINERFILE" "${GOOD_WORKFLOW//taiki-e\/install-action/example\/install}")"
+run_case "an unreadable workflow fails with its file name" 1 --contains "cargo-deny.yml: not valid YAML" -- \
+  bash "$SCRIPT" --root "$(repo about-bad-yaml 1.99.1 24 "$GOOD_CONTAINERFILE" $'jobs: [\n')"
+run_case "a missing CARGO_ABOUT_VERSION fails" 1 --contains "no 'ARG CARGO_ABOUT_VERSION=<version>' default" -- \
+  bash "$SCRIPT" --root "$(repo about-no-version 1.99.1 24 "${GOOD_CONTAINERFILE//ARG CARGO_ABOUT_VERSION=0.9.3/}")"
+run_case "a CARGO_ABOUT_VERSION that is not an exact release fails" 1 --contains "CARGO_ABOUT_VERSION is '0.9'; pin an exact release" -- \
+  bash "$SCRIPT" --root "$(repo about-loose 1.99.1 24 "${GOOD_CONTAINERFILE//CARGO_ABOUT_VERSION=0.9.3/CARGO_ABOUT_VERSION=0.9}")"
+run_case "two CARGO_ABOUT_VERSION defaults fail" 1 --contains "two CARGO_ABOUT_VERSION defaults, '0.9.3' and '0.9.4'" -- \
+  bash "$SCRIPT" --root "$(repo about-two 1.99.1 24 "$GOOD_CONTAINERFILE
+ARG CARGO_ABOUT_VERSION=0.9.4")"
+run_case "a missing CARGO_ABOUT_SHA256 fails" 1 --contains "no 'ARG CARGO_ABOUT_SHA256=<sha256>' default" -- \
+  bash "$SCRIPT" --root "$(repo about-no-sum 1.99.1 24 "${GOOD_CONTAINERFILE//ARG CARGO_ABOUT_SHA256=$S1/}")"
+run_case "a CARGO_ABOUT_SHA256 that is not a SHA-256 fails" 1 --contains "CARGO_ABOUT_SHA256 is 'ABCDEF', which is not a SHA-256" -- \
+  bash "$SCRIPT" --root "$(repo about-bad-sum 1.99.1 24 "${GOOD_CONTAINERFILE//CARGO_ABOUT_SHA256=$S1/CARGO_ABOUT_SHA256=ABCDEF}")"
+run_case "the repository itself passes" 0 -- bash "$SCRIPT" --root "$ROOT"
 
 # Errors.
 run_case "a missing Containerfile fails" 1 --contains "Containerfile is missing" -- \

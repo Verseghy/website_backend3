@@ -32,6 +32,19 @@ other copied code that every build bundles; the admin's build test checks
 every row
 ([ADR 0038](docs/design/adr/0038-licence-notices-of-the-bundled-admin-packages.md)).
 
+The crates compiled into the backend3 binary are listed with their licence
+texts in a directory that travels with the binary: every image carries
+`/app/licenses/`, which the Containerfile's rust stage writes after the
+release build with `scripts/crate-notices.sh`. It holds `crates.html`, which
+cargo-about renders from `Cargo.lock` with `about.toml` and the template
+`about.hbs`, the `NOTICE` files of those crates, the Rust standard library's
+`COPYRIGHT-library.html` from the toolchain, and a `README.txt` that lists
+them and states the notice below. The same script runs on every pull request
+and fails on a gap, such as a crate whose own licence file would give way to
+the standard text of its licence, or a clarified licence file that changed.
+Nothing of it is served over HTTP
+([ADR 0042](docs/design/adr/0042-licence-notices-of-the-crates-linked-into-the-backend3-binary.md)).
+
 ## Notices that dependencies require
 
 - **The Independent JPEG Group.** backend3 decodes and re-encodes JPEG
@@ -39,6 +52,7 @@ every row
   backend3 binary ([docs/design/image-encoders.md](docs/design/image-encoders.md)).
   Its IJG licence asks that the documentation of a binary state it:
   this software is based in part on the work of the Independent JPEG Group.
+  The image states it in `/app/licenses/README.txt` and `crates.html`.
 
 ## Vendored code
 

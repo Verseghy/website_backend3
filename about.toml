@@ -1,0 +1,227 @@
+# cargo-about configuration: the licence notices of the crates compiled into
+# the backend3 binary (ADR 0042, research: DECISIONS R23, D115).
+#
+# scripts/crate-notices.sh runs cargo-about with this file and the template
+# about.hbs, in the Containerfile's rust stage after the release build (the
+# notices ship in the image at /app/licenses/) and as a step of the required
+# `cargo-deny check bans licenses sources` job on every pull request, so a gap
+# fails before master. Run it locally with:
+#   bash scripts/crate-notices.sh --out target/licenses
+#
+# cargo-about rejects any key it does not know, so backend3's own rules live
+# in the comments and in scripts/crate-notices.sh, never in new keys here.
+
+# The licences cargo-about may use, in the order it prefers them for an `OR`
+# expression: the allow-list of deny.toml (ADR 0022 §4), MIT first because it
+# is the shortest text. This list only chooses which text to show; cargo-deny
+# enforces the licence policy. The per-crate exceptions of deny.toml
+# (ADR 0027 §2) are the `accepted` entries of the crate tables below.
+accepted = [
+  "MIT",
+  "Apache-2.0",
+  "ISC",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Zlib",
+  "BSL-1.0",
+  "MPL-2.0",
+  "Unicode-3.0",
+]
+
+# The release target: the Containerfile builds the default
+# x86_64-unknown-linux-gnu (ADR 0022 §2). Crates that only other platforms use
+# (windows-sys, core-foundation, ...) are left out. scripts/crate-notices.sh
+# passes the same target to cargo-about and to `cargo tree`, and its test
+# checks that the two agree.
+targets = ["x86_64-unknown-linux-gnu"]
+
+# Only what is compiled into the binary: build scripts' dependencies and test
+# dependencies are not in it. cargo-about cannot tell a procedural macro from a
+# linked crate, so the macros that run while the binary compiles are listed
+# too; listing more than the binary holds costs nothing.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# backend3 and migration are AGPL-3.0-only and unpublished (ADR 0012 §4), and
+# the notices are about third-party code.
+private = { ignore = true }
+
+# The licences that deny.toml allows for one named crate only (ADR 0027 §2).
+[webpki-roots]
+accepted = ["CDLA-Permissive-2.0"]
+
+[notify]
+accepted = ["CC0-1.0"]
+
+[quoted_printable]
+accepted = ["0BSD"]
+
+[mozjpeg]
+accepted = ["IJG"]
+
+[mozjpeg-sys]
+accepted = ["IJG"]
+
+# Clarifications. cargo-about reads a crate's licence file only when its
+# detector recognises the text, with a confidence of at least 0.8. Where it
+# does not, it prints the standard text of the licence instead, which names no
+# copyright holder, so the crate's own notice would be lost. For each crate
+# below that ships a licence file the detector misses, the clarification names
+# the file and its SHA-256, and the notices carry that file whole. Each file
+# gets the one licence that cargo-about picks for the crate from `accepted`.
+#
+# A clarification applies to every version of the crate, but only while the
+# checksum of every file it names matches: when a release changes one of
+# them, cargo-about only warns ("failed to validate all files specified in
+# clarification") and falls back to scanning the crate, which can drop the
+# file's notice without an error. scripts/crate-notices.sh therefore checks
+# every file named here, in every listed version of its crate, itself (its
+# check 2): it fails, names the crate and the file, and prints the file's
+# new SHA-256; read the new file, and renew the checksum here if it is still
+# the licence file. It also fails on a clarification of a crate the notices
+# do not list. The one exception is a version in which the named file holds
+# no licence text (empty, or a flattened link, below).
+#
+# The script reads these tables itself, so keep their one form: a
+# [<crate>.clarify] table with `license`, then one [[<crate>.clarify.files]]
+# table per file with `path`, `checksum` and optionally `license`, each
+# value in double quotes, and whole files only (no `start`, `end` or `git`).
+# Another form fails the check as unreadable.
+#
+# Crates whose licence file is only a link that packaging flattened into a
+# one-line file such as "../LICENSE-MIT" (chrono-tz 0.9.0, sqlx-core,
+# sqlx-mysql, sqlx-postgres) ship no licence text, so they get the standard
+# text, like the crates that ship no licence file at all (ADR 0042).
+
+# Bundled C libraries. These -sys crates compile C code whose licence the
+# crate's `license` field does not declare: libwebp (BSD-3-Clause, as
+# deny.toml's clarification says) and libdeflate (MIT). Both licences ask that
+# the copyright notice travel with the binary.
+[libwebp-sys.clarify]
+license = "MIT AND BSD-3-Clause"
+[[libwebp-sys.clarify.files]]
+path = "vendor/COPYING"
+license = "BSD-3-Clause"
+checksum = "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+
+[libdeflate-sys.clarify]
+license = "Apache-2.0 AND MIT"
+[[libdeflate-sys.clarify.files]]
+path = "LICENSE"
+license = "Apache-2.0"
+checksum = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+[[libdeflate-sys.clarify.files]]
+path = "libdeflate/COPYING"
+license = "MIT"
+checksum = "4ad69099cb4374836fd27583d9991e2838cd86b6e4666ab26b2d32582c91e73a"
+
+# MozJPEG. The crates' LICENSE holds the IJG summary and libjpeg-turbo's
+# BSD-3-Clause licence. mozjpeg-sys carries it for BSD-3-Clause and gets the
+# standard IJG and Zlib texts (the IJG text holds the licence's conditions,
+# which the summary only points at); mozjpeg declares IJG alone and carries it
+# for IJG. The IJG statement itself is in the template and in README.txt.
+[mozjpeg-sys.clarify]
+license = "IJG AND Zlib AND BSD-3-Clause"
+[[mozjpeg-sys.clarify.files]]
+path = "LICENSE"
+license = "BSD-3-Clause"
+checksum = "59c9ef25a8178687f4cc220c4bd7ad8f746f612485d04e9335ebae24c0271b8d"
+
+[mozjpeg.clarify]
+license = "IJG"
+[[mozjpeg.clarify.files]]
+path = "LICENSE"
+checksum = "59c9ef25a8178687f4cc220c4bd7ad8f746f612485d04e9335ebae24c0271b8d"
+
+# brotli-decompressor is "BSD-3-Clause OR MIT" and ships only the BSD text, so
+# backend3 takes it under BSD-3-Clause, the licence whose notice it ships.
+[brotli-decompressor.clarify]
+license = "BSD-3-Clause"
+[[brotli-decompressor.clarify.files]]
+path = "LICENSE"
+checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+
+# Licence files that the detector does not recognise: texts wrapped or
+# preceded by other notices (a combined MIT and Apache-2.0 file, a portions
+# notice), or that score below its threshold.
+[async-stream.clarify]
+license = "MIT"
+[[async-stream.clarify.files]]
+path = "LICENSE"
+checksum = "157d381f6304eba77459fc10dfb5b1b22fc0d04e384a32865f32d8e67a34c0eb"
+
+[async-stream-impl.clarify]
+license = "MIT"
+[[async-stream-impl.clarify.files]]
+path = "LICENSE"
+checksum = "157d381f6304eba77459fc10dfb5b1b22fc0d04e384a32865f32d8e67a34c0eb"
+
+[chrono.clarify]
+license = "MIT OR Apache-2.0"
+[[chrono.clarify.files]]
+path = "LICENSE.txt"
+license = "MIT"
+checksum = "946c9835d8034d24404f8cfec5f4654cee5dad17e944afc3d06d742cf2882831"
+
+# chrono-tz 0.10.4 (backend3's). The 0.9.0 that tera brings ships a flattened
+# link instead, so the clarification fails for it with the message above, and
+# it gets the standard text.
+[chrono-tz.clarify]
+license = "MIT OR Apache-2.0"
+[[chrono-tz.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "4789210f4df8abc03fce1cddd9c2ba517f184840687f2815d741de282c1aa93a"
+
+[curve25519-dalek.clarify]
+license = "BSD-3-Clause"
+[[curve25519-dalek.clarify.files]]
+path = "LICENSE"
+checksum = "cca0bd3c4fcdba74145ef9d49c62337e2c9fbf9368288f11d0547f1b0273219f"
+
+[libm.clarify]
+license = "MIT"
+[[libm.clarify.files]]
+path = "LICENSE.txt"
+checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+
+[ouroboros.clarify]
+license = "MIT OR Apache-2.0"
+[[ouroboros.clarify.files]]
+path = "LICENSE_MIT"
+license = "MIT"
+checksum = "b87740f87cbb0e8be9c4c21db4a265d5f297cd9ee3ea0ff4cf702de819ef6de7"
+
+[ouroboros_macro.clarify]
+license = "MIT OR Apache-2.0"
+[[ouroboros_macro.clarify.files]]
+path = "LICENSE_MIT"
+license = "MIT"
+checksum = "b87740f87cbb0e8be9c4c21db4a265d5f297cd9ee3ea0ff4cf702de819ef6de7"
+
+[ryu.clarify]
+license = "Apache-2.0 OR BSL-1.0"
+[[ryu.clarify.files]]
+path = "LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+
+[serde_regex.clarify]
+license = "MIT OR Apache-2.0"
+[[serde_regex.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "cec3eb54e25debe55dd73608a24ff77181707fd614e931319ec11960b5e1cc99"
+
+[sync_wrapper.clarify]
+license = "Apache-2.0"
+[[sync_wrapper.clarify.files]]
+path = "LICENSE"
+checksum = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+
+[whoami.clarify]
+license = "Apache-2.0 OR BSL-1.0 OR MIT"
+[[whoami.clarify.files]]
+path = "LICENSE_MIT"
+license = "MIT"
+checksum = "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"

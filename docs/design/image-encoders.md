@@ -1100,7 +1100,13 @@ ends that licence for anyone who sues over them). `deny.toml` therefore
 clarifies libwebp-sys as `MIT AND BSD-3-Clause`, tied to the hash of
 `vendor/COPYING`; both licences are on the list. cargo-deny ignores the
 clarification without a warning when the file changes, so an update of
-libwebp-sys re-reads both files and renews the hash.
+libwebp-sys re-reads both files and renews the hash. `about.toml` clarifies
+it the same way, by the file's SHA-256, so that the licence notices in the
+image carry libwebp's copyright notice. There the PR check compares the
+file with that checksum in every libwebp-sys version the notices list and
+fails, printing the new SHA-256, when the file changes, so the update renews
+that checksum too
+([ADR 0042](adr/0042-licence-notices-of-the-crates-linked-into-the-backend3-binary.md)).
 
 ### Security
 

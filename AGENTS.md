@@ -71,6 +71,7 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 | `deploy/media/` | the media server: its nginx configuration, which website_k8s copies byte for byte, and its pinned image (`deploy/media/README.md`, ADR 0015 §1) |
 | `admin/` | the admin UI: an npm project (ADR 0004, ADR 0021) |
 | `docs/design/` | the design: overview, ADRs, specs |
+| `about.toml`, `about.hbs` | cargo-about's configuration and template for the licence notices of the crates in the binary, which `scripts/crate-notices.sh` writes into the image's `/app/licenses/` and checks on every PR (ADR 0042) |
 | `scripts/` | repository scripts; their tests are `scripts/tests/test-*.sh` |
 
 ## Commands
@@ -170,6 +171,19 @@ job) rejects a requirement declared anywhere else, or written in a form that
 Dependabot does not find, and says how to fix it. The steps are recipe 5 of
 `.claude/skills/backend3/SKILL.md`.
 
+Every image ships the licence notices of the crates in the binary
+(`/app/licenses/`, ADR 0042). `scripts/crate-notices.sh` writes them with
+cargo-about in the Containerfile's rust stage, and the required
+`cargo-deny check bans licenses sources` job runs it on every PR, so a
+dependency change can fail it: when a crate's own licence file would give
+way to the standard text of its licence, or a file that `about.toml`
+clarifies has changed, the script prints the file's SHA-256 for its
+clarification there; read the file before you add or renew one. Run it
+locally with `bash scripts/crate-notices.sh --out target/licenses` (into a
+missing or empty directory). It needs the cargo-about version that the
+Containerfile pins (`ARG CARGO_ABOUT_VERSION`): its Linux musl release
+binary, or `cargo install cargo-about@<version> --locked --features cli`.
+
 ## Metrics
 
 backend3 serves `/metrics`, in the OpenMetrics text format, on a port of its
@@ -233,6 +247,7 @@ cargo test --locked --workspace --doc     # nextest does not run doctests
 cargo nextest run --locked --workspace --all-targets --run-ignored only -E 'test(/^media_contract::nginx::/)'
 bash scripts/tests/run-all.sh             # the shell-script tests
 bash scripts/sync-loco-skill.sh --check   # the vendored Loco skill is unchanged
+rm -rf target/licenses && bash scripts/crate-notices.sh --out target/licenses  # the crates' licence notices (ADR 0042)
 (cd admin && npm run lint && npm run typecheck && npm test && npm run licenses)
 ```
 
