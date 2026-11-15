@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ac77a2717ea14c7f1d361b3a6d2ac7f5f3b3e9600735b94f2d9016c65554b0d9 # shrinks to raw = "<a href=\"https://backend.verseghy-gimnazium.net/storage/uploads/a.pdf\"><h5><CENTER><ol><li><h5><ol><li><ul><li><ol><li><ol><li><ul><li><h5><a href=\"https://backend.verseghy-gimnazium.net/storage/uploads/a.pdf\">"
+cc 621fa4abd25d8d4c33d914b45c809edc694aef36b99126d6aa5f581c3fa7a89a # shrinks to raw = "<a href=\"https://backend.verseghy-gimnazium.net/storage/uploads/a.pdf\"><ol><li><CENTER><ol><li><h2><ol><li><ul><li><ol><li><ol><li><ul><li><p><a href=\"https://backend.verseghy-gimnazium.net/storage/uploads/a.pdf\">"

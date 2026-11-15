@@ -65,13 +65,24 @@
 //! treats that like a failed N9 check (data-migration.md §4.2): for example
 //! one with a `plaintext` element, whose end tag the serialiser writes and
 //! no parser reads, a `pre` whose content starts with three or more line
-//! feeds (each parse drops one, and the third pass still drops one), tag
-//! soup that leaves a link open around deeply nested lists and headings
-//! with another link inside them (the adoption agency moves the inner
-//! link out only part of the way in each parse), or tag soup that fosters
-//! a link out of a table into another link, which the sanitiser's
-//! structural pass unwraps (ADR 0037) once N7 runs here. None
-//! of these is a shape `CKEditor` writes; the tests measure how rarely tag
+//! feeds (each parse drops one, and the third pass still drops one), and
+//! tag soup that leaves a link inside another link. That is a link left
+//! open around deeply nested lists and headings with another link inside
+//! them: each parse's adoption agency moves a copy of the outer link at
+//! most eight blocks further in, so with sixteen or more nested blocks
+//! between the two links the third pass still changes the body (the unit
+//! test `a_link_left_open_around_sixteen_blocks_is_refused`), and with
+//! fewer, the headings around the copies it leaves can still be moving
+//! then, as when N3 unwraps a centre between two headings, a body that the
+//! parser alone settles in three parses
+//! (`a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`). Or
+//! it is a link fostered out of a table into another link. Once N7 runs
+//! here, the sanitiser repairs such nesting (its structural pass unwraps a
+//! nested link, ADR 0037), and the tests expect the body to settle then.
+//! Whether `apply` goes on depends on what N7 removes: an unwrapped link,
+//! like every removal that no N7 rule plans, still stops it unless the
+//! resolution file accepts the row (data-migration.md §7.1, N7). None of
+//! these is a shape `CKEditor` writes; the tests measure how rarely tag
 //! soup meets one.
 //!
 //! **N9** ([`fixed_point`]) checks an output against both fixed points,
@@ -211,7 +222,7 @@ fn pass(input: &str, report: &mut NormaliseReport) -> (String, Observations) {
 mod tests {
     use super::*;
     use crate::domain::rich_text::search_text::html_to_search_text;
-    use crate::domain::rich_text::{SanitizePolicy, Sanitizer};
+    use crate::domain::rich_text::{RemovalRule, SanitizePolicy, Sanitizer};
     use proptest::prelude::*;
 
     fn normalised(raw: &str) -> String {
@@ -330,6 +341,121 @@ mod tests {
     }
 
     #[test]
+    fn a_link_left_open_around_sixteen_blocks_is_refused() {
+        // At the inner `<a>` the parser runs the adoption agency, whose
+        // eight rounds move the open link out of one block each, so a copy
+        // of it stays open around the inner link, eight blocks further in.
+        // Each later parse moves it eight blocks more: with sixteen blocks
+        // the third pass still changes the body, and it is refused (see
+        // "The fixed-point loop" in the module documentation), with or
+        // without the rules. The first body is the one the properties over
+        // `arb_plain_legacy` found (shrunk by proptest; its seeds are in
+        // `proptest-regressions/domain/normalise/mod.txt`), the second the
+        // shortest of its kind: eight lists of one item each.
+        let found = concat!(
+            r#"<a href="https://backend.verseghy-gimnazium.net/storage/uploads/a.pdf">"#,
+            "<ol><li><CENTER><ol><li><h2><ol><li><ul><li><ol><li><ol><li><ul><li><p>",
+            r#"<a href="https://backend.verseghy-gimnazium.net/storage/uploads/a.pdf">"#,
+        );
+        let shortest = format!(r#"<a href="/x">{}<a href="/x">"#, "<ul><li>".repeat(8));
+        for body in [found, shortest.as_str()] {
+            assert_eq!(
+                normalise(body),
+                Err(NormaliseError::NotNormalisable { passes: MAX_PASSES }),
+                "{body:?}"
+            );
+            assert!(!the_parser_alone_settles(body), "{body:?}");
+            // The parse nests the links, so the generator leaves the body
+            // out (`arb_plain_legacy`), and so does the next pass's parse.
+            assert!(nests_a_link(body), "{body:?}");
+            assert!(nests_a_link(&once(body)), "{body:?}");
+            // The sanitiser repairs the nesting, here with its structural
+            // pass's nested-link rule (ADR 0037), after which the body
+            // settles: once N7 runs inside the pass, this refusal goes, and
+            // this test and the generator's filter with it. Whether `apply`
+            // then goes on depends on what N7 removes: an unwrapped link,
+            // like every removal that no N7 rule plans, still stops it
+            // unless the resolution file accepts the row
+            // (data-migration.md §7.1, N7).
+            let sanitised = Sanitizer::new(SanitizePolicy::content_v1())
+                .expect("a valid policy")
+                .sanitize(body)
+                .expect("a body within the limits");
+            assert_eq!(
+                sanitised.report.count(RemovalRule::NestedLinkUnwrapped),
+                1,
+                "{body:?}"
+            );
+            assert!(normalise(sanitised.html.as_str()).is_ok(), "{body:?}");
+        }
+        // Fewer blocks settle, unless headings among them still move after
+        // the nesting is gone (the next test): the first parse nests the
+        // links from eight blocks on and the second undoes it, so seven
+        // lists, fourteen blocks, still settle in the third pass. The
+        // generator's filter leaves these bodies out as well, so this checks
+        // for them what its properties check: the text and the references
+        // (V5(c), V5(d)).
+        let lists = |count: usize| {
+            format!(
+                r#"<a href="/x">Az &eacute;v{}v&eacute;ge &ndash; <a href="/x">k&eacute;p"#,
+                "<ul><li>".repeat(count)
+            )
+        };
+        for count in [3, 4, 7] {
+            let shallower = lists(count);
+            assert_eq!(nests_a_link(&shallower), count >= 4, "{shallower:?}");
+            assert!(!nests_a_link(&once(&shallower)), "{shallower:?}");
+            let settled = normalise(&shallower).expect("fewer than sixteen blocks settle");
+            assert!(only_five_references(&settled.html), "{:?}", settled.html);
+            assert_eq!(
+                search_words(&settled.html),
+                search_words(&shallower),
+                "{shallower:?}"
+            );
+            assert_eq!(
+                normalise(&settled.html).map(|again| again.html),
+                Ok(settled.html),
+                "{shallower:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass() {
+        // Nine blocks between the links: the first parse nests them and
+        // leaves a copy of the outer link around the inner heading, inside
+        // the centre. N3 unwraps the centre, so that copy and the heading in
+        // it now sit right inside the outer heading. The next parse takes
+        // the inner heading out of that link (the adoption agency again, at
+        // the link inside the heading), and the one after closes the outer
+        // heading before the inner one: the third pass still changes the
+        // body, and it is refused, although the links no longer nest after
+        // the first pass. Without N3 it settles: the parser alone settles it
+        // in three parses, and so does `normalise` with a `div` in place of
+        // the centre, which keeps the inner heading out of the outer one.
+        // The filter of `arb_plain_legacy` leaves it out, because its first
+        // parse nests the links; leaving out only the bodies whose links
+        // stay nested after a pass would miss it.
+        let body = r#"<a href="/x"><ul><li><ul><li><ul><li><h2><center><h2><a href="/x">"#;
+        assert_eq!(
+            normalise(body),
+            Err(NormaliseError::NotNormalisable { passes: MAX_PASSES })
+        );
+        assert!(nests_a_link(body));
+        assert!(!nests_a_link(&once(body)));
+        assert!(the_parser_alone_settles(body));
+        assert!(normalise(&body.replace("<center>", "<div>")).is_ok());
+        // The sanitiser repairs this one too, here with no link to unwrap,
+        // so it should settle once N7 runs inside the pass.
+        let sanitised = Sanitizer::new(SanitizePolicy::content_v1())
+            .expect("a valid policy")
+            .sanitize(body)
+            .expect("a body within the limits");
+        assert_eq!(sanitised.report.count(RemovalRule::NestedLinkUnwrapped), 0);
+        assert!(normalise(sanitised.html.as_str()).is_ok());
+    }
+
+    #[test]
     fn centring_inside_containers_survives_the_sanitiser() {
         // A `div` and a list inside a `center` render centred, so their text
         // stays centred once the sanitiser unwraps the `div` (N7, which runs
@@ -406,11 +532,12 @@ mod tests {
 
     /// N5's block shapes, for [`arb_legacy`] only. [`arb_plain_legacy`]
     /// keeps the pieces above: its properties expect no refusal, and the
-    /// extra headings and paragraphs here make more likely the one tag soup
-    /// among them that the parser repairs a few levels per pass (a link
-    /// left open around deeply nested lists and headings, with another
-    /// link inside them), which is refused with or without N5. `blocks.rs`
-    /// checks that its own shapes settle.
+    /// extra headings and paragraphs here would make more likely the one
+    /// tag soup among them that the parser repairs a few levels per pass (a
+    /// link left open around deeply nested lists and headings, with another
+    /// link inside them), which is refused with or without N5 and which
+    /// [`arb_plain_legacy`] leaves out (see there). `blocks.rs` checks that
+    /// its own shapes settle.
     #[rustfmt::skip]
     const BLOCK_PIECES: &[&str] = &[
         "<p align=\"center\">", "<P ALIGN=\"JUSTIFY\">", "<p lang=\"en\">", "<table align=\"left\"><tr><td>",
@@ -423,10 +550,82 @@ mod tests {
             .prop_map(|pieces| pieces.concat())
     }
 
+    /// Whether html5ever's parse of `raw` leaves a link inside another
+    /// link, the nesting that the sanitiser's structural pass unwraps (ADR
+    /// 0037). Without a table, as in [`arb_plain_legacy`], the parse builds
+    /// it only through the adoption agency's limit: with eight or more
+    /// blocks between a link start tag and a link still open, a copy of the
+    /// open link stays around the new one.
+    fn nests_a_link(raw: &str) -> bool {
+        let html = dom::parse(raw);
+        dom::elements_named(&html, "a").into_iter().any(|link| {
+            dom::node(&html, link)
+                .ancestors()
+                .any(|ancestor| dom::html_name(ancestor) == Some("a"))
+        })
+    }
+
+    /// The first pass's output, which the second pass parses.
+    fn once(raw: &str) -> String {
+        pass(raw, &mut NormaliseReport::default()).0
+    }
+
+    /// Whether html5ever alone, parsing and serialising with no rule in
+    /// between, reaches a fixed point within [`MAX_PASSES`] parses: what
+    /// [`normalise`] would do if no rule changed anything.
+    fn the_parser_alone_settles(raw: &str) -> bool {
+        let mut current = raw.to_owned();
+        for _ in 0..MAX_PASSES {
+            let next = dom::serialise(&dom::parse(&current));
+            if next == current {
+                return true;
+            }
+            current = next;
+        }
+        false
+    }
+
+    /// The words of `html`'s search text (ADR 0020), joined without the
+    /// spaces, which the parse may move: what V5(c) compares.
+    fn search_words(html: &str) -> String {
+        html_to_search_text(html).split(' ').collect()
+    }
+
     /// The legacy pieces without raw-text elements, whose content the
     /// writer keeps byte for byte, and without the tags whose parse moves
     /// text (tables foster it out, `pre` drops a line feed, `form` may be
     /// ignored), for the properties about text and references.
+    ///
+    /// It also leaves out every body whose parse nests a link in another
+    /// link ([`nests_a_link`]): a link left open around eight or more
+    /// nested blocks, with another link inside them. That is the one
+    /// family among these pieces that the normaliser refuses (see "The
+    /// fixed-point loop" in the module documentation), in two kinds, each
+    /// pinned by a unit test: with sixteen or more blocks the nesting
+    /// outlasts the passes (`a_link_left_open_around_sixteen_blocks_is_refused`),
+    /// and with fewer, the headings around the copies of the link that the
+    /// parse leaves can still be moving in the third pass after the nesting
+    /// is gone, as when N3 unwraps a centre between two headings
+    /// (`a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`).
+    /// Such a legacy body stops the import's `apply` (data-migration.md
+    /// §7.4, D140). Once N7 runs inside the pass, the sanitiser repairs
+    /// both kinds, and those tests expect the body to settle then: they
+    /// fail, and this filter goes with them. Whether `apply` then goes on depends on what N7
+    /// removes: a nested link it unwraps (ADR 0037), like every removal
+    /// that no N7 rule plans, still stops it unless an `N7-accept` entry
+    /// covers the row (data-migration.md §7.1, N7).
+    ///
+    /// The filter takes the nested links that settle as well, because
+    /// leaving out only the bodies whose links stay nested after a pass
+    /// misses the second kind. So the properties below see no nested link:
+    /// `a_link_left_open_around_sixteen_blocks_is_refused` checks the text
+    /// and the references of nested links that settle, and [`arb_legacy`],
+    /// the generator of P4 and the other rule properties, keeps every
+    /// nested link. In a sample of 1,260,000 bodies of these pieces, 3,451
+    /// nested a link (about 1 in 365), and the normaliser refused 12, all
+    /// among them: 4 of the first kind and 8 of the second, 7 of which the
+    /// parser alone settled. The other 3,439 settled with their text and
+    /// references as these properties expect.
     fn arb_plain_legacy() -> impl Strategy<Value = String> {
         let pieces: Vec<&str> = PIECES
             .iter()
@@ -445,6 +644,9 @@ mod tests {
             .collect();
         prop::collection::vec(prop::sample::select(pieces), 0..40)
             .prop_map(|pieces| pieces.concat())
+            .prop_filter("a link the parse nests in a link is left to N7", |raw| {
+                !nests_a_link(raw)
+            })
     }
 
     /// Whether every `&` in `html` starts one of the five references N8
@@ -538,6 +740,10 @@ mod tests {
         }
 
         // Legacy markup settles: the refusal is for pathological bodies.
+        // The one refused family among the plain pieces, a link the parse
+        // leaves inside another link, is left out by the generator, and its
+        // two kinds are pinned by `a_link_left_open_around_sixteen_blocks_is_refused`
+        // and `a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`.
         #[test]
         fn legacy_markup_is_never_refused(raw in arb_plain_legacy()) {
             prop_assert!(normalise(&raw).is_ok(), "{:?}", raw);
@@ -556,8 +762,7 @@ mod tests {
         #[test]
         fn the_search_text_is_unchanged(raw in arb_plain_legacy()) {
             let out = normalised(&raw);
-            let words = |html: &str| html_to_search_text(html).split(' ').map(str::to_owned).collect::<Vec<_>>().concat();
-            prop_assert_eq!(words(&out), words(&raw), "{:?}", out);
+            prop_assert_eq!(search_words(&out), search_words(&raw), "{:?}", out);
         }
 
         // N3 and N6 leave nothing for themselves: no `center`, no `src` or
