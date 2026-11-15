@@ -390,10 +390,14 @@ const CASES: &[Case] = &[
             ),
         ],
     },
+    // From PostgreSQL 18.7 on, every column of `probe` also carries the
+    // server's `pg_attver` option, stored first, which `pg_attribute.options`
+    // leaves out: `a` reports its two options alone, in their stored order,
+    // and `b` to `d`, which have no other option, report none.
     Case {
         name: "column settings",
         sql: "CREATE TABLE probe (a text, b text, c text, d text); \
-              ALTER TABLE probe ALTER COLUMN a SET (n_distinct = 5); \
+              ALTER TABLE probe ALTER COLUMN a SET (n_distinct = 5, n_distinct_inherited = 7); \
               ALTER TABLE probe ALTER COLUMN b SET STATISTICS 500; \
               ALTER TABLE probe ALTER COLUMN c SET STORAGE EXTERNAL; \
               ALTER TABLE probe ALTER COLUMN d SET COMPRESSION pglz; \
@@ -403,7 +407,7 @@ const CASES: &[Case] = &[
             (
                 "pg_attribute.options",
                 "column a of table probe",
-                "n_distinct=5",
+                "column options n_distinct=5, n_distinct_inherited=7",
             ),
             (
                 "pg_attribute.statistics_target",

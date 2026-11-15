@@ -90,8 +90,10 @@
 //!   not part of a database. Only this database's own rows of the shared
 //!   catalogs are read.
 //! - The test of [`OTHER_CATALOGS`] notices a new catalog, not a new column
-//!   of a catalog the rules read; a PostgreSQL major-version bump reviews the
-//!   rules against the release notes.
+//!   of a catalog the rules read; a PostgreSQL bump reviews the rules against
+//!   the release notes. A minor release can matter too: 18.7 started writing
+//!   a column option of its own, which the `pg_attribute.options` rule leaves
+//!   out.
 
 use std::fmt::Write as _;
 
@@ -644,13 +646,30 @@ fn column_rules() -> Vec<Rule> {
                  AND a.attacl IS DISTINCT FROM p.initprivs"
             ),
         ),
-        // ALTER COLUMN ... SET (n_distinct = ...) and the like.
+        // ALTER COLUMN ... SET (n_distinct = ...) and the like. Since
+        // PostgreSQL 18.7 the server also writes an option of its own,
+        // `pg_attver=<n>`, into every column of a table, a partition, a view,
+        // a materialized view or a composite type (not of an index or a TOAST
+        // table) when it creates the column or changes its type. It is the
+        // version that 18.7's composite-type versioning compares (the
+        // `composite_type_mismatch` setting; see the 18.7 release notes on
+        // composite types). A migration cannot set it: `ALTER COLUMN ... SET
+        // (pg_attver = ...)` and `RESET (pg_attver)` leave it as it is. The
+        // server gives a column a new value whenever a statement creates it
+        // or changes its type, so the value differs from one database to the
+        // next. The rule leaves that one entry out and
+        // reports the options that a migration sets, in their stored order;
+        // a column with no other option reports nothing.
         rule(
             "pg_attribute",
             "options",
             format!(
-                "SELECT {column}, 'column options ' || array_to_string(a.attoptions, ', ') \
-                 {columns} AND a.attoptions IS NOT NULL"
+                "SELECT c.object, 'column options ' || array_to_string(c.options, ', ') \
+                 FROM (SELECT {column} AS object, ARRAY(SELECT u.entry \
+                 FROM unnest(a.attoptions) WITH ORDINALITY AS u(entry, n) \
+                 WHERE NOT starts_with(u.entry, 'pg_attver=') ORDER BY u.n) AS options \
+                 {columns} AND a.attoptions IS NOT NULL) AS c \
+                 WHERE cardinality(c.options) > 0"
             ),
         ),
         // ALTER COLUMN ... SET STATISTICS, also on an index's expression

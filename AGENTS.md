@@ -91,10 +91,11 @@ that locale. The minor may differ: production's Argo CD Image Updater follows
 the 18 minor releases by itself, while `compose.yaml` pins its tag and digest
 and nothing bumps them automatically, so a compose bump is a manual change.
 The image also brings PostgreSQL's tz data, which the tz-data parity test
-compares with backend3's: a compose bump states the image's tz data version
-and passes that test, and before production moves to an image whose tz data
-differs from compose.yaml's, compose.yaml follows it to that tag (ADR 0041
-§3). The test reads the version from the image's tzdata.zi with
+compares with backend3's: a compose bump records the image's tz data version
+in the comment of `compose.yaml`, states it in its PR and passes that test,
+and before production moves to an image whose tz data differs from
+compose.yaml's, compose.yaml follows it to that tag (ADR 0041 §3). The test
+reads the version from the image's tzdata.zi with
 `pg_read_file`, which needs a superuser or a member of `pg_read_server_files`;
 compose's `loco` is the image's bootstrap superuser, so a local database
 with a lesser test role fails that check.

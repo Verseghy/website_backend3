@@ -7,9 +7,10 @@
 # - The major version matches production: PostgreSQL 18. The image is pinned
 #   by the digest of its multi-arch index; a bump changes tag and digest
 #   together. The image also brings the tz data that PostgreSQL's
-#   `AT TIME ZONE` and the Budapest-midnight check use, so a bump states the
-#   image's tz data version (the first line of /usr/share/zoneinfo/tzdata.zi)
-#   and passes the parity test of tests/tz_parity (ADR 0041 §3).
+#   `AT TIME ZONE` and the Budapest-midnight check use: 2026f in this 18.7
+#   image, the version that the first line of /usr/share/zoneinfo/tzdata.zi
+#   names. A bump records the new image's tz data version here, states it in
+#   its PR and passes the parity test of tests/tz_parity (ADR 0041 §3).
 # - The locale matches production too: initdb runs with the builtin C.UTF-8
 #   locale (POSTGRES_INITDB_ARGS below). CI's Test job checks it.
 # - The credentials are local throwaway values, not secrets. POSTGRES_USER is
@@ -26,7 +27,7 @@
 #   every start begins empty and nothing is left on disk.
 services:
   postgres:
-    image: docker.io/library/postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+    image: docker.io/library/postgres:18.7@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
     environment:
       POSTGRES_USER: loco
       POSTGRES_PASSWORD: loco
