@@ -1,0 +1,6 @@
+# The import normaliser's input fixtures are kept byte for byte: some hold
+# `\r\n` line ends on purpose, because N0 must turn them into `\n`
+# (tests/fixtures/normalise/README.md). No checkout converts their line
+# ends, whatever `core.autocrlf` or `core.eol` says; the fixture runner also
+# fails if one loses them.
+/tests/fixtures/normalise/*.html -text

@@ -616,6 +616,7 @@ dependencies = [
  "chrono-tz 0.10.4",
  "crc32fast",
  "cssparser 0.38.0",
+ "ego-tree 0.11.1",
  "futures-util",
  "getrandom 0.4.3",
  "gif",

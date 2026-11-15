@@ -463,7 +463,11 @@ is its specification; each slice adds the step for its own tables.
 2. **Pure transforms** in `src/domain/` (ADR 0008): one function from legacy
    row values to the target row, taking every input as an argument, including
    `snapshot_at` and the resolution entries. Rich-text bodies go through the
-   shared normaliser (`data-migration.md` section 7). Unit tests cover every
+   shared normaliser, `domain::normalise::normalise`, and its output through
+   the N9 checks of `check_fixed_point` (`data-migration.md` section 7, its
+   readings in 7.4). A new normaliser rule adds its step to the pass in
+   `src/domain/normalise/mod.rs`, its `Rule` variants, and a
+   before-and-after pair to `tests/fixtures/normalise/`. Unit tests cover every
    rule of sections 5-7 for the table, each defect including a precondition
    mismatch, and each exemption flag of section 4.3; proptests cover
    round trips and idempotence.

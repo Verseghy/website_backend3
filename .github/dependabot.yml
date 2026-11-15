@@ -254,6 +254,14 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: cssparser
         update-types: ["version-update:semver-major"]
+      # The import normaliser (data-migration.md section 7.1,
+      # src/domain/normalise/) edits the tree that scraper parses into, the
+      # ego-tree `Tree` of `scraper::Html::tree`, by its node ids. Its
+      # requirement must stay on the line scraper 0.29 builds ("^0.11.0"):
+      # another 0.x line would be a second copy whose types do not fit
+      # scraper's. A new line comes with the scraper bump.
+      - dependency-name: ego-tree
+        update-types: ["version-update:semver-major"]
 
   # The admin UI's npm project (admin/, ADR 0004).
   #

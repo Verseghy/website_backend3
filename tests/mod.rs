@@ -22,6 +22,7 @@ mod domain;
 mod media_contract;
 mod migration;
 mod models;
+mod normalise;
 mod requests;
 mod rich_text;
 mod schema;
