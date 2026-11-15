@@ -14,6 +14,7 @@ import {
   REFRESH_INTERVAL_MS,
 } from "./activity-refresh"
 import { createAuthProvider } from "./auth-provider"
+import { createSessionExpiry } from "./session-expiry"
 
 const MINUTE = 60 * 1000
 
@@ -126,6 +127,7 @@ describe("createActivityRefresh", () => {
       apiBaseUrl: "/api/admin",
       fetch,
       refreshTimeoutMs: 20,
+      sessionExpiry: createSessionExpiry(),
     })
     const { onActivity, refresh, advance } = tracker(
       vi.fn<() => Promise<unknown>>(() => provider.refreshSession())

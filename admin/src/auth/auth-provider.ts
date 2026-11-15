@@ -65,9 +65,39 @@
  *   ask its cached access questions again, so the sidebar and the screens
  *   follow at once. The refused call's own notification shows the Hungarian
  *   message (`refusalError`, `src/api/error-envelope.ts`). Only a `401`,
- *   from the call or from that refetch, signs the user out.
+ *   from the call or from that refetch, signs the user out, and the
+ *   refetch's `401 unauthorized` first waits for the in-place sign-in, as
+ *   `checkAuth`'s does (below).
+ * - A session that ends under an open page is renewed in place, not by the
+ *   sign-in page (ADR 0006, "Follow-up work"). When the `/auth/me` read of
+ *   `checkAuth`, or the refetch of a `403`, answers `401 unauthorized`, the
+ *   check waits on the retry queue of `session-expiry.ts` while the layout's
+ *   dialog is mounted, instead of rejecting, so ra-core's session check,
+ *   which react-query repeats whenever the tab comes back into view, cannot
+ *   swap the layout and its open form for the sign-in page; after the
+ *   sign-in it reads `/auth/me` again. Without a mounted dialog (the first
+ *   check of a page load) the `401` rejects at once, as before. The read
+ *   itself never waits, so `getIdentity` and `canAccess`, which share it,
+ *   never wait: `getIdentity`'s `401` leaves ra-core's identity as it was,
+ *   and nothing signs out on it. The dialog signs in again with
+ *   `resumeSession`, for the account whose session ended, which
+ *   `sessionAccount` names: the account of the last `/auth/me` answer that
+ *   the provider kept. The waiting requests are sent again only when that
+ *   same account holds a full `admin` session again (`resumed`); otherwise
+ *   (`restart`) the dialog ends the new session with the confirmed
+ *   sign-out. Both rules, with „Kilépés” as the same confirmed sign-out, are
+ *   the maintainer's answer of 2026-11-15, "Confirm all three as built"
+ *   (research: DECISIONS R37 (D158)). `resumeSession` gives up after
+ *   {@link RESUME_TIMEOUT_MS}, so a stalled request never leaves the dialog
+ *   without a way on. Every `logout` gives the in-place sign-in up, so no
+ *   `401` opens the dialog while ra-core leaves the signed-in pages.
  * - The kept answer belongs to one session: a sign-in, a sign-out and a
- *   `401` drop it, so the next account never sees the previous one's access.
+ *   `401` that `checkAuth` or `checkError` rejects with drop it, so the next
+ *   account never sees the previous one's access. A `401` that waits for the
+ *   in-place sign-in keeps it, so `canAccess` goes on answering the open
+ *   page's questions while the dialog is open (a rejection there would send
+ *   the page to the authentication-error page), and a resumed session
+ *   replaces it with the answer that `resumeSession` read.
  *
  * Configuration arrives as explicit options ({@link AuthProviderOptions}),
  * the `fetch` function included, so tests drive the provider against a stub
@@ -90,6 +120,11 @@ import type { MessageKey } from "@/i18n/keys"
 
 import { decideAccess } from "./access"
 import { readAccess, readPermissions, readRoles } from "./authz"
+import {
+  isSessionEnded,
+  type SessionExpiry,
+  type SignInWait,
+} from "./session-expiry"
 
 /** The sign-in endpoint, relative to the API base path. */
 export const LOGIN_PATH = "/auth/login"
@@ -163,6 +198,20 @@ export interface AuthProviderOptions {
    */
   readonly refreshTimeoutMs?: number
   /**
+   * How long `resumeSession` waits for its two answers (the sign-in and
+   * `/auth/me`) together before it gives up, in milliseconds; at least 1.
+   * {@link RESUME_TIMEOUT_MS} unless a test says otherwise.
+   */
+  readonly resumeTimeoutMs?: number
+  /**
+   * The retry queue of the in-place sign-in (`createSessionExpiry`), where
+   * the `401 unauthorized` of `checkAuth`, and of the `/auth/me` refetch of
+   * a `403`, waits while the layout's dialog is mounted. `main.tsx` passes
+   * the one queue that the data provider and the app get too; a queue with
+   * no dialog attached hands every `401` back at once.
+   */
+  readonly sessionExpiry: SessionExpiry
+  /**
    * Called after a `/auth/me` answer changed what the signed-in account
    * may do (its access map, permissions, admin flag or scope), so that the
    * answers ra-core cached for `canAccess` are asked again. `main.tsx`
@@ -184,6 +233,21 @@ export interface AuthProviderOptions {
  * answer and far below the tracker's 10-minute interval.
  */
 export const REFRESH_TIMEOUT_MS = 30 * 1000
+
+/**
+ * How long `resumeSession`, the in-place sign-in, waits for its answers:
+ * 30 seconds.
+ *
+ * Why it is bounded: the dialog disables both of its buttons while the
+ * sign-in is on its way, because leaving then could race a session cookie
+ * that the sign-in sets after the sign-out. Neither the browser nor
+ * backend3 ends a request that stalls, so without a bound one stalled
+ * request would leave a reload as the only way on, and a reload loses the
+ * open form that the dialog exists to keep. The bound is the refresh's
+ * ({@link REFRESH_TIMEOUT_MS}): far beyond a slow sign-in, which checks one
+ * password hash, and short enough that the user can try again or leave.
+ */
+export const RESUME_TIMEOUT_MS = 30 * 1000
 
 /**
  * Thrown by {@link createAuthProvider} when its options are invalid. The
@@ -268,6 +332,30 @@ export class SessionCheckError extends Error {
 }
 
 /**
+ * The rejection of an `/auth/me` read whose answer was `401 unauthorized`:
+ * the session has ended (`isSessionEnded` of `./session-expiry.ts`).
+ *
+ * To ra-core it is the {@link SessionCheckError} of any other `401`, with
+ * the sign-in prompt. It also carries the retry queue's round in which the
+ * read was sent, which a check that may wait for the in-place sign-in hands
+ * to `waitForSignIn`: a read that left before the last round ended carries
+ * the old cookie and must not open a second dialog.
+ */
+class SessionEndedError extends SessionCheckError {
+  /** The retry queue's round when the read was sent. */
+  readonly sentIn: number
+
+  /**
+   * @param sentIn - `SessionExpiry.round()`, read right before the request
+   *   was sent.
+   */
+  constructor(sentIn: number) {
+    super(401, NO_SESSION_KEY)
+    this.sentIn = sentIn
+  }
+}
+
+/**
  * What `refreshSession` found:
  *
  * - `refreshed`: `204`; the server renewed the session cookie, or kept it
@@ -280,8 +368,43 @@ export class SessionCheckError extends Error {
 export type RefreshOutcome = "refreshed" | "ended" | "failed"
 
 /**
- * backend3's auth provider: ra-core's methods, and the explicit session
- * refresh that the activity tracker calls (ADR 0006 §1).
+ * The account whose session the open page holds: the one that `/auth/me`
+ * last answered. The in-place sign-in shows it and signs it in again.
+ */
+export interface SessionAccount {
+  /** The account's public id (`pid`), a UUID. */
+  readonly pid: string
+  /** The display name. */
+  readonly name: string
+  /** The sign-in address. */
+  readonly email: string
+}
+
+/**
+ * What `resumeSession` found after a successful sign-in:
+ *
+ * - `resumed`: the same account holds a full `admin` session again, so the
+ *   waiting requests may be sent again;
+ * - `restart`: `/auth/me` answered for another account (a sign-in in
+ *   another tab overwrote the cookie in the meantime, or the address moved
+ *   to another account) or for a session whose scope is not `admin`. The
+ *   waiting requests, built under the old session, must not be sent; the
+ *   dialog ends the session that the cookie now holds with the confirmed
+ *   sign-out, and ra-core then shows the sign-in page.
+ *
+ * Only the account whose session ended may continue: the maintainer's
+ * answer of 2026-11-15 (research: DECISIONS R37 (D158)).
+ *
+ * Today `/auth/login` answers only the `done` step; a `change_password` or
+ * `totp` step is a failed sign-in until the slices that add those steps
+ * teach `login` and `resumeSession` about them (see `KNOWN_LOGIN_STEPS`).
+ */
+export type ResumeOutcome = "resumed" | "restart"
+
+/**
+ * backend3's auth provider: ra-core's methods, the explicit session refresh
+ * that the activity tracker calls (ADR 0006 §1), and the in-place sign-in
+ * of the session-expiry dialog.
  */
 export interface BackendAuthProvider extends AuthProvider {
   /**
@@ -290,6 +413,31 @@ export interface BackendAuthProvider extends AuthProvider {
    * @returns what the server answered; it never rejects.
    */
   refreshSession(): Promise<RefreshOutcome>
+  /**
+   * The account whose session the open page holds.
+   *
+   * @returns the account of the last `/auth/me` answer, or `undefined`
+   *   before the first one and after a sign-out.
+   */
+  sessionAccount(): SessionAccount | undefined
+  /**
+   * Signs {@link BackendAuthProvider.sessionAccount} in again with
+   * `password` (`POST /auth/login`), then asks `/auth/me` who holds the new
+   * session. It never waits for the dialog: the dialog is what calls it.
+   * Both requests together are bounded by the `resumeTimeoutMs` option
+   * ({@link RESUME_TIMEOUT_MS}). The remembered account and the kept access
+   * answer change only on `resumed`, so after a `restart` they still belong
+   * to the account whose session ended.
+   *
+   * @param password - the password as typed.
+   * @returns `resumed` or `restart`; see {@link ResumeOutcome}.
+   * @throws {SignInError} when the sign-in failed, with the message the
+   *   sign-in screen would show, or with `auth.sign_in.failed` when no
+   *   account is known, no answer came within the timeout, or `/auth/me`
+   *   could not be read after it.
+   * @throws {TypeError} when `password` is not a string.
+   */
+  resumeSession(password: string): Promise<ResumeOutcome>
 }
 
 /**
@@ -483,15 +631,43 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 /**
+ * Reads a timeout option.
+ *
+ * @param name - the option's name, for the error message.
+ * @param value - the option as passed, or `undefined`.
+ * @param fallback - the value when the option is left out, and the one the
+ *   error message names.
+ * @param fallbackName - the constant that holds `fallback`.
+ * @returns the timeout in milliseconds.
+ * @throws {AuthProviderConfigError} when the value is not a finite number of
+ *   at least 1.
+ */
+function timeoutOption(
+  name: string,
+  value: number | undefined,
+  fallback: number,
+  fallbackName: string
+): number {
+  const timeout = value ?? fallback
+  if (!Number.isFinite(timeout) || timeout < 1) {
+    throw new AuthProviderConfigError(
+      `${name} must be a finite number of milliseconds, at least 1; got ${String(timeout)}. The admin uses ${fallbackName} (${String(fallback / 1000)} seconds).`
+    )
+  }
+  return timeout
+}
+
+/**
  * Builds backend3's auth provider.
  *
- * @param options - the API base path, the `fetch` to use, the refresh's
- *   timeout and the access-change callback; see {@link AuthProviderOptions}.
+ * @param options - the API base path, the `fetch` to use, the timeouts of
+ *   the refresh and of the in-place sign-in, its retry queue and the
+ *   access-change callback; see {@link AuthProviderOptions}.
  * @returns an ra-core `AuthProvider` with `login`, `logout`, `checkAuth`,
  *   `checkError`, `getIdentity` and `canAccess`, and backend3's
- *   `refreshSession`. It has no `getPermissions`: the access map of
- *   `/auth/me` answers every access question, and the admin API decides
- *   every request itself (ADR 0007).
+ *   `refreshSession`, `sessionAccount` and `resumeSession`. It has no
+ *   `getPermissions`: the access map of `/auth/me` answers every access
+ *   question, and the admin API decides every request itself (ADR 0007).
  * @throws {AuthProviderConfigError} when the options are invalid.
  */
 export function createAuthProvider(
@@ -506,10 +682,21 @@ export function createAuthProvider(
       "fetch must be a function; main.tsx passes window.fetch bound to window."
     )
   }
-  const refreshTimeoutMs = options.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS
-  if (!Number.isFinite(refreshTimeoutMs) || refreshTimeoutMs < 1) {
+  const refreshTimeoutMs = timeoutOption(
+    "refreshTimeoutMs",
+    options.refreshTimeoutMs,
+    REFRESH_TIMEOUT_MS,
+    "REFRESH_TIMEOUT_MS"
+  )
+  const resumeTimeoutMs = timeoutOption(
+    "resumeTimeoutMs",
+    options.resumeTimeoutMs,
+    RESUME_TIMEOUT_MS,
+    "RESUME_TIMEOUT_MS"
+  )
+  if (typeof options.sessionExpiry?.waitForSignIn !== "function") {
     throw new AuthProviderConfigError(
-      `refreshTimeoutMs must be a finite number of milliseconds, at least 1; got ${String(refreshTimeoutMs)}. The admin uses REFRESH_TIMEOUT_MS (30 seconds).`
+      "sessionExpiry must be the retry queue of createSessionExpiry(); main.tsx creates one and passes the same queue to both providers and to the app."
     )
   }
   if (
@@ -520,10 +707,17 @@ export function createAuthProvider(
       "onAccessChange must be a function or left out; main.tsx passes one that invalidates ra-core's cached canAccess answers."
     )
   }
-  const { apiBaseUrl, fetch, onAccessChange } = options
+  const { apiBaseUrl, fetch, sessionExpiry, onAccessChange } = options
 
   /** The last `/auth/me` answer of this session, or `undefined`. */
   let current: MeResponse | undefined
+  /**
+   * The account of the last `/auth/me` answer that the provider kept: what
+   * the in-place sign-in shows and signs in again. Unlike {@link current},
+   * a `401` never clears it, since it names the account whose session
+   * ended; every sign-out does.
+   */
+  let account: SessionAccount | undefined
   /** The `/auth/me` read in flight, which every caller shares. */
   let reading: Promise<MeResponse> | undefined
   /**
@@ -547,25 +741,71 @@ export function createAuthProvider(
   }
 
   /**
-   * Asks `/auth/me` for the signed-in account.
+   * Forgets the session and the account and gives the in-place sign-in up:
+   * ra-core leaves the signed-in pages now, so no `401` may open the dialog
+   * on the way out (ra-core asks `checkAuth` once more before it signs out
+   * on a refused request). The next layout's dialog attaches again.
+   */
+  const signedOut = (): void => {
+    forget()
+    account = undefined
+    sessionExpiry.abandon()
+  }
+
+  /**
+   * Keeps an `/auth/me` answer of this session: the access answer that
+   * `canAccess` reads, and the account that the in-place sign-in names.
+   * When it lets the account do something else than the kept answer,
+   * `onAccessChange` runs.
    *
+   * @param me - the answer.
+   */
+  const keep = (me: MeResponse): void => {
+    const before = current
+    current = me
+    account = { pid: me.pid, name: me.name, email: me.email }
+    if (before !== undefined && !sameAccess(before, me)) {
+      onAccessChange?.()
+    }
+  }
+
+  /**
+   * Asks `/auth/me` for the signed-in account, once: it never waits for the
+   * in-place sign-in.
+   *
+   * @param signal - ends the request; the in-place sign-in's timeout. The
+   *   other reads pass none, as before the in-place sign-in existed.
    * @returns the account.
    * @throws {SessionCheckError} with `ra.auth.auth_check_error` for a `401`
-   *   and `ra.notification.http_error` for any other failure.
+   *   (a {@link SessionEndedError} when it says the session ended) and
+   *   `ra.notification.http_error` for any other failure, an aborted
+   *   request included.
    */
-  const askMe = async (): Promise<MeResponse> => {
+  const askMe = async (signal?: AbortSignal): Promise<MeResponse> => {
+    // Read before the request leaves: a sign-in that ends the round while
+    // the request is on its way makes its 401 an old cookie's answer
+    // (`session-expiry.ts`, "Rounds").
+    const sentIn = sessionExpiry.round()
     let response: Response
     try {
       response = await fetch(`${apiBaseUrl}${ME_PATH}`, {
         method: "GET",
         credentials: "same-origin",
         headers: { Accept: "application/json" },
+        ...(signal === undefined ? {} : { signal }),
       })
     } catch {
       throw new SessionCheckError(null, CHECK_FAILED_KEY)
     }
     if (response.status === 401) {
-      throw new SessionCheckError(401, NO_SESSION_KEY)
+      const ended = await isSessionEnded(response)
+      // Nobody reads this 401 (`isSessionEnded` read a copy, and a check
+      // that waits sends a new read after the sign-in): release its
+      // connection, as `sendWithSignIn` does before its retry.
+      await response.body?.cancel().catch(() => undefined)
+      throw ended
+        ? new SessionEndedError(sentIn)
+        : new SessionCheckError(401, NO_SESSION_KEY)
     }
     const me = response.ok
       ? parseMeResponse(await readJson(response))
@@ -578,9 +818,10 @@ export function createAuthProvider(
 
   /**
    * Reads `/auth/me` and keeps the answer; callers that ask while a read is
-   * in flight share it. A `401` drops the kept answer; any other failure
-   * leaves it, since the session may still hold. When the new answer lets
-   * the account do something else than the kept one, `onAccessChange` runs.
+   * in flight share it. A failure leaves the kept answer: the check that
+   * ra-core signs out on drops it ({@link checkUntilSignedIn}), and any
+   * other caller's failure, `getIdentity`'s `401` included, says nothing
+   * final about the session while the in-place sign-in may still renew it.
    *
    * @returns the account.
    * @throws {SessionCheckError} as {@link askMe} does.
@@ -590,28 +831,12 @@ export function createAuthProvider(
       return reading
     }
     const sentIn = generation
-    const read = askMe().then(
-      (me) => {
-        if (sentIn === generation) {
-          const before = current
-          current = me
-          if (before !== undefined && !sameAccess(before, me)) {
-            onAccessChange?.()
-          }
-        }
-        return me
-      },
-      (error: unknown) => {
-        if (
-          sentIn === generation &&
-          error instanceof SessionCheckError &&
-          error.status === 401
-        ) {
-          current = undefined
-        }
-        throw error
+    const read = askMe().then((me) => {
+      if (sentIn === generation) {
+        keep(me)
       }
-    )
+      return me
+    })
     const shared = read.finally(() => {
       if (reading === shared) {
         reading = undefined
@@ -659,37 +884,112 @@ export function createAuthProvider(
     return next
   }
 
+  /**
+   * Runs `read` for a check that ra-core signs out on (`checkAuth`, and
+   * `checkError` for a `403`), and waits for the in-place sign-in whenever
+   * its `401 unauthorized` says the session ended: after the sign-in it runs
+   * `read` again, as `sendWithSignIn` does for the data provider's
+   * requests. Without a mounted dialog, or after the user gave up, the
+   * `401` rejects at once and drops the kept answer.
+   *
+   * @param read - reads `/auth/me` once ({@link readMe} or
+   *   {@link refetchMe}).
+   * @param signal - ra-core's abort signal of the check, if it has one: it
+   *   ends only the wait, never the read, which other callers may share.
+   * @throws {SessionCheckError} as {@link askMe} does, after any wait; with
+   *   `ra.notification.http_error` and no status when `signal` ended the
+   *   wait.
+   */
+  const checkUntilSignedIn = async (
+    read: () => Promise<unknown>,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    for (;;) {
+      const sentIn = generation
+      try {
+        await read()
+        return
+      } catch (error) {
+        if (error instanceof SessionEndedError) {
+          let wait: SignInWait
+          try {
+            wait = await sessionExpiry.waitForSignIn(error.sentIn, signal)
+          } catch (failure) {
+            if (signal?.aborted === true) {
+              // ra-core cancelled the check: it waits no more, and nothing
+              // about the session is decided.
+              throw new SessionCheckError(null, CHECK_FAILED_KEY)
+            }
+            throw failure
+          }
+          if (wait === "resumed") {
+            continue
+          }
+        }
+        if (
+          sentIn === generation &&
+          error instanceof SessionCheckError &&
+          error.status === 401
+        ) {
+          // ra-core signs out on this rejection: the session is over.
+          current = undefined
+        }
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Posts the e-mail address and password to `/auth/login`, which sets the
+   * session cookie.
+   *
+   * @param body - the request body.
+   * @param signal - ends the request; the in-place sign-in's timeout. The
+   *   sign-in screen passes none.
+   * @throws {SignInError} with the message the sign-in screen shows (see
+   *   the module documentation).
+   */
+  const signIn = async (
+    body: LoginRequest,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    let response: Response
+    try {
+      response = await fetch(`${apiBaseUrl}${LOGIN_PATH}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        ...(signal === undefined ? {} : { signal }),
+      })
+    } catch {
+      throw new SignInError(null, keyMessage(SIGN_IN_FAILED_KEY))
+    }
+    const answer = await readJson(response)
+    if (!response.ok) {
+      throw new SignInError(
+        response.status,
+        signInFailureMessage(response.status, answer)
+      )
+    }
+    // `done` is the only step this build knows (`KNOWN_LOGIN_STEPS`); the
+    // two-factor and forced password-change steps (ADR 0006 §4) arrive
+    // with their own screens. Until then a `totp` or `change_password`
+    // answer is a failed sign-in here, on the sign-in screen and in the
+    // in-place sign-in alike; the slices that add the steps teach both
+    // about them. An answer this build cannot read is a failed sign-in,
+    // not a session.
+    if (parseLoginResponse(answer)?.step !== "done") {
+      throw new SignInError(response.status, keyMessage(SIGN_IN_FAILED_KEY))
+    }
+  }
+
   return {
     async login(params: unknown) {
-      const body = loginRequest(params)
-      let response: Response
-      try {
-        response = await fetch(`${apiBaseUrl}${LOGIN_PATH}`, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(body),
-        })
-      } catch {
-        throw new SignInError(null, keyMessage(SIGN_IN_FAILED_KEY))
-      }
-      const answer = await readJson(response)
-      if (!response.ok) {
-        throw new SignInError(
-          response.status,
-          signInFailureMessage(response.status, answer)
-        )
-      }
-      // `done` is the only step this build knows (`KNOWN_LOGIN_STEPS`); the
-      // two-factor and forced password-change steps (ADR 0006 §4) arrive
-      // with their own screens. An answer this build cannot read is a failed
-      // sign-in, not a session.
-      if (parseLoginResponse(answer)?.step !== "done") {
-        throw new SignInError(response.status, keyMessage(SIGN_IN_FAILED_KEY))
-      }
+      await signIn(loginRequest(params))
       // A new session, perhaps of another account: nothing kept from before
       // may answer for it. The next checkAuth reads its /auth/me.
       forget()
@@ -702,7 +1002,7 @@ export function createAuthProvider(
       // ra-core's own calls come after it found no session: nothing to end
       // on the server (see the module documentation), and nothing to keep.
       if (!isSignOutRequest(params)) {
-        forget()
+        signedOut()
         return undefined
       }
       let response: Response
@@ -719,7 +1019,7 @@ export function createAuthProvider(
       // 401: there was no session left to end. Either way the user is
       // signed out, and ra-core shows the sign-in page.
       if (response.status === 204 || response.status === 401) {
-        forget()
+        signedOut()
         return undefined
       }
       // Anything else, a 2xx other than 204 included, is not the server's
@@ -730,8 +1030,13 @@ export function createAuthProvider(
       )
     },
 
-    async checkAuth() {
-      await readMe()
+    async checkAuth(params: unknown) {
+      // ra-core passes react-query's abort signal with the check's params.
+      const signal = (params as { signal?: unknown } | null | undefined)?.signal
+      await checkUntilSignedIn(
+        readMe,
+        signal instanceof AbortSignal ? signal : undefined
+      )
     },
 
     async checkError(error: unknown) {
@@ -743,11 +1048,14 @@ export function createAuthProvider(
         // The access map allowed a call that the server refused: the
         // account's roles or grants may have changed (ADR 0007 §7). Ask
         // again, with a read sent after the refusal; readMe tells ra-core
-        // to re-ask its access questions when the answer changed.
+        // to re-ask its access questions when the answer changed. A
+        // session that ended in between waits for the in-place sign-in
+        // first, so the open page stays.
         try {
-          await refetchMe()
+          await checkUntilSignedIn(refetchMe)
         } catch (failure) {
-          // The session ended in between: that, not the 403, signs out.
+          // The session ended in between and the user gave up, or no
+          // dialog can ask: that, not the 403, signs out.
           if (failure instanceof SessionCheckError && failure.status === 401) {
             throw new SessionCheckError(401, SESSION_ENDED_KEY)
           }
@@ -760,8 +1068,56 @@ export function createAuthProvider(
     },
 
     async getIdentity(): Promise<AdminIdentity> {
+      // Never waits for the in-place sign-in (see the module
+      // documentation): its 401 rejects at once and ends nothing.
       const me = await readMe()
       return { id: me.pid, fullName: me.name, email: me.email, scope: me.scope }
+    },
+
+    sessionAccount: () => account,
+
+    async resumeSession(password: string): Promise<ResumeOutcome> {
+      if (typeof password !== "string") {
+        throw new TypeError(
+          "authProvider.resumeSession expects the password as a string, the value of the dialog's password input."
+        )
+      }
+      const expected = account
+      if (expected === undefined) {
+        // The layout, and so the dialog, renders only after `checkAuth`
+        // read an account; without one there is nobody to sign in again.
+        throw new SignInError(null, keyMessage(SIGN_IN_FAILED_KEY))
+      }
+      // One bound for both requests (RESUME_TIMEOUT_MS says why). A request
+      // that it ends rejects with a `TimeoutError`, which both steps below
+      // report as `auth.sign_in.failed`.
+      const signal = AbortSignal.timeout(resumeTimeoutMs)
+      // A sign-out while the sign-in is on its way ends this session's
+      // claim on the kept answer.
+      const sentIn = generation
+      await signIn({ email: expected.email, password }, signal)
+      let me: MeResponse
+      try {
+        // A read of its own, never the shared one: a read in flight was
+        // sent with the ended session's cookie. Not through the retry
+        // queue either: the dialog that would answer the wait is the
+        // caller.
+        me = await askMe(signal)
+      } catch {
+        throw new SignInError(null, keyMessage(SIGN_IN_FAILED_KEY))
+      }
+      if (me.pid !== expected.pid || me.scope !== "admin") {
+        // Not kept: until the dialog's sign-out has ended this session,
+        // the dialog keeps naming, and signing in, the account whose
+        // session ended, and canAccess keeps answering for it.
+        return "restart"
+      }
+      // The same account, whose access may have changed since the session
+      // ended: keeping the answer re-asks ra-core's access questions then.
+      if (sentIn === generation) {
+        keep(me)
+      }
+      return "resumed"
     },
 
     async refreshSession(): Promise<RefreshOutcome> {
@@ -794,7 +1150,9 @@ export function createAuthProvider(
       // user to /authentication-error, never to a screen it could not
       // check; a plain "no" sends a page to /access-denied. App.tsx gives
       // both routes backend3's Hungarian pages (ra-core renders nothing
-      // there by default).
+      // there by default). A session that ended under the open page keeps
+      // its answer until the in-place sign-in settles (see the module
+      // documentation), so the open page's questions never reject then.
       const me = current ?? (await readMe())
       return decideAccess(me, {
         action: params.action,

@@ -23,6 +23,7 @@ import { createI18nProvider } from "@/i18n/provider"
 
 import { CAN_ACCESS_QUERY_KEY, invalidateAccessChecks } from "./access-checks"
 import { createAuthProvider } from "./auth-provider"
+import { createSessionExpiry, type SessionExpiry } from "./session-expiry"
 
 const ME: MeResponse = {
   pid: "0b7c4a52-7e3d-4c55-9a7f-4b3c2d1e0f9a",
@@ -68,8 +69,14 @@ function ProbeResources() {
  *
  * @param authProvider - the provider ra-core asks.
  * @param queryClient - the client ra-core caches the answers in.
+ * @param sessionExpiry - the retry queue that `authProvider` got too; no
+ *   dialog is attached, so nothing waits.
  */
-function mount(authProvider: AuthProvider, queryClient: QueryClient) {
+function mount(
+  authProvider: AuthProvider,
+  queryClient: QueryClient,
+  sessionExpiry: SessionExpiry
+) {
   render(
     <TestMemoryRouter>
       <CoreAdminContext
@@ -77,6 +84,9 @@ function mount(authProvider: AuthProvider, queryClient: QueryClient) {
         dataProvider={createDataProvider({
           apiBaseUrl: "/api/admin",
           resources: {},
+          // No resource, so the probes send no data request.
+          fetch: vi.fn<typeof globalThis.fetch>(),
+          sessionExpiry,
         })}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
         queryClient={queryClient}
@@ -103,15 +113,17 @@ describe("invalidateAccessChecks", () => {
         })
     )
     const queryClient = new QueryClient()
+    const sessionExpiry = createSessionExpiry()
     const authProvider = createAuthProvider({
       apiBaseUrl: "/api/admin",
       fetch,
+      sessionExpiry,
       onAccessChange: () => {
         void invalidateAccessChecks(queryClient)
       },
     })
     await authProvider.checkAuth({})
-    mount(authProvider, queryClient)
+    mount(authProvider, queryClient, sessionExpiry)
     await waitFor(() => {
       expect(screen.getByTestId("edit")).toHaveAttribute("data-state", "true")
       expect(screen.getByTestId("list")).toHaveAttribute("data-state", "true")
@@ -139,9 +151,14 @@ describe("invalidateAccessChecks", () => {
       async () => new Response(JSON.stringify(me), { status: 200 })
     )
     const queryClient = new QueryClient()
-    const authProvider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+    const sessionExpiry = createSessionExpiry()
+    const authProvider = createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      sessionExpiry,
+    })
     await authProvider.checkAuth({})
-    mount(authProvider, queryClient)
+    mount(authProvider, queryClient, sessionExpiry)
     await waitFor(() => {
       expect(screen.getByTestId("edit")).toHaveAttribute("data-state", "true")
     })

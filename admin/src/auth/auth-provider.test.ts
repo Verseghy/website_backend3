@@ -21,6 +21,7 @@ import {
   REFRESH_PATH,
   REFRESH_TIMEOUT_MS,
   refreshOutcome,
+  RESUME_TIMEOUT_MS,
   sameAccess,
   SessionCheckError,
   SIGN_OUT_PARAMS,
@@ -29,6 +30,7 @@ import {
   SignOutError,
   signOutFailureMessage,
 } from "./auth-provider"
+import { createSessionExpiry, type SessionExpiry } from "./session-expiry"
 
 const ME: MeResponse = {
   pid: "0b7c4a52-7e3d-4c55-9a7f-4b3c2d1e0f9a",
@@ -89,7 +91,11 @@ function providerAnswering(answer: Response | Error) {
     return answer.clone()
   })
   return {
-    provider: createAuthProvider({ apiBaseUrl: "/api/admin", fetch }),
+    provider: createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      sessionExpiry: createSessionExpiry(),
+    }),
     fetch,
   }
 }
@@ -113,10 +119,20 @@ describe("createAuthProvider", () => {
   it.each(["", "api/admin", "/api/admin/", "https://example.org/api", "//x"])(
     "refuses the apiBaseUrl %j with the data provider's message",
     (apiBaseUrl) => {
-      expect(() => createAuthProvider({ apiBaseUrl, fetch: vi.fn() })).toThrow(
-        AuthProviderConfigError
-      )
-      expect(() => createAuthProvider({ apiBaseUrl, fetch: vi.fn() })).toThrow(
+      expect(() =>
+        createAuthProvider({
+          apiBaseUrl,
+          fetch: vi.fn(),
+          sessionExpiry: createSessionExpiry(),
+        })
+      ).toThrow(AuthProviderConfigError)
+      expect(() =>
+        createAuthProvider({
+          apiBaseUrl,
+          fetch: vi.fn(),
+          sessionExpiry: createSessionExpiry(),
+        })
+      ).toThrow(
         /^apiBaseUrl must be a root-relative path such as "\/api\/admin"/
       )
     }
@@ -127,6 +143,7 @@ describe("createAuthProvider", () => {
       createAuthProvider({
         apiBaseUrl: "/api/admin",
         fetch: undefined as unknown as typeof globalThis.fetch,
+        sessionExpiry: createSessionExpiry(),
       })
     ).toThrow(/fetch must be a function/)
   })
@@ -139,12 +156,42 @@ describe("createAuthProvider", () => {
           apiBaseUrl: "/api/admin",
           fetch: vi.fn(),
           refreshTimeoutMs,
+          sessionExpiry: createSessionExpiry(),
         })
       ).toThrow(
         /^refreshTimeoutMs must be a finite number of milliseconds, at least 1; got .*REFRESH_TIMEOUT_MS \(30 seconds\)/
       )
     }
   )
+
+  it.each([0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "refuses the resumeTimeoutMs %d, which would give up at once or never",
+    (resumeTimeoutMs) => {
+      expect(() =>
+        createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch: vi.fn(),
+          resumeTimeoutMs,
+          sessionExpiry: createSessionExpiry(),
+        })
+      ).toThrow(
+        /^resumeTimeoutMs must be a finite number of milliseconds, at least 1; got .*RESUME_TIMEOUT_MS \(30 seconds\)/
+      )
+    }
+  )
+
+  it("accepts a resumeTimeoutMs of 1 millisecond or more", () => {
+    for (const resumeTimeoutMs of [1, 1.5, RESUME_TIMEOUT_MS]) {
+      expect(() =>
+        createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch: vi.fn(),
+          resumeTimeoutMs,
+          sessionExpiry: createSessionExpiry(),
+        })
+      ).not.toThrow()
+    }
+  })
 
   it("accepts a refreshTimeoutMs of 1 millisecond or more", () => {
     for (const refreshTimeoutMs of [1, 1.5, REFRESH_TIMEOUT_MS]) {
@@ -153,6 +200,7 @@ describe("createAuthProvider", () => {
           apiBaseUrl: "/api/admin",
           fetch: vi.fn(),
           refreshTimeoutMs,
+          sessionExpiry: createSessionExpiry(),
         })
       ).not.toThrow()
     }
@@ -163,6 +211,7 @@ describe("createAuthProvider", () => {
       createAuthProvider({
         apiBaseUrl: "/api/admin",
         fetch: vi.fn(),
+        sessionExpiry: createSessionExpiry(),
         onAccessChange: "invalidate" as unknown as () => void,
       })
     ).toThrow(/onAccessChange must be a function or left out/)
@@ -180,9 +229,10 @@ const EDITOR: MeResponse = {
  * the next one, and the last one repeats.
  *
  * @param answers - the answers, in order.
- * @returns the provider, the stub and the `onAccessChange` spy.
+ * @returns the provider, the stub, the `onAccessChange` spy and the retry
+ *   queue of the in-place sign-in, which no dialog has attached to.
  */
-function providerAnsweringInTurn(...answers: Response[]) {
+function providerRepeatingLast(...answers: Response[]) {
   let next = 0
   const fetch = vi.fn<typeof globalThis.fetch>(async () => {
     const answer = answers[Math.min(next, answers.length - 1)]
@@ -190,14 +240,17 @@ function providerAnsweringInTurn(...answers: Response[]) {
     return answer.clone()
   })
   const onAccessChange = vi.fn<() => void>()
+  const sessionExpiry = createSessionExpiry()
   return {
     provider: createAuthProvider({
       apiBaseUrl: "/api/admin",
       fetch,
+      sessionExpiry,
       onAccessChange,
     }),
     fetch,
     onAccessChange,
+    sessionExpiry,
   }
 }
 
@@ -213,7 +266,7 @@ function meReads(fetch: ReturnType<typeof vi.fn<typeof globalThis.fetch>>) {
 
 describe("canAccess", () => {
   it("answers from the access map that checkAuth read, without a request of its own", async () => {
-    const { provider, fetch } = providerAnsweringInTurn(json(200, EDITOR))
+    const { provider, fetch } = providerRepeatingLast(json(200, EDITOR))
     await provider.checkAuth({})
     expect(meReads(fetch)).toBe(1)
     for (const [action, expected] of [
@@ -244,7 +297,7 @@ describe("canAccess", () => {
   })
 
   it("reads /auth/me once for every question asked before the first answer", async () => {
-    const { provider, fetch } = providerAnsweringInTurn(json(200, EDITOR))
+    const { provider, fetch } = providerRepeatingLast(json(200, EDITOR))
     const answers = await Promise.all([
       provider.canAccess?.({ action: "list", resource: "probes" } as never),
       provider.canAccess?.({ action: "create", resource: "probes" } as never),
@@ -255,9 +308,7 @@ describe("canAccess", () => {
   })
 
   it("rejects when it cannot read /auth/me, and never allows what it could not check", async () => {
-    const { provider } = providerAnsweringInTurn(
-      json(500, envelope("internal"))
-    )
+    const { provider } = providerRepeatingLast(json(500, envelope("internal")))
     const error = await rejection(
       provider.canAccess?.({ action: "list", resource: "probes" } as never) ??
         Promise.resolve()
@@ -268,7 +319,7 @@ describe("canAccess", () => {
   it("follows a changed account at the next read, and says so once", async () => {
     // The account loses the probe resource, for example after a role change
     // in another session (ADR 0007 §7).
-    const { provider, onAccessChange } = providerAnsweringInTurn(
+    const { provider, onAccessChange } = providerRepeatingLast(
       json(200, EDITOR),
       json(200, ME)
     )
@@ -285,7 +336,7 @@ describe("canAccess", () => {
   })
 
   it("does not call onAccessChange for the first answer, or for one that changes nothing", async () => {
-    const { provider, onAccessChange } = providerAnsweringInTurn(
+    const { provider, onAccessChange } = providerRepeatingLast(
       json(200, EDITOR),
       json(200, { ...EDITOR, name: "Új Név" })
     )
@@ -317,7 +368,11 @@ describe("canAccess", () => {
           ? json(200, EDITOR)
           : json(401, envelope("unauthorized"))
       })
-      const provider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+      const provider = createAuthProvider({
+        apiBaseUrl: "/api/admin",
+        fetch,
+        sessionExpiry: createSessionExpiry(),
+      })
       await provider.checkAuth({})
       await end(provider)
       // With nothing kept, the question reads /auth/me, which has no
@@ -328,13 +383,45 @@ describe("canAccess", () => {
     }
   })
 
+  it("keeps the answer while a 401 waits for the in-place sign-in, and drops it when the user gives up", async () => {
+    const { provider, fetch, sessionExpiry } = providerRepeatingLast(
+      json(200, EDITOR),
+      json(401, envelope("unauthorized"))
+    )
+    sessionExpiry.attach()
+    await provider.checkAuth({})
+    // getIdentity never waits, and its 401 ends nothing.
+    await expect(provider.getIdentity?.()).rejects.toBeInstanceOf(
+      SessionCheckError
+    )
+    const check = rejection(provider.checkAuth({}))
+    await vi.waitFor(() => expect(sessionExpiry.isWaiting()).toBe(true))
+    // A rejection here would send the open page to the authentication-error
+    // page while the dialog may still renew the session.
+    await expect(
+      provider.canAccess?.({ action: "edit", resource: "probes" } as never)
+    ).resolves.toBe(true)
+    expect(meReads(fetch)).toBe(3)
+
+    sessionExpiry.abandon()
+    expect(((await check) as SessionCheckError).status).toBe(401)
+    // ra-core signs out on that rejection: nothing is kept for the next one.
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).rejects.toBeInstanceOf(SessionCheckError)
+  })
+
   it("keeps the answer when a sign-out was not confirmed", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) =>
       String(input).endsWith("/auth/logout")
         ? json(500, envelope("internal"))
         : json(200, EDITOR)
     )
-    const provider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+    const provider = createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      sessionExpiry: createSessionExpiry(),
+    })
     await provider.checkAuth({})
     await expect(provider.logout(SIGN_OUT_PARAMS)).rejects.toBeInstanceOf(
       SignOutError
@@ -360,7 +447,11 @@ describe("canAccess", () => {
           }
         })
     )
-    const provider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+    const provider = createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      sessionExpiry: createSessionExpiry(),
+    })
     const slow = provider.checkAuth({})
     await provider.logout({})
     release(json(200, EDITOR))
@@ -613,8 +704,9 @@ describe("checkError", () => {
   /**
    * A provider whose `/auth/me` answers are released by hand, in order.
    *
-   * @returns the provider, the `onAccessChange` spy, the number of reads
-   *   sent so far, and `answer`, which releases the oldest waiting read.
+   * @returns the provider, the `onAccessChange` spy, the retry queue of the
+   *   in-place sign-in (no dialog attached), the number of reads sent so
+   *   far, and `answer`, which releases the oldest waiting read.
    */
   function providerAnsweringByHand() {
     const waiting: ((answer: Response) => void)[] = []
@@ -627,9 +719,11 @@ describe("checkError", () => {
         })
     )
     const onAccessChange = vi.fn<() => void>()
+    const sessionExpiry = createSessionExpiry()
     const provider = createAuthProvider({
       apiBaseUrl: "/api/admin",
       fetch,
+      sessionExpiry,
       onAccessChange,
     })
     /** Lets queued promise callbacks run, so a chained read is sent. */
@@ -637,6 +731,7 @@ describe("checkError", () => {
     return {
       provider,
       onAccessChange,
+      sessionExpiry,
       settle,
       sent: () => sent,
       answer: async (body: Response) => {
@@ -737,6 +832,63 @@ describe("checkError", () => {
     const error = (await rejection(
       provider.checkError({ status: 403, message: "errors.forbidden" })
     )) as SessionCheckError
+    expect(error).toBeInstanceOf(SessionCheckError)
+    expect(error.status).toBe(401)
+    expect(error.message).toBe("errors.unauthorized")
+  })
+
+  it("lets the refetch of a 403 wait for the in-place sign-in, and reads again after it", async () => {
+    // The session ends between the refused call and the refetch, under an
+    // open page: signing out would drop the page and its form (ADR 0006,
+    // "Follow-up work").
+    const { provider, onAccessChange, sessionExpiry, settle, sent, answer } =
+      providerAnsweringByHand()
+    sessionExpiry.attach()
+    const first = provider.checkAuth({})
+    await answer(json(200, EDITOR))
+    await first
+    let settled = false
+    const refused = provider
+      .checkError({ status: 403, message: "errors.forbidden" })
+      .finally(() => {
+        settled = true
+      })
+    await settle()
+    await answer(json(401, envelope("unauthorized")))
+    expect(sessionExpiry.isWaiting()).toBe(true)
+    expect(settled).toBe(false)
+    // The open page's questions are still answered, from the kept answer.
+    await expect(
+      provider.canAccess?.({ action: "edit", resource: "probes" } as never)
+    ).resolves.toBe(true)
+    expect(sent()).toBe(2)
+
+    sessionExpiry.resume()
+    await settle()
+    expect(sent()).toBe(3)
+    await answer(json(200, ME))
+    await expect(refused).resolves.toBeUndefined()
+    expect(onAccessChange).toHaveBeenCalledTimes(1)
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).resolves.toBe(false)
+  })
+
+  it("signs out after a 403 when the user gives the in-place sign-in up", async () => {
+    const { provider, sessionExpiry, settle, answer } =
+      providerAnsweringByHand()
+    sessionExpiry.attach()
+    const first = provider.checkAuth({})
+    await answer(json(200, EDITOR))
+    await first
+    const refused = rejection(
+      provider.checkError({ status: 403, message: "errors.forbidden" })
+    )
+    await settle()
+    await answer(json(401, envelope("unauthorized")))
+    expect(sessionExpiry.isWaiting()).toBe(true)
+    sessionExpiry.abandon()
+    const error = (await refused) as SessionCheckError
     expect(error).toBeInstanceOf(SessionCheckError)
     expect(error.status).toBe(401)
     expect(error.message).toBe("errors.unauthorized")
@@ -958,6 +1110,7 @@ describe("refreshSession", () => {
       apiBaseUrl: "/api/admin",
       fetch,
       refreshTimeoutMs: 20,
+      sessionExpiry: createSessionExpiry(),
     })
     await expect(provider.refreshSession()).resolves.toBe("failed")
     expect(signals).toHaveLength(1)
@@ -1263,5 +1416,454 @@ describe("signInFailureMessage", () => {
         }
       )
     )
+  })
+})
+
+describe("createAuthProvider sessionExpiry", () => {
+  it.each([undefined, null, {}, { waitForSignIn: "no" }])(
+    "refuses the sessionExpiry %j, which is not a retry queue",
+    (sessionExpiry) => {
+      expect(() =>
+        createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch: vi.fn(),
+          sessionExpiry: sessionExpiry as unknown as SessionExpiry,
+        })
+      ).toThrow(
+        /^sessionExpiry must be the retry queue of createSessionExpiry\(\); main\.tsx creates one/
+      )
+    }
+  )
+})
+
+/**
+ * A provider whose `fetch` answers the calls in order, over a queue the
+ * test controls (ADR 0006, "Follow-up work").
+ *
+ * @param answers - one answer per call, in order.
+ * @returns the provider, the stub and the queue.
+ */
+function providerAnsweringInTurn(...answers: Response[]) {
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+    const answer = answers.shift()
+    if (answer === undefined) {
+      throw new Error("the test gave no answer for this call")
+    }
+    return answer
+  })
+  const sessionExpiry = createSessionExpiry()
+  return {
+    provider: createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      sessionExpiry,
+    }),
+    fetch,
+    sessionExpiry,
+  }
+}
+
+describe("checkAuth under an open page (the in-place sign-in)", () => {
+  it("waits on a 401 while the dialog is mounted, and asks again after the sign-in", async () => {
+    const { provider, fetch, sessionExpiry } = providerAnsweringInTurn(
+      json(401, envelope("unauthorized")),
+      json(200, ME)
+    )
+    sessionExpiry.attach()
+    const check = provider.checkAuth({})
+    await vi.waitFor(() => expect(sessionExpiry.isWaiting()).toBe(true))
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    sessionExpiry.resume()
+    await expect(check).resolves.toBeUndefined()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch.mock.calls[1][0]).toBe("/api/admin/auth/me")
+  })
+
+  it("releases the body of every 401 it does not read, before it waits", async () => {
+    // A cancelled body counts as used: nothing can read it any more, and its
+    // connection is free for the read after the sign-in.
+    const ended = json(401, envelope("unauthorized"))
+    const other = json(401, envelope("invalid_credentials"))
+    const { provider, sessionExpiry } = providerAnsweringInTurn(
+      ended,
+      json(200, ME),
+      other
+    )
+    sessionExpiry.attach()
+    const check = provider.checkAuth({})
+    await vi.waitFor(() => expect(sessionExpiry.isWaiting()).toBe(true))
+    expect(ended.bodyUsed).toBe(true)
+    sessionExpiry.resume()
+    await expect(check).resolves.toBeUndefined()
+
+    // A 401 with another code is not the ended session's: it rejects at
+    // once, its body released too.
+    await expect(provider.getIdentity?.()).rejects.toMatchObject({
+      status: 401,
+    })
+    expect(other.bodyUsed).toBe(true)
+  })
+
+  it("rejects with ra-core's sign-in prompt when the user gives up", async () => {
+    const { provider, sessionExpiry } = providerAnsweringInTurn(
+      json(401, envelope("unauthorized"))
+    )
+    sessionExpiry.attach()
+    const check = rejection(provider.checkAuth({}))
+    await vi.waitFor(() => expect(sessionExpiry.isWaiting()).toBe(true))
+    sessionExpiry.abandon()
+    const error = (await check) as SessionCheckError
+    expect(error).toBeInstanceOf(SessionCheckError)
+    expect(error.status).toBe(401)
+    expect(error.message).toBe("ra.auth.auth_check_error")
+  })
+
+  it("stops waiting when ra-core cancels the check", async () => {
+    const { provider, sessionExpiry } = providerAnsweringInTurn(
+      json(401, envelope("unauthorized"))
+    )
+    sessionExpiry.attach()
+    const controller = new AbortController()
+    const check = rejection(provider.checkAuth({ signal: controller.signal }))
+    await vi.waitFor(() => expect(sessionExpiry.isWaiting()).toBe(true))
+    controller.abort()
+    const error = (await check) as SessionCheckError
+    expect(error.status).toBeNull()
+    expect(error.message).toBe("ra.notification.http_error")
+    expect(sessionExpiry.isWaiting()).toBe(false)
+  })
+
+  it("never makes getIdentity wait: its 401 rejects at once", async () => {
+    const { provider, sessionExpiry } = providerAnsweringInTurn(
+      json(401, envelope("unauthorized"))
+    )
+    sessionExpiry.attach()
+    await expect(provider.getIdentity?.()).rejects.toMatchObject({
+      status: 401,
+      message: "ra.auth.auth_check_error",
+    })
+    expect(sessionExpiry.isWaiting()).toBe(false)
+  })
+})
+
+describe("sessionAccount", () => {
+  it("is unknown before the first /auth/me answer", () => {
+    const { provider } = providerAnsweringInTurn()
+    expect(provider.sessionAccount()).toBeUndefined()
+  })
+
+  it("is the account of the last /auth/me answer, from checkAuth or getIdentity", async () => {
+    const other = { ...ME, pid: "1c8d5b63-8f4e-4d66-8b80-5c4d3e2f1a0b" }
+    const { provider } = providerAnsweringInTurn(
+      json(200, ME),
+      json(200, other)
+    )
+    await provider.checkAuth({})
+    expect(provider.sessionAccount()).toEqual({
+      pid: ME.pid,
+      name: ME.name,
+      email: ME.email,
+    })
+    await provider.getIdentity?.()
+    expect(provider.sessionAccount()?.pid).toBe(other.pid)
+  })
+
+  it.each([
+    ["ra-core's own logout", {}, []],
+    [
+      "a confirmed sign-out",
+      SIGN_OUT_PARAMS,
+      [new Response(null, { status: 204 })],
+    ],
+    [
+      "a sign-out of an ended session",
+      SIGN_OUT_PARAMS,
+      [json(401, envelope("unauthorized"))],
+    ],
+  ])("is forgotten after %s", async (_case, params, answers) => {
+    const { provider } = providerAnsweringInTurn(json(200, ME), ...answers)
+    await provider.checkAuth({})
+    await provider.logout(params)
+    expect(provider.sessionAccount()).toBeUndefined()
+  })
+
+  it.each([
+    ["ra-core's own logout", {}, []],
+    [
+      "a confirmed sign-out",
+      SIGN_OUT_PARAMS,
+      [new Response(null, { status: 204 })],
+    ],
+  ])(
+    "gives the in-place sign-in up after %s, so no later 401 waits",
+    async (_case, params, answers) => {
+      const { provider, sessionExpiry } = providerAnsweringInTurn(
+        json(200, ME),
+        json(401, envelope("unauthorized")),
+        ...answers,
+        json(401, envelope("unauthorized"))
+      )
+      sessionExpiry.attach()
+      await provider.checkAuth({})
+      // A check is waiting when ra-core signs out.
+      const waiting = rejection(provider.checkAuth({}))
+      await vi.waitFor(() => expect(sessionExpiry.isWaiting()).toBe(true))
+      await provider.logout(params)
+      expect(((await waiting) as SessionCheckError).status).toBe(401)
+      // ra-core's last check before it leaves: answered at once.
+      const error = (await rejection(
+        provider.checkAuth({})
+      )) as SessionCheckError
+      expect(error.status).toBe(401)
+      expect(sessionExpiry.isWaiting()).toBe(false)
+    }
+  )
+
+  it("is kept when the server did not confirm the sign-out", async () => {
+    const { provider } = providerAnsweringInTurn(
+      json(200, ME),
+      json(500, envelope("internal"))
+    )
+    await provider.checkAuth({})
+    await rejection(provider.logout(SIGN_OUT_PARAMS))
+    expect(provider.sessionAccount()?.pid).toBe(ME.pid)
+  })
+})
+
+describe("resumeSession", () => {
+  it("signs the same account in again and answers resumed", async () => {
+    const { provider, fetch } = providerAnsweringInTurn(
+      json(200, ME),
+      json(200, { step: "done" }),
+      json(200, ME)
+    )
+    await provider.checkAuth({})
+    await expect(provider.resumeSession("helyes jelszó")).resolves.toBe(
+      "resumed"
+    )
+    const [loginUrl, loginInit] = fetch.mock.calls[1]
+    expect(loginUrl).toBe("/api/admin/auth/login")
+    expect(loginInit?.method).toBe("POST")
+    expect(JSON.parse(String(loginInit?.body))).toEqual({
+      email: ME.email,
+      password: "helyes jelszó",
+    })
+    expect(fetch.mock.calls[2][0]).toBe("/api/admin/auth/me")
+  })
+
+  it.each([
+    [
+      "another account holds the new session",
+      { ...ME, pid: "1c8d5b63-8f4e-4d66-8b80-5c4d3e2f1a0b" },
+    ],
+    [
+      "the new session is not a full session",
+      { ...ME, scope: "password_change" },
+    ],
+  ])("answers restart when %s", async (_case, newMe) => {
+    const { provider } = providerAnsweringInTurn(
+      json(200, ME),
+      json(200, { step: "done" }),
+      json(200, newMe)
+    )
+    await provider.checkAuth({})
+    await expect(provider.resumeSession("helyes jelszó")).resolves.toBe(
+      "restart"
+    )
+    // Still the account whose session ended: the dialog keeps showing it,
+    // and a second try signs that account in, not the cookie's.
+    expect(provider.sessionAccount()).toEqual({
+      pid: ME.pid,
+      name: ME.name,
+      email: ME.email,
+    })
+  })
+
+  it("remembers the account of a resumed session", async () => {
+    const renamed = { ...ME, name: "Átnevezett Szerkesztő" }
+    const { provider } = providerAnsweringInTurn(
+      json(200, ME),
+      json(200, { step: "done" }),
+      json(200, renamed)
+    )
+    await provider.checkAuth({})
+    await provider.resumeSession("helyes jelszó")
+    expect(provider.sessionAccount()?.name).toBe(renamed.name)
+  })
+
+  it.each(["change_password", "totp"])(
+    "rejects a %s step with auth.sign_in.failed, as long as login knows only done",
+    async (step) => {
+      // ADR 0006 §4's two later steps: until their slices teach the
+      // provider about them, the in-place sign-in treats them as a failed
+      // sign-in and keeps the dialog open; it never asks /auth/me.
+      const { provider, fetch } = providerAnsweringInTurn(
+        json(200, ME),
+        json(200, { step })
+      )
+      await provider.checkAuth({})
+      const error = (await rejection(
+        provider.resumeSession("helyes jelszó")
+      )) as SignInError
+      expect(error).toBeInstanceOf(SignInError)
+      expect(error.message).toBe("auth.sign_in.failed")
+      expect(fetch).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it("bounds both requests by one RESUME_TIMEOUT_MS signal", async () => {
+    expect(RESUME_TIMEOUT_MS).toBe(30 * 1000)
+    const timeout = vi.spyOn(AbortSignal, "timeout")
+    try {
+      const { provider, fetch } = providerAnsweringInTurn(
+        json(200, ME),
+        json(200, { step: "done" }),
+        json(200, ME)
+      )
+      await provider.checkAuth({})
+      await provider.resumeSession("helyes jelszó")
+      expect(timeout).toHaveBeenCalledExactlyOnceWith(RESUME_TIMEOUT_MS)
+      const signal = timeout.mock.results[0].value as AbortSignal
+      expect(fetch.mock.calls[1][1]?.signal).toBe(signal)
+      expect(fetch.mock.calls[2][1]?.signal).toBe(signal)
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it.each([
+    ["the sign-in", 1],
+    ["the check of /auth/me after it", 2],
+  ])(
+    "gives up with auth.sign_in.failed when %s has no answer after the timeout",
+    async (_case, stalledCall) => {
+      const { fetch: hanging, signals } = hangingFetch()
+      const answers = [json(200, ME), json(200, { step: "done" })]
+      let calls = 0
+      const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+        calls += 1
+        return calls - 1 === stalledCall
+          ? hanging(input, init)
+          : (answers.shift() as Response)
+      })
+      const sessionExpiry = createSessionExpiry()
+      sessionExpiry.attach()
+      const provider = createAuthProvider({
+        apiBaseUrl: "/api/admin",
+        fetch,
+        resumeTimeoutMs: 20,
+        sessionExpiry,
+      })
+      await provider.checkAuth({})
+      const error = (await rejection(
+        provider.resumeSession("helyes jelszó")
+      )) as SignInError
+      expect(error).toBeInstanceOf(SignInError)
+      expect(error.message).toBe("auth.sign_in.failed")
+      expect(signals).toHaveLength(1)
+      expect((signals[0].reason as DOMException).name).toBe("TimeoutError")
+      // The dialog's own check never waits on the dialog.
+      expect(sessionExpiry.isWaiting()).toBe(false)
+      expect(provider.sessionAccount()?.pid).toBe(ME.pid)
+    }
+  )
+
+  it("rejects a wrong password with the sign-in screen's generic message", async () => {
+    const { provider, fetch } = providerAnsweringInTurn(
+      json(200, ME),
+      json(401, envelope("invalid_credentials"))
+    )
+    await provider.checkAuth({})
+    const error = (await rejection(
+      provider.resumeSession("rossz jelszó")
+    )) as SignInError
+    expect(error).toBeInstanceOf(SignInError)
+    expect(error.status).toBe(401)
+    expect(error.display).toEqual({
+      kind: "key",
+      key: "errors.invalid_credentials",
+      values: {},
+    })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it("rejects with auth.sign_in.failed, sending nothing, before any account is known", async () => {
+    const { provider, fetch } = providerAnsweringInTurn()
+    const error = (await rejection(
+      provider.resumeSession("helyes jelszó")
+    )) as SignInError
+    expect(error).toBeInstanceOf(SignInError)
+    expect(error.message).toBe("auth.sign_in.failed")
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["answers 401", json(401, envelope("unauthorized"))],
+    ["fails", json(500, envelope("internal"))],
+  ])(
+    "rejects with auth.sign_in.failed, without waiting, when /auth/me %s after the sign-in",
+    async (_case, meAnswer) => {
+      const { provider, sessionExpiry } = providerAnsweringInTurn(
+        json(200, ME),
+        json(200, { step: "done" }),
+        meAnswer
+      )
+      // A mounted dialog must not make the dialog's own check wait on itself.
+      sessionExpiry.attach()
+      await provider.checkAuth({})
+      const error = (await rejection(
+        provider.resumeSession("helyes jelszó")
+      )) as SignInError
+      expect(error.message).toBe("auth.sign_in.failed")
+      expect(sessionExpiry.isWaiting()).toBe(false)
+    }
+  )
+
+  it("refuses a password that is not a string before any request", async () => {
+    const { provider, fetch } = providerAnsweringInTurn(json(200, ME))
+    await provider.checkAuth({})
+    await expect(
+      provider.resumeSession(undefined as unknown as string)
+    ).rejects.toThrow(TypeError)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the access answer of a resumed session, and has ra-core re-ask when it changed", async () => {
+    // The account lost the probe resource while its session had ended
+    // (ADR 0007 §7): the page goes on with the access it has now.
+    const { provider, fetch, onAccessChange } = providerRepeatingLast(
+      json(200, EDITOR),
+      json(200, { step: "done" }),
+      json(200, ME)
+    )
+    await provider.checkAuth({})
+    await expect(provider.resumeSession("helyes jelszó")).resolves.toBe(
+      "resumed"
+    )
+    expect(onAccessChange).toHaveBeenCalledTimes(1)
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).resolves.toBe(false)
+    expect(meReads(fetch)).toBe(2)
+  })
+
+  it("keeps the ended session's access answer after a restart", async () => {
+    const { provider, fetch, onAccessChange } = providerRepeatingLast(
+      json(200, EDITOR),
+      json(200, { step: "done" }),
+      json(200, { ...ME, pid: "1c8d5b63-8f4e-4d66-8b80-5c4d3e2f1a0b" })
+    )
+    await provider.checkAuth({})
+    await expect(provider.resumeSession("helyes jelszó")).resolves.toBe(
+      "restart"
+    )
+    // The dialog now ends the other account's session; until then the
+    // page answers for the account whose session ended, never the other.
+    expect(onAccessChange).not.toHaveBeenCalled()
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).resolves.toBe(true)
+    expect(meReads(fetch)).toBe(2)
   })
 })

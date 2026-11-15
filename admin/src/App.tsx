@@ -16,6 +16,12 @@
  * the auth provider's `refreshSession`, with the event target and the clock
  * that `main.tsx` passes.
  *
+ * A session that ends under a signed-in page is renewed in place (ADR 0006,
+ * "Follow-up work"): the layout mounts the session-expiry dialog over the
+ * retry queue that `main.tsx` passes, the same queue that both providers
+ * send through, and signs in again with the auth provider's
+ * `resumeSession`. The page, and any form on it, stays mounted behind it.
+ *
  * The sidebar lists only the resources whose list the account may open: the
  * kit's `app-sidebar.tsx` asks `canAccess` for `list`, which the auth
  * provider answers from the access map of `/auth/me` (ADR 0007 §7). The
@@ -33,6 +39,7 @@ import { AboutPage } from "@/about/AboutPage"
 import { AccessDeniedPage, AuthenticationErrorPage } from "@/auth/AccessPages"
 import type { ActivityEventTarget } from "@/auth/activity-refresh"
 import type { BackendAuthProvider } from "@/auth/auth-provider"
+import type { SessionExpiry } from "@/auth/session-expiry"
 import { createSignInPage } from "@/auth/SignInPage"
 import { Admin } from "@/components/admin"
 import { Dashboard } from "@/dashboard/Dashboard"
@@ -73,6 +80,12 @@ export interface AdminAppProps {
   readonly activityTarget: ActivityEventTarget
   /** The current time in milliseconds; `main.tsx` passes `Date.now`. */
   readonly now: () => number
+  /**
+   * The retry queue of the in-place sign-in (`createSessionExpiry`): the
+   * same queue that `main.tsx` passes to both providers, so that their
+   * `401`s wait for the dialog that the layout mounts.
+   */
+  readonly sessionExpiry: SessionExpiry
 }
 
 /**
@@ -90,15 +103,28 @@ export function AdminApp({
   developmentRoutes,
   activityTarget,
   now,
+  sessionExpiry,
 }: AdminAppProps) {
   const refresh = useCallback(
     () => authProvider.refreshSession(),
     [authProvider]
   )
+  const account = useCallback(
+    () => authProvider.sessionAccount(),
+    [authProvider]
+  )
+  const resume = useCallback(
+    (password: string) => authProvider.resumeSession(password),
+    [authProvider]
+  )
   const layout = useMemo(
     () =>
-      createAppLayout(sourceCommit, { target: activityTarget, now, refresh }),
-    [sourceCommit, activityTarget, now, refresh]
+      createAppLayout(
+        sourceCommit,
+        { target: activityTarget, now, refresh },
+        { expiry: sessionExpiry, account, resume }
+      ),
+    [sourceCommit, activityTarget, now, refresh, sessionExpiry, account, resume]
   )
   const signInPage = useMemo(
     () => createSignInPage(sourceCommit),

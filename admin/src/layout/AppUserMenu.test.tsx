@@ -13,6 +13,7 @@ import type { Location } from "react-router-dom"
 import { describe, expect, it, vi } from "vitest"
 
 import { createAuthProvider } from "@/auth/auth-provider"
+import { createSessionExpiry } from "@/auth/session-expiry"
 import type { MeResponse } from "@/bindings/MeResponse"
 import { Notification } from "@/components/admin/notification"
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu"
@@ -83,7 +84,11 @@ function renderMenu(logoutAnswer: () => Promise<Response>, items?: ReactNode) {
     >
       <CoreAdminContext
         basename="/admin"
-        authProvider={createAuthProvider({ apiBaseUrl: "/api/admin", fetch })}
+        authProvider={createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch,
+          sessionExpiry: createSessionExpiry(),
+        })}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
       >
         <AppUserMenu>{items}</AppUserMenu>

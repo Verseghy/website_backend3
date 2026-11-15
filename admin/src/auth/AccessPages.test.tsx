@@ -26,6 +26,7 @@ import { ADMIN_BASENAME, adminRoutes } from "@/router"
 
 import { AccessDeniedPage, AuthenticationErrorPage } from "./AccessPages"
 import { createAuthProvider } from "./auth-provider"
+import { createSessionExpiry } from "./session-expiry"
 
 /** The probe resources, none of them backend3's. */
 const PROBES = ["probe-listed", "probe-refused"] as const
@@ -82,19 +83,27 @@ function mount(
       })
   )
   const missingKeys: string[] = []
+  // One retry queue for both providers and the layout's in-place sign-in,
+  // as main.tsx has it; every answer here is a 200, so nothing waits.
+  const sessionExpiry = createSessionExpiry()
+  const authProvider = createAuthProvider({
+    apiBaseUrl: "/api/admin",
+    fetch,
+    sessionExpiry,
+  })
   const router = createMemoryRouter(
     adminRoutes(
       <Admin
         basename={ADMIN_BASENAME}
-        authProvider={adapt(
-          createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
-        )}
+        authProvider={adapt(authProvider)}
         dataProvider={createDataProvider({
           apiBaseUrl: "/api/admin",
           resources: {
             "probe-listed": EMPTY_LIST,
             "probe-refused": EMPTY_LIST,
           },
+          fetch,
+          sessionExpiry,
         })}
         i18nProvider={createI18nProvider({
           reportMissingKeys: true,
@@ -110,11 +119,19 @@ function mount(
         }
         // The session's activity tracker (ADR 0006 §1) listens on a target
         // that nothing dispatches on, so it never calls the refresh.
-        layout={createAppLayout(undefined, {
-          target: new EventTarget(),
-          now: () => 0,
-          refresh: () => Promise.resolve(),
-        })}
+        layout={createAppLayout(
+          undefined,
+          {
+            target: new EventTarget(),
+            now: () => 0,
+            refresh: () => Promise.resolve(),
+          },
+          {
+            expiry: sessionExpiry,
+            account: () => authProvider.sessionAccount(),
+            resume: (password) => authProvider.resumeSession(password),
+          }
+        )}
         requireAuth
         accessDenied={AccessDeniedPage}
         authenticationError={AuthenticationErrorPage}

@@ -21,6 +21,7 @@ import type { MeResponse } from "@/bindings/MeResponse"
 import { RECORD_RULES } from "./access"
 import { createAuthProvider } from "./auth-provider"
 import { readAccess, readPermissions } from "./authz"
+import { createSessionExpiry } from "./session-expiry"
 
 /** One case of the table, as the file holds it. */
 interface AccessCase {
@@ -145,7 +146,11 @@ describe("the access case table", () => {
             headers: { "Content-Type": "application/json" },
           })
       )
-      const provider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+      const provider = createAuthProvider({
+        apiBaseUrl: "/api/admin",
+        fetch,
+        sessionExpiry: createSessionExpiry(),
+      })
       await provider.checkAuth({})
       const answer = await provider.canAccess?.({
         action: entry.action,

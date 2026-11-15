@@ -219,11 +219,23 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    (`npm run clean-room` fails on one). Every screen sits behind the sign-in
    (`requireAuth`, ADR 0006); a refused request shows its envelope's message
    through `envelopeMessage` of `admin/src/api/error-envelope.ts` (ADR 0021
-   section 4), and the auth provider signs out on `401` only. Whether the
-   sidebar lists the resource and its pages open comes from the access map
-   of `/auth/me`, through `authProvider.canAccess`: the slice adds its row
-   to the access table (recipe 10 step 6), never a check of its own in the
-   admin.
+   section 4), and the auth provider signs out on `401` only. Each handler
+   sends its requests with its context's `request(path, init)`, never with
+   `fetch`, so a `401 unauthorized` waits for the in-place sign-in dialog
+   and the open form keeps what the user typed (ADR 0006, "Follow-up work";
+   `admin/CLAUDE.md`, Authentication): a body that can be sent twice (a
+   string, `Blob` or `FormData`), a query's `params.signal` passed on (the
+   provider declares `supportAbortSignal`), and a refused answer rejected
+   with `refusalError`. Only a `401 unauthorized` (no valid session, ADR
+   0021 section 4) waits for the dialog; any other answer, a `401
+   invalid_credentials` for a wrong current password included, comes back
+   to the handler at once. The dialog signs in only the account whose
+   session ended and ends any other session with the confirmed sign-out:
+   the maintainer's answer of 2026-11-15 (research: DECISIONS R37 (D158)).
+   Whether the sidebar lists the resource and its pages open comes from the
+   access map of `/auth/me`, through `authProvider.canAccess`: the slice
+   adds its row to the access table (recipe 10 step 6), never a check of its
+   own in the admin.
 10. **Importer step** for the feature's legacy tables: recipe 4.
 11. **Tests at every layer**: domain unit tests and proptests, in-module;
     domain tests that need fixture files (such as the image corpus in

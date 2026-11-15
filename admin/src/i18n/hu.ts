@@ -379,6 +379,17 @@ export const hu = {
       failed:
         "A kijelentkezés nem sikerült, továbbra is be vagy jelentkezve. Próbáld újra!",
     },
+    // The in-place sign-in that opens over the page when the session has
+    // ended (ADR 0006, "Follow-up work"); its inputs and its submit button
+    // reuse the `auth.sign_in.*` labels.
+    session_expired: {
+      title: "Lejárt a munkamenet",
+      intro:
+        "Jelentkezz be újra a jelszavaddal. Az oldal nyitva marad: amit beírtál, megmarad, és a félbemaradt művelet a bejelentkezés után folytatódik.",
+      leave_notice:
+        "Ha kilépsz, a bejelentkezési oldalra jutsz, és a nem mentett módosítások elvesznek.",
+      leave: "Kilépés",
+    },
   },
   // The development-only clipboard recorder (editor.md §13.1). Its route is
   // left out of the default build (src/recorder/recorder-flag.ts); these

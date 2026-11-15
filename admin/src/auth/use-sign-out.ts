@@ -13,6 +13,9 @@
  * After a confirmed sign-out ra-core clears its store and query cache and
  * shows the sign-in page. The next sign-in starts at the dashboard, not at
  * the page this user left: on a shared computer it may be someone else's.
+ *
+ * The in-place sign-in dialog signs out the same confirmed way through
+ * {@link useConfirmedSignOut}, which leaves the failure to the dialog.
  */
 import { useCallback } from "react"
 import { useLogout, useNotify } from "ra-core"
@@ -36,6 +39,33 @@ export function signOutErrorMessage(error: unknown): UiMessage {
   return error instanceof SignOutError
     ? error.display
     : keyMessage(SIGN_OUT_FAILED_KEY)
+}
+
+/**
+ * Returns the sign-out of the in-place sign-in dialog („Kilépés”, and the
+ * end of a session that the dialog's sign-in left with another account):
+ * the same confirmed sign-out as the user menu's, which posts
+ * `/auth/logout` through {@link SIGN_OUT_PARAMS}, but one that rejects
+ * instead of notifying, because the dialog shows the failure itself, over
+ * the page that ra-core's notifications sit behind.
+ *
+ * Unlike the user menu's, it lets ra-core return to the current page after
+ * the next sign-in: ra-core's own `logout({})`, which the waiting requests'
+ * `401`s set off at the same time, does so too, and the two must not race
+ * to different targets.
+ *
+ * @returns a function that resolves once the server confirmed that no
+ *   session is left (`204`, or `401` for one that had ended already) and
+ *   ra-core is on its way to the sign-in page, and rejects with the auth
+ *   provider's {@link SignOutError} (or whatever else `logout` rejected
+ *   with) when the server did not confirm it; the user then stays where
+ *   they are.
+ */
+export function useConfirmedSignOut(): () => Promise<void> {
+  const logout = useLogout()
+  return useCallback(async () => {
+    await logout(SIGN_OUT_PARAMS)
+  }, [logout])
 }
 
 /**
