@@ -85,9 +85,17 @@ export function readIntegerAttribute(
 
 /**
  * Whether an integer attribute value is one the server stores: an integer
- * in range that is not the omitted default.
+ * in range that is not the omitted default. The table cells' `colspan` and
+ * `rowspan` render with it too (`site-table.ts`).
+ *
+ * @param value - the node attribute's value.
+ * @param rule - the policy's integer rule.
+ * @returns `true` when the render rule writes the value.
  */
-function isStoredInteger(value: unknown, rule: IntegerRule): value is number {
+export function isStoredInteger(
+  value: unknown,
+  rule: IntegerRule
+): value is number {
   return (
     typeof value === "number" &&
     Number.isInteger(value) &&

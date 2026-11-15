@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import type { Component, Declaration } from "./declarations"
 import {
   asciiLowerCase,
+  declaredProperties,
   MAX_COMPONENTS,
   MAX_DECLARATIONS,
   readDeclarations,
@@ -379,5 +380,85 @@ describe("readValue", () => {
     ])
     expect(readValue("url(x)")).toBeNull()
     expect(readValue("a; b")).toBeNull()
+  })
+})
+
+describe("declaredProperties", () => {
+  const declared = (style: string) => [...declaredProperties(style)].sort()
+
+  it("names every declaration, readable or not", () => {
+    expect(
+      declared(
+        "Width: 50%; text-align: start; background: url(x.png); height: calc(1px + 2px); color:"
+      )
+    ).toEqual(["background", "color", "height", "text-align", "width"])
+  })
+
+  it("reads a name as CSS does: comments dropped, escapes decoded, case folded", () => {
+    expect(declared("/* note */ WIDTH /* x */ : 50%")).toEqual(["width"])
+    expect(declared("w\\69 dth: 1px")).toEqual(["width"])
+    expect(declared("--width: 1px")).toEqual(["--width"])
+  })
+
+  it("splits at top-level semicolons only, as readDeclarations does", () => {
+    expect(
+      declared(
+        'font-family: "a; width: 1px"; height: (b; c: 1); vertical-align: top'
+      )
+    ).toEqual(["font-family", "height", "vertical-align"])
+  })
+
+  it("names no declaration without a name and a colon", () => {
+    expect(declared("")).toEqual([])
+    expect(declared("width 1px; : 2px; 1px: 3px; ;; !width: 4px")).toEqual([])
+    expect(declared("font-family: width")).toEqual(["font-family"])
+  })
+
+  it("counts declarations past the reader's limit", () => {
+    const style = [
+      ...Array.from({ length: MAX_DECLARATIONS }, () => "color: red"),
+      "width: 1px",
+    ].join("; ")
+    expect(names(style)).not.toContain("width")
+    expect(declaredProperties(style).has("width")).toBe(true)
+  })
+
+  it("names at least what readDeclarations reads, in lower case, on any string", () => {
+    const part = fc.constantFrom(
+      "width",
+      "Text-Align",
+      ":",
+      ";",
+      " ",
+      "50%",
+      "1px",
+      "/*",
+      "*/",
+      "(",
+      ")",
+      '"',
+      "\\",
+      "url(",
+      "!",
+      "important",
+      "\u0000",
+      "é"
+    )
+    const style = fc.oneof(
+      fc.array(part, { maxLength: 30 }).map((parts) => parts.join("")),
+      fc.string({ unit: "binary", maxLength: 100 })
+    )
+    fc.assert(
+      fc.property(style, (text) => {
+        const all = declaredProperties(text)
+        for (const name of names(text)) {
+          expect(all.has(name), text).toBe(true)
+        }
+        for (const name of all) {
+          expect(asciiLowerCase(name)).toBe(name)
+        }
+      }),
+      { numRuns: 2000 }
+    )
   })
 })

@@ -1,6 +1,7 @@
 import type { Mark, Node as ProseMirrorNode, NodeType } from "@tiptap/pm/model"
 import { describe, expect, it } from "vitest"
 
+import { canonicalStyle } from "./css/canonical-style"
 import { isAllowedHref } from "./link-href"
 import type { AttributeValueRule } from "./policy"
 import { CONTENT_V1_POLICY } from "./policy"
@@ -35,10 +36,6 @@ const PENDING: Readonly<
     }
   >
 > = {
-  "Table, TableRow, TableCell and TableHeader (rows 5-7)": {
-    tags: ["tr", "tbody", "table", "td", "th"],
-    attributes: {},
-  },
   "SiteImage, YoutubeEmbed and PadletEmbed (rows 8-10)": {
     tags: ["img", "iframe"],
     attributes: { p: ["data-youtube-video", "data-padlet-embed"] },
@@ -51,6 +48,53 @@ const pendingAttribute = (tag: string, name: string) =>
   )
 
 const alignments = ["left", "center", "right", "justify"]
+
+/** Values of a cell border side: stored ones, and ones the server refuses. */
+const borderSides = [
+  null,
+  "1px solid #000000",
+  "none",
+  "hidden",
+  "medium dashed",
+  "3px double red",
+  "0px solid currentcolor",
+  "21px solid #000000",
+  "1px solid #000000; color: red",
+]
+
+/** The attributes of `tableCell` and `tableHeader`, which are the same. */
+const CELL_SAMPLES: Readonly<Record<string, readonly unknown[]>> = {
+  colspan: [1, 2, 1000, 1001, 0, "3", 2.5],
+  rowspan: [1, 2, 65534, 65535, -1],
+  colwidth: [null, [100], [100, 200]],
+  backgroundColor: [
+    null,
+    "#d9d9d9",
+    "#ffff0080",
+    "transparent",
+    "currentcolor",
+    "red",
+    "rgb(1, 2, 3)",
+    "var(--x)",
+  ],
+  borderTop: borderSides,
+  borderRight: borderSides,
+  borderBottom: borderSides,
+  borderLeft: borderSides,
+  height: [null, "20px", "1px", "2000px", "2001px", "10%", "15pt"],
+  width: [null, "128px", "128.25px", "50%", "0px", "128"],
+  textAlign: [null, ...alignments, "start", "CENTER"],
+  verticalAlign: [null, "top", "middle", "bottom", "baseline", "sub"],
+  whiteSpace: [null, "nowrap", "normal", "pre"],
+}
+
+/**
+ * The types whose attributes are sampled one at a time rather than in every
+ * combination: a cell has thirteen attributes, and their product would be
+ * millions of samples. Each value is rendered alone, and once with every
+ * attribute at its first stored value.
+ */
+const ONE_AT_A_TIME: ReadonlySet<string> = new Set(["tableCell", "tableHeader"])
 
 /**
  * Values for every attribute of every node and mark type: each value the
@@ -118,6 +162,10 @@ const SAMPLES: Readonly<
   strike: {},
   subscript: {},
   superscript: {},
+  table: {},
+  tableRow: {},
+  tableCell: CELL_SAMPLES,
+  tableHeader: CELL_SAMPLES,
 }
 
 /** The node and mark types that render elements. */
@@ -132,6 +180,19 @@ const markTypes = Object.values(schema.marks)
  * aligned, and each colour with each size).
  */
 function samplesOf(name: string): Record<string, unknown>[] {
+  if (ONE_AT_A_TIME.has(name)) {
+    const entries = Object.entries(SAMPLES[name] ?? {})
+    const alone = entries.flatMap(([attribute, values]) =>
+      values.map((value) => ({ [attribute]: value }))
+    )
+    const all = Object.fromEntries(
+      entries.map(([attribute, values]) => [
+        attribute,
+        values.find((value) => value !== null),
+      ])
+    )
+    return [{}, ...alone, all]
+  }
   const combinations = Object.entries(SAMPLES[name] ?? {}).reduce<
     Record<string, unknown>[]
   >(
@@ -189,14 +250,30 @@ function valueProblem(
         if (styleRule?.role !== "stored") {
           return `declares ${property}, which ${tag} does not store`
         }
+        // A cell border side is a triple, `none` or `hidden`; the whole
+        // style is compared with the server's spelling below.
         if (
-          !isScalarGrammar(styleRule.grammar) ||
+          isScalarGrammar(styleRule.grammar) &&
           !isCanonicalValue(styleRule.grammar, declared)
         ) {
           return `declares ${property}: ${declared}, outside its grammar or spelling`
         }
       }
-      return declarations.size === 0 ? "is empty" : null
+      if (declarations.size === 0) {
+        return "is empty"
+      }
+      // The order is the serialiser's post-pass job (editor.md §6 step
+      // 2.1), so only the declarations are compared.
+      const stored = canonicalStyle(POLICY, tag, value)
+      const sorted = (style: string | null) =>
+        JSON.stringify(
+          [
+            ...(readCanonicalDecls(style ?? "", POLICY.css.alphabet) ?? []),
+          ].sort()
+        )
+      return sorted(stored) === sorted(value)
+        ? null
+        : `is stored as "${stored}"`
     }
     case "marker":
       return value === "" ? null : "is not empty"

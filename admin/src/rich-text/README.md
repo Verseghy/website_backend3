@@ -27,14 +27,14 @@ its output, or when the tag list holds a forbidden tag (editor.md §13.6).
 
 The TipTap 3.32 schema of content-v1 (editor.md §4.2, §4.3):
 
-| Module               | What it is                                                                                                                                                 |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `policy.ts`          | `policy.json` read, validated and typed (`CONTENT_V1_POLICY`); a manifest the admin does not understand fails at load with the member and the fix          |
-| `site-extensions.ts` | `siteExtensions({ policy, media })`, the extension list of every editor                                                                                    |
-| `extensions/`        | the site versions of the document, headings, lists, link, alignment, sub and superscript and text style, one module each, with why each differs from stock |
-| `style-decls.ts`     | the raw style reader of the parse rules: every `style` through `canonicalStyle`, so a rule reads what the server stores; the checks of the one spelling    |
-| `link-href.ts`       | the server's `a[href]` rule, for the link mark                                                                                                             |
-| `load-document.ts`   | `loadDocument(editor, html)`, the one way a body enters an editor                                                                                          |
+| Module               | What it is                                                                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `policy.ts`          | `policy.json` read, validated and typed (`CONTENT_V1_POLICY`); a manifest the admin does not understand fails at load with the member and the fix                  |
+| `site-extensions.ts` | `siteExtensions({ policy, media })`, the extension list of every editor                                                                                            |
+| `extensions/`        | the site versions of the document, headings, lists, link, alignment, sub and superscript, text style and tables, one module each, with why each differs from stock |
+| `style-decls.ts`     | the raw style reader of the parse rules: every `style` through `canonicalStyle`, so a rule reads what the server stores; the checks of the one spelling            |
+| `link-href.ts`       | the server's `a[href]` rule, for the link mark                                                                                                                     |
+| `load-document.ts`   | `loadDocument(editor, html)`, the one way a body enters an editor                                                                                                  |
 
 The schema takes the policy as an argument (editor.md §1.2 D6); pass
 `CONTENT_V1_POLICY`. Its tests compare what it renders with `policy.json`
@@ -82,3 +82,39 @@ canonical shapes, `J(J(x)) == J(x)` over the server's regression fixtures
 fast-check documents with every kind of whitespace and U+0000, and the guard that the
 output never holds `rgb(` or `border-width:` and that prosemirror-model's
 `style` branch is unchanged. `src/test/stored-html.ts` has the `J` harness.
+The tables have their own (`serialize/tables.test.ts`,
+`tables.property.test.ts`): every canonical table is a fixed point, every
+table input reaches its pinned form in one load, a span far wider than its
+table loads within a size and time budget, and random tables and table HTML
+are stored as fixed points with canonical cell styles and without padding
+beyond their real grid.
+
+## Tables
+
+`extensions/site-table.ts` holds the table nodes (editor.md §4.3 rows 5-7):
+the public table shape with the forced `table` and `tbody` styles and no
+table view or column widths, the cell declarations as cell attributes named
+after the policy's properties, read by `readCellDecls` (the `style` over the
+`align`, `valign`, `bgcolor`, `width` and `height` hints, each hint left out
+when the `style` declares its property) and written as one sorted style
+string by `cellStyle`, and `fixTablesFully`, a plugin before
+prosemirror-tables' own: in a table that `fixTables` would pad, it first
+narrows every span that crosses a column in which no cell starts
+(`unanchoredSpans`), so a `colspan="1000"` adds no thousand cells to each
+short row, and it repeats `fixTables` until every table is rectangular. In a
+cell, the alignment commands of `extensions/site-text-align.ts` align the
+innermost cell that holds the selection.
+
+## The golden files (P2 and P3)
+
+`e1-golden.test.ts`, part of `npm test`, writes `J(x)` for every editor
+fixture to `tests/fixtures/e1/` at the repository root (editor.md §13.6):
+the server's regression fixtures, the canonical bodies and tables, the table
+inputs and the command fixtures of `src/test/editor-fixtures.ts`, named as
+`src/test/golden-e1.ts` says. The server's `tests/rich_text/golden.rs`
+asserts that the sanitiser stores each file unchanged and removes nothing
+from it. The `Contract` CI job runs `npm run test:e1` and fails when a file
+differs from the committed one, so after a change here run `npm test` and
+commit what it wrote there. A slice that adds an editor feature or a paste
+fixture adds it to `editor-fixtures.ts` (or a group of its own in
+`golden-e1.ts`), so the server checks what it writes.

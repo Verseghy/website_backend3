@@ -23,6 +23,12 @@ write the same bytes and the same report (P5).
   production content (`CLAUDE.md`, public-safety rules).
 - Write the expected output only after checking it against editor.md §3 and
   §7.5, not by copying whatever the sanitiser printed.
+- The admin's editor loads every pair too: `tests/fixtures/e1/` holds a golden
+  file of each output and of each input that the editor stores differently
+  (editor.md §13.6, P2 and P3). After adding or changing a pair, run
+  `npm run test:e1` in `admin/` (Node.js as `admin/.node-version` says) and
+  commit what it wrote under `tests/fixtures/e1/`; the `Contract` CI job
+  fails until then, and `tests/rich_text/golden.rs` checks the new files.
 
 ## When an expected output changes
 
@@ -42,3 +48,11 @@ gained them:
 `style="display: block; height: auto; margin: 0 auto; max-width: 100%"`.
 Nothing else changed: every style in the other outputs was already sorted
 and written in full.
+
+The editor's tables changed a fixture, not an output: the table of
+`canonical-shapes` gained a third row, in the input and the expected output
+alike. Its `rowspan="2"` ran past the last row, which the server keeps but
+the editor does not: prosemirror-tables shortens such a rowspan when a body
+loads, so the editor would have stored the shape with another `rowspan`
+(editor.md §13.4, `toStoredHtml(load(z)) == z`). A canonical table is
+rectangular.

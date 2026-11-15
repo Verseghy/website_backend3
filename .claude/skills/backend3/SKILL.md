@@ -234,7 +234,15 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
     slice that changes the rich-text policy also runs
     `cargo loco task rich_text_manifest` and commits
     `admin/src/rich-text/policy.json` and `css-vectors.jsonl`, which the same
-    job checks (editor.md §3.9).
+    job checks (editor.md §3.9). A slice that changes the editor
+    (`admin/src/rich-text/`) or a sanitiser regression fixture
+    (`tests/fixtures/regressions/`, which the editor loads too) runs
+    `npm test` or `npm run test:e1` in `admin/`, which rewrites the editor's
+    golden files in `tests/fixtures/e1/`, and commits them: the same
+    job checks them, and `tests/rich_text/golden.rs` checks that the server
+    stores each one unchanged (editor.md §13.6, P2 and P3). A new editor
+    feature or paste fixture joins `admin/src/test/editor-fixtures.ts`, so
+    the server checks what it writes.
 13. **Docs**: update the ADR or spec the slice changes, and `AGENTS.md`,
     `CLAUDE.md` or this skill if a rule, command or path changed.
 14. **Gate**: the "Before you call it done" block of `AGENTS.md`.

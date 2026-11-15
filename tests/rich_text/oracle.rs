@@ -314,8 +314,11 @@ fn violations(html: &str) -> Vec<String> {
 }
 
 /// Parses `html` as ammonia does and as the public sites' `innerHTML` on an
-/// article element does: a fragment in a `div` context.
-fn parse(html: &str) -> Html {
+/// article element does: a fragment in a `div` context. The golden-file
+/// inventory of `golden.rs` reads its trees with it too.
+///
+/// - `html`: the fragment.
+pub(super) fn parse(html: &str) -> Html {
     parse_fragment(
         HtmlTreeSink::new(Html::new_fragment()),
         ParseOpts::default(),

@@ -446,7 +446,14 @@ snapshot, and commits them (ADR 0005). A change to the rich-text policy
 (`src/domain/rich_text/`) regenerates the admin's copy of it with
 `cargo loco task rich_text_manifest` and commits `admin/src/rich-text/policy.json`
 and `css-vectors.jsonl` (editor.md §3.9); the `Contract` job fails on either
-otherwise. A migration updates the schema
+otherwise. A change to the editor (`admin/src/rich-text/`), to its fixtures
+or to the sanitiser's regression fixtures (`tests/fixtures/regressions/`),
+which the editor loads too, rewrites the editor's golden files,
+`tests/fixtures/e1/`, when `npm test` (or `npm run test:e1`) runs in
+`admin/`; commit them too (editor.md §13.6, P2 and P3): the `Contract` job
+fails when they differ from what the editor writes, and
+`tests/rich_text/golden.rs` fails when the server would change one. A
+migration updates the schema
 snapshot, `tests/schema/snapshots/schema.snap`, in the same PR (ADR 0009):
 the test writes a `.snap.new` beside it; read the diff, accept it with
 `cargo insta review` (or rename the file), and commit it with the migration.

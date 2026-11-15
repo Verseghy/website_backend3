@@ -7,10 +7,13 @@
 # the OpenAPI document (and any other snapshot) under */snapshots/. The
 # rich-text policy is a contract with the admin too: the rich_text_manifest
 # task writes admin/src/rich-text/policy.json and css-vectors.jsonl from it
-# (docs/design/editor.md §3.9). The "Contract" CI job (a required context,
-# ADR 0022 section 3) runs those tests and the task, and then this script. A
-# DTO or policy change without the regenerated files, or a generated file
-# edited by hand, therefore fails the PR instead of drifting.
+# (docs/design/editor.md §3.9). In the other direction, the admin's editor
+# writes its golden files, tests/fixtures/e1/*.html, which the server's P2
+# and P3 tests read (editor.md §13.6; npm run test:e1 in admin/). The
+# "Contract" CI job (a required context, ADR 0022 section 3) runs those
+# tests and the task, and then this script. A DTO, policy or editor change
+# without the regenerated files, or a generated file edited by hand,
+# therefore fails the PR instead of drifting.
 #
 # It uses `git status --porcelain --untracked-files=all` rather than
 # `git diff --exit-code`, because a new DTO produces a new, untracked binding
@@ -23,12 +26,14 @@ set -euo pipefail
 
 # The generated paths, as git pathspecs relative to the repository root. Of
 # admin/src/rich-text/, only the two manifest files are generated: the
-# admin's own rich-text code lives beside them.
+# admin's own rich-text code lives beside them. tests/fixtures/e1 is wholly
+# generated, apart from its README.md, which the admin's test never writes.
 readonly -a CONTRACT_PATHS=(
   'admin/src/bindings'
   ':(glob)**/snapshots/**'
   'admin/src/rich-text/policy.json'
   'admin/src/rich-text/css-vectors.jsonl'
+  'tests/fixtures/e1'
 )
 
 usage() {
@@ -58,7 +63,7 @@ main() {
   local status
   status=$(git -C "$top" status --porcelain=v1 --untracked-files=all -- "${CONTRACT_PATHS[@]}")
   if [[ -z $status ]]; then
-    echo "Contract OK: admin/src/bindings/, the rich-text manifest and the snapshots match the committed files."
+    echo "Contract OK: admin/src/bindings/, the rich-text manifest, the editor's golden files and the snapshots match the committed files."
     return 0
   fi
   {
@@ -74,7 +79,9 @@ main() {
     echo "review snapshot changes with 'cargo insta review', and commit the results."
     echo "For admin/src/rich-text/, run 'cargo loco task rich_text_manifest' from the"
     echo "repository root and commit both files (docs/design/editor.md §3.9)."
-    echo "Never edit admin/src/bindings/ or the manifest files by hand. A changed OpenAPI"
+    echo "For tests/fixtures/e1/, run 'npm run test:e1' (or 'npm test') in admin/ and"
+    echo "commit what it writes (docs/design/editor.md §13.6, P2 and P3)."
+    echo "Never edit admin/src/bindings/, the manifest files or the golden files by hand. A changed OpenAPI"
     echo "snapshot is an API change: say so in the PR and use the 'api' scope (ADR 0012 section 3)."
   } >&2
   return 1

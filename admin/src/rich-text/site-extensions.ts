@@ -25,12 +25,15 @@
  *   `square`.
  * - `site-link.ts`: links on the server's URL rule, autolinked while typing
  *   only.
- * - `site-text-align.ts`: paragraph and heading alignment.
+ * - `site-text-align.ts`: paragraph and heading alignment; in a table cell,
+ *   the alignment commands align the cell.
  * - `site-scripts.ts`: subscript and superscript, each excluding the other.
  * - `site-text-style.ts`: colour, highlight and `em` font size on `span`.
+ * - `site-table.ts`: tables in content-v1's one shape, with the canonical
+ *   cell declarations as cell attributes (rows 5-7).
  *
- * Tables, images, embeds, the paste extension and image uploads join this
- * list as their own modules (editor.md §4.3 rows 5-13).
+ * Images, embeds, the paste extension and image uploads join this list as
+ * their own modules (editor.md §4.3 rows 8-13).
  */
 import type { AnyExtension } from "@tiptap/core"
 import { callOrReturn, getExtensionField, Node } from "@tiptap/core"
@@ -44,6 +47,7 @@ import {
   createSiteOrderedList,
 } from "./extensions/site-lists"
 import { SiteSubscript, SiteSuperscript } from "./extensions/site-scripts"
+import { createSiteTable } from "./extensions/site-table"
 import { createSiteTextAlign } from "./extensions/site-text-align"
 import { createSiteTextStyle } from "./extensions/site-text-style"
 import type { RichTextPolicy } from "./policy"
@@ -143,6 +147,7 @@ export function siteExtensions(options: SiteExtensionsOptions): AnyExtension[] {
     SiteSubscript,
     SiteSuperscript,
     ...createSiteTextStyle(policy),
+    ...createSiteTable(policy),
     ...media,
   ]
 }
