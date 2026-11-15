@@ -15,15 +15,24 @@
 //!   the final pass only, so a body that needs two passes is not listed
 //!   twice.
 //!
+//! A third record is neither: the **unplanned removals** of N7, what the
+//! sanitiser removed that no step planned ([`UnplannedRemoval`]). They are
+//! added up over the passes like rule hits, but they are not rule hits: the
+//! import stops on a body that has any, unless an `N7-accept` entry of the
+//! resolution file accepts them (data-migration.md §7.1 N7, §8.2;
+//! `domain::import_mysql::n7_review`).
+//!
 //! The `snake_case` names of [`Rule::as_str`] are provisional in the same
 //! way as the sanitiser's: the run report that the importer slices write
 //! fixes them.
 
 use std::collections::BTreeMap;
+use std::fmt;
+
+use crate::domain::rich_text::RemovalRule;
 
 /// A step of data-migration.md §7.1 that records rule hits. The steps that
-/// later slices add (N1, N2, N4, N5b and N7) join this list with their
-/// rules.
+/// later slices add (N1, N2, N4 and N5b) join this list with their rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Step {
     /// N3: `<center>` unwrapped into `text-align: center`.
@@ -33,6 +42,8 @@ pub enum Step {
     N5,
     /// N6: links to the dead host rewritten to root-relative.
     N6,
+    /// N7: the sanitiser's planned changes (`sanitise.rs`).
+    N7,
 }
 
 impl Step {
@@ -43,6 +54,7 @@ impl Step {
             Self::N3 => "N3",
             Self::N5 => "N5",
             Self::N6 => "N6",
+            Self::N7 => "N7",
         }
     }
 }
@@ -130,11 +142,79 @@ pub enum Rule {
     /// N6: a `src` or `href` on the dead host's `/storage/` was rewritten to
     /// the root-relative `/storage/` path.
     DeadHostLinkRewritten,
+    /// N7: a named colour (`black`, `whitesmoke`, or `windowtext`, which
+    /// Office writes for black) that the canonical style writes, as hex
+    /// (`#000000`): one in the declaration in force for its property or
+    /// border side, on a side that draws a border; counted per colour.
+    NamedColourToHex,
+    /// N7: a cell border side that the input gave a width or a colour but
+    /// no visible style (`medium`, `1px #000000`, `medium none
+    /// currentcolor`) was written as `none`, which draws the same: no
+    /// border; counted per side.
+    BorderSideToNone,
+    /// N7: a length in `pt`, `cm` or another absolute unit (`pc`, `in`,
+    /// `mm`, `q`) that the canonical style writes, in px: one in the
+    /// declaration in force for its property or border side, on a side
+    /// that draws a border; counted per length.
+    LengthToPx,
+    /// N7: a `style` was written in its canonical spelling and order
+    /// (editor.md §3.1): its case, order, `!important` markers, overridden
+    /// declarations or left-out defaults changed, or the locked
+    /// declarations that a size or the element needs were added, and every
+    /// declaration a browser applied is kept; counted per attribute in
+    /// which none of the three re-spellings that §7.1 names (above) is
+    /// counted, so that every re-spelled `style` counts under one of them.
+    StyleRespelled,
+    /// N7: an attribute other than `style` and a link's `target` was
+    /// written in its canonical form: an enumerated value's case, an own
+    /// host's address made root-relative, a default left out
+    /// (`ol[start="1"]`), or a forced value that replaced another (a link's
+    /// `rel`, an embed's `allow`); counted per attribute.
+    AttributeRespelled,
+    /// N7: a link's `target` held another value than `_blank` (`_self`,
+    /// `_top`) and was replaced by `_blank`, which content-v1 forces: the
+    /// link now opens in a new tab; counted per link.
+    LinkTargetReplaced,
+    /// N7: an element got the attributes or declarations that content-v1
+    /// locks on it and it lacked: a link its `target` and `rel`, a table
+    /// and its `tbody` their locked `style`, an embed its `allow`,
+    /// `allowfullscreen` and `referrerpolicy`, an image its locked `style`
+    /// (editor.md §3.2, §3.3); counted per element.
+    LockedMarkupAdded,
+    /// N7: a declaration of a property that content-v1 keeps on the element
+    /// was dropped because its value is not valid CSS for that property
+    /// (`width: 100%px`), so a browser ignored it too; counted per
+    /// declaration.
+    InvalidStyleValueDropped,
+    /// N7: a `text-align` that content-v1 does not keep was dropped after
+    /// the alignment that N3 or N5 wrote in front of the element's `style`,
+    /// as their unclear readings planned (`center_alignment_unclear`,
+    /// `paragraph_align_unclear`); counted per declaration.
+    UnclearAlignmentDropped,
+    /// N7: a table's `border` attribute was removed; both public sites
+    /// already suppress the grid it draws.
+    TableBorderDropped,
+    /// N7: a table's `cellspacing` attribute was removed.
+    TableCellspacingDropped,
+    /// N7: a table's `cellpadding` attribute was removed; cells fall back
+    /// to the sites' 5 px.
+    TableCellpaddingDropped,
+    /// N7: an iframe's `tabindex` attribute was removed.
+    IframeTabindexDropped,
+    /// N7: an iframe's `scrolling` attribute was removed.
+    IframeScrollingDropped,
+    /// N7: an iframe's `style` lost declarations, or was removed; counted
+    /// per attribute.
+    IframeStyleDropped,
+    /// N7: a comment was removed.
+    CommentRemoved,
+    /// N7: a `script` element left after N1 was removed with its content.
+    ScriptRemoved,
 }
 
 impl Rule {
     /// Every rule, in the order of [`Ord`].
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 40] = [
         Self::CenterUnwrapped,
         Self::CenterBlockAligned,
         Self::CenterRunWrapped,
@@ -158,6 +238,23 @@ impl Rule {
         Self::SpanDirStyleDropped,
         Self::SpanDirRemoved,
         Self::DeadHostLinkRewritten,
+        Self::NamedColourToHex,
+        Self::BorderSideToNone,
+        Self::LengthToPx,
+        Self::StyleRespelled,
+        Self::AttributeRespelled,
+        Self::LinkTargetReplaced,
+        Self::LockedMarkupAdded,
+        Self::InvalidStyleValueDropped,
+        Self::UnclearAlignmentDropped,
+        Self::TableBorderDropped,
+        Self::TableCellspacingDropped,
+        Self::TableCellpaddingDropped,
+        Self::IframeTabindexDropped,
+        Self::IframeScrollingDropped,
+        Self::IframeStyleDropped,
+        Self::CommentRemoved,
+        Self::ScriptRemoved,
     ];
 
     /// The step of data-migration.md §7.1 that the rule belongs to.
@@ -187,6 +284,23 @@ impl Rule {
             | Self::SpanDirStyleDropped
             | Self::SpanDirRemoved => Step::N5,
             Self::DeadHostLinkRewritten => Step::N6,
+            Self::NamedColourToHex
+            | Self::BorderSideToNone
+            | Self::LengthToPx
+            | Self::StyleRespelled
+            | Self::AttributeRespelled
+            | Self::LinkTargetReplaced
+            | Self::LockedMarkupAdded
+            | Self::InvalidStyleValueDropped
+            | Self::UnclearAlignmentDropped
+            | Self::TableBorderDropped
+            | Self::TableCellspacingDropped
+            | Self::TableCellpaddingDropped
+            | Self::IframeTabindexDropped
+            | Self::IframeScrollingDropped
+            | Self::IframeStyleDropped
+            | Self::CommentRemoved
+            | Self::ScriptRemoved => Step::N7,
         }
     }
 
@@ -217,7 +331,76 @@ impl Rule {
             Self::SpanDirStyleDropped => "span_dir_style_dropped",
             Self::SpanDirRemoved => "span_dir_removed",
             Self::DeadHostLinkRewritten => "dead_host_link_rewritten",
+            Self::NamedColourToHex => "named_colour_to_hex",
+            Self::BorderSideToNone => "border_side_to_none",
+            Self::LengthToPx => "length_to_px",
+            Self::StyleRespelled => "style_respelled",
+            Self::AttributeRespelled => "attribute_respelled",
+            Self::LinkTargetReplaced => "link_target_replaced",
+            Self::LockedMarkupAdded => "locked_markup_added",
+            Self::InvalidStyleValueDropped => "invalid_style_value_dropped",
+            Self::UnclearAlignmentDropped => "unclear_alignment_dropped",
+            Self::TableBorderDropped => "table_border_dropped",
+            Self::TableCellspacingDropped => "table_cellspacing_dropped",
+            Self::TableCellpaddingDropped => "table_cellpadding_dropped",
+            Self::IframeTabindexDropped => "iframe_tabindex_dropped",
+            Self::IframeScrollingDropped => "iframe_scrolling_dropped",
+            Self::IframeStyleDropped => "iframe_style_dropped",
+            Self::CommentRemoved => "comment_removed",
+            Self::ScriptRemoved => "script_removed",
         }
+    }
+}
+
+/// A removal that N7's sanitiser made and no step planned
+/// (data-migration.md §7.1 N7): the sanitiser's rule, and what it hit. The
+/// import stops on a body with one, unless an `N7-accept` entry of the
+/// resolution file accepts the body (§8.2).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UnplannedRemoval {
+    /// The sanitiser's rule, as its removal report names it
+    /// ([`RemovalRule::as_str`]).
+    pub rule: RemovalRule,
+    /// The tag name, or `#comment` for a comment.
+    pub element: String,
+    /// The attribute, for the attribute rules.
+    pub attribute: Option<String>,
+    /// For a `style` declaration: its property, lower-case. A declaration
+    /// that a `style` lost (the rules `style_rejected` and
+    /// `style_declaration_rejected`) names it, or has `None` when the
+    /// sanitiser's CSS reader could not read the declaration, or, in the
+    /// rare case where N7 could not tell the attribute's declarations
+    /// apart, for the whole attribute. A `style` that the sanitiser only
+    /// re-spelled (`value_canonicalised`) names the property whose
+    /// declaration a browser applied and the canonical spelling does not
+    /// keep: an `!important` one that a later declaration overrides there.
+    /// `None` for every other removal.
+    pub property: Option<String>,
+}
+
+/// `attribute_not_allowed p[class]`, `style_declaration_rejected
+/// span[style] font-family`, `value_canonicalised span[style] color`,
+/// `element_unwrapped div`: the rule, the element with the attribute in
+/// brackets, and the property when there is one; a lost `style`
+/// declaration without one shows `(unreadable)`.
+impl fmt::Display for UnplannedRemoval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.rule.as_str(), self.element)?;
+        if let Some(attribute) = &self.attribute {
+            write!(f, "[{attribute}]")?;
+        }
+        match &self.property {
+            Some(property) => write!(f, " {property}")?,
+            None if matches!(
+                self.rule,
+                RemovalRule::StyleRejected | RemovalRule::StyleDeclarationRejected
+            ) =>
+            {
+                f.write_str(" (unreadable)")?;
+            }
+            None => {}
+        }
+        Ok(())
     }
 }
 
@@ -288,6 +471,7 @@ pub struct ImageWithoutAlt {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NormaliseReport {
     hits: BTreeMap<Rule, usize>,
+    unplanned: BTreeMap<UnplannedRemoval, usize>,
     dead_host_kept: Vec<DeadHostOccurrence>,
     images_without_alt: Vec<ImageWithoutAlt>,
 }
@@ -338,9 +522,47 @@ impl NormaliseReport {
         &self.images_without_alt
     }
 
+    /// The removals of N7 that no step planned, each with how many times
+    /// the sanitiser made it, in the order of [`UnplannedRemoval`]. The
+    /// import stops on a body with any, unless an `N7-accept` entry accepts
+    /// it (data-migration.md §7.1 N7).
+    pub fn unplanned_removals(&self) -> impl Iterator<Item = (&UnplannedRemoval, usize)> + '_ {
+        self.unplanned
+            .iter()
+            .map(|(removal, &count)| (removal, count))
+    }
+
+    /// Whether N7 made any removal that no step planned.
+    #[must_use]
+    pub fn has_unplanned_removals(&self) -> bool {
+        !self.unplanned.is_empty()
+    }
+
     /// Counts one hit of `rule`.
     pub(super) fn record(&mut self, rule: Rule) {
-        *self.hits.entry(rule).or_insert(0) += 1;
+        self.record_many(rule, 1);
+    }
+
+    /// Counts `count` hits of `rule`; zero records nothing, so a rule with
+    /// no hit never appears in [`Self::hits`].
+    ///
+    /// - `rule`: the rule that changed the body.
+    /// - `count`: how many changes it made.
+    pub(super) fn record_many(&mut self, rule: Rule, count: usize) {
+        if count > 0 {
+            *self.hits.entry(rule).or_insert(0) += count;
+        }
+    }
+
+    /// Counts `count` occurrences of an unplanned removal; zero records
+    /// nothing.
+    ///
+    /// - `removal`: what N7 removed that no step planned.
+    /// - `count`: how many times.
+    pub(super) fn record_unplanned(&mut self, removal: UnplannedRemoval, count: usize) {
+        if count > 0 {
+            *self.unplanned.entry(removal).or_insert(0) += count;
+        }
     }
 
     /// Replaces the observations with those of a later pass.
@@ -404,13 +626,154 @@ mod tests {
                 ("span_dir_style_dropped", "N5"),
                 ("span_dir_removed", "N5"),
                 ("dead_host_link_rewritten", "N6"),
+                ("named_colour_to_hex", "N7"),
+                ("border_side_to_none", "N7"),
+                ("length_to_px", "N7"),
+                ("style_respelled", "N7"),
+                ("attribute_respelled", "N7"),
+                ("link_target_replaced", "N7"),
+                ("locked_markup_added", "N7"),
+                ("invalid_style_value_dropped", "N7"),
+                ("unclear_alignment_dropped", "N7"),
+                ("table_border_dropped", "N7"),
+                ("table_cellspacing_dropped", "N7"),
+                ("table_cellpadding_dropped", "N7"),
+                ("iframe_tabindex_dropped", "N7"),
+                ("iframe_scrolling_dropped", "N7"),
+                ("iframe_style_dropped", "N7"),
+                ("comment_removed", "N7"),
+                ("script_removed", "N7"),
             ]
         );
         assert_eq!(Step::N3.as_str(), "N3");
         assert_eq!(Step::N5.as_str(), "N5");
         assert_eq!(Step::N6.as_str(), "N6");
+        assert_eq!(Step::N7.as_str(), "N7");
         // The steps are ordered as data-migration.md §7.1 runs them.
-        assert!(Step::N3 < Step::N5 && Step::N5 < Step::N6);
+        assert!(Step::N3 < Step::N5 && Step::N5 < Step::N6 && Step::N6 < Step::N7);
+    }
+
+    fn removal(
+        rule: RemovalRule,
+        element: &str,
+        attribute: Option<&str>,
+        property: Option<&str>,
+    ) -> UnplannedRemoval {
+        UnplannedRemoval {
+            rule,
+            element: element.to_owned(),
+            attribute: attribute.map(str::to_owned),
+            property: property.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn an_unplanned_removal_names_its_rule_element_attribute_and_property() {
+        let shown = [
+            removal(RemovalRule::ElementUnwrapped, "div", None, None),
+            removal(RemovalRule::AttributeNotAllowed, "p", Some("class"), None),
+            removal(
+                RemovalRule::StyleDeclarationRejected,
+                "span",
+                Some("style"),
+                Some("font-family"),
+            ),
+            removal(RemovalRule::StyleRejected, "td", Some("style"), None),
+            removal(
+                RemovalRule::ValueCanonicalised,
+                "span",
+                Some("style"),
+                Some("color"),
+            ),
+            removal(RemovalRule::CommentRemoved, "#comment", None, None),
+        ]
+        .map(|removal| removal.to_string());
+        assert_eq!(
+            shown,
+            [
+                "element_unwrapped div",
+                "attribute_not_allowed p[class]",
+                "style_declaration_rejected span[style] font-family",
+                "style_rejected td[style] (unreadable)",
+                "value_canonicalised span[style] color",
+                "comment_removed #comment",
+            ]
+        );
+    }
+
+    #[test]
+    fn unplanned_removals_are_counted_apart_from_the_hits() {
+        let div = removal(RemovalRule::ElementUnwrapped, "div", None, None);
+        let class = removal(RemovalRule::AttributeNotAllowed, "p", Some("class"), None);
+        let mut report = NormaliseReport::default();
+        assert!(!report.has_unplanned_removals());
+        report.record_unplanned(class.clone(), 0);
+        assert!(!report.has_unplanned_removals(), "zero records nothing");
+        report.record_unplanned(div.clone(), 2);
+        report.record_unplanned(class.clone(), 1);
+        report.record_unplanned(div.clone(), 1);
+        assert!(report.has_unplanned_removals());
+        assert!(!report.has_hits(), "an unplanned removal is no rule hit");
+        assert_eq!(
+            report.unplanned_removals().collect::<Vec<_>>(),
+            [(&div, 3), (&class, 1)],
+            "in the order of UnplannedRemoval: the rule first"
+        );
+        report.record_many(Rule::TableBorderDropped, 0);
+        assert!(!report.has_hits(), "zero records nothing");
+        report.record_many(Rule::TableBorderDropped, 2);
+        assert_eq!(report.count(Rule::TableBorderDropped), 2);
+    }
+
+    proptest::proptest! {
+        // An unplanned removal is shown as its rule and element first, the
+        // attribute in brackets, and the property when there is one; a lost
+        // `style` declaration without one shows `(unreadable)`.
+        #[test]
+        fn an_unplanned_removal_is_shown_whole(
+            rule in proptest::sample::select(&[
+                RemovalRule::ElementUnwrapped,
+                RemovalRule::AttributeNotAllowed,
+                RemovalRule::StyleRejected,
+                RemovalRule::StyleDeclarationRejected,
+                RemovalRule::ValueCanonicalised,
+            ][..]),
+            element in "[a-z][a-z0-9]{0,8}",
+            attribute in proptest::option::of("[a-z][a-z-]{0,10}"),
+            property in proptest::option::of("[a-z][a-z-]{0,12}"),
+        ) {
+            let shown = removal(rule, &element, attribute.as_deref(), property.as_deref()).to_string();
+            let mut expected = format!("{} {element}", rule.as_str());
+            if let Some(attribute) = &attribute {
+                expected = format!("{expected}[{attribute}]");
+            }
+            let lost = matches!(rule, RemovalRule::StyleRejected | RemovalRule::StyleDeclarationRejected);
+            match property.as_deref() {
+                Some(property) => expected = format!("{expected} {property}"),
+                None if lost => expected.push_str(" (unreadable)"),
+                None => {}
+            }
+            proptest::prop_assert_eq!(shown, expected);
+        }
+
+        // Recording counts in any split adds them up, and a zero never
+        // shows: the report of a run is the sum of its passes.
+        #[test]
+        fn counts_add_up_over_any_split(counts in proptest::collection::vec(0_usize..5, 0..8)) {
+            let mut report = NormaliseReport::default();
+            let removal = removal(RemovalRule::ElementUnwrapped, "font", None, None);
+            for &count in &counts {
+                report.record_many(Rule::LengthToPx, count);
+                report.record_unplanned(removal.clone(), count);
+            }
+            let total: usize = counts.iter().sum();
+            proptest::prop_assert_eq!(report.count(Rule::LengthToPx), total);
+            proptest::prop_assert_eq!(report.has_hits(), total > 0);
+            proptest::prop_assert_eq!(
+                report.unplanned_removals().map(|(_, count)| count).sum::<usize>(),
+                total
+            );
+        }
     }
 
     #[test]

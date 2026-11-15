@@ -38,6 +38,12 @@
 //!   resolution file's entry, whose precondition must hold; `apply` stops at
 //!   the first instance or entry it cannot resolve as signed, a dry run
 //!   lists them all and fails at its end;
+//! - [`n7_review`]: N7's review of the legacy bodies: a body from which the
+//!   normaliser's sanitiser removed what no step planned is refused, naming
+//!   the row and the rules, unless an `N7-accept` entry of the resolution
+//!   file accepts it; a dry run collects every refusal, `apply` stops at the
+//!   first (data-migration.md §7.1 N7, §8.2; ADR 0047). Its verdicts are
+//!   N7's entry policy in [`defects`] (research: DECISIONS R38 (D161));
 //! - [`report`]: the run report's `summary.json` and its Markdown skeleton
 //!   (data-migration.md §11.3), from the instants the task read from the app
 //!   clock, with the source session's and the defect detectors' parts;
@@ -55,6 +61,7 @@
 
 pub mod defects;
 pub mod fingerprint;
+pub mod n7_review;
 pub mod not_migrated;
 pub mod options;
 pub mod report;

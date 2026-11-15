@@ -548,22 +548,35 @@ is its specification; each slice adds the step for its own tables.
    `/information/<slug>`) and the defect's proposed default of section 8.1
    where the rule can compute one; `found` reads the precondition of an
    entry whose row the rule no longer finds (for D3 it decides whether the
-   entry holds); `resolution` turns a valid entry into what the step
-   applies. How the defect's entries work is the defect's own
-   `DefectId::entry_policy` (ADR 0047 §4: required, optional for D10, a
-   fix made in the source for D3, none for D4 and D7), never the rule's. A
-   value the report or the sheet shows is a `Value`; a new fixed word joins
-   the closed `Word` enum, never a string. The step runs it with
+   entry holds, for N7 whether it is no longer needed); `resolution` turns
+   a valid entry into what the step applies. How the defect's entries work
+   is the defect's own `DefectId::entry_policy` (ADR 0047 §4: required,
+   optional for D10, a fix made in the source for D3, an acceptance for N7
+   whose entry is listed as no longer needed once its unchanged body has
+   no unplanned removal, none for D4 and D7), never the rule's. A value
+   the report or the sheet shows is a `Value`; a new fixed word joins the
+   closed `Word` enum, never a string. The step runs it with
    `DefectDetector::new(options.mode, &file).run(&rule, &rows, &mut
    parts.defects)` and applies the returned `Decisions`: the entry's
    resolution, the default, or the source value. Never compare a
    precondition or stop on a defect in the step itself. Rich-text bodies
-   go through the shared normaliser, `domain::normalise::normalise`, and
-   its output through the N9 checks of `check_fixed_point`
-   (`data-migration.md` section 7, its readings in 7.4). A new normaliser
-   rule adds its step to the pass in `src/domain/normalise/mod.rs`, its
-   `Rule` variants, and a before-and-after pair to
-   `tests/fixtures/normalise/`. Unit tests cover every
+   go through the shared normaliser,
+   `domain::normalise::normalise(raw, &sanitizer)`, with the sanitiser that
+   every write uses; it ends with N7 and the N9 checks, so a body it
+   returns is content-v1 (`data-migration.md` section 7, its readings in
+   7.4). Its report lists N7's unplanned removals: pass every body, and
+   its source `content`, to `domain::import_mysql::n7_review::N7Review`
+   (`body`, or `refused` for a body the normaliser refused, which the step
+   reports itself), which refuses a body with one unless an `N7-accept`
+   entry accepts the row (a dry run collects every refusal, `apply` stops
+   at the first), and which adds up N7's planned changes for the report.
+   A new normaliser rule adds its step to the pass in
+   `src/domain/normalise/mod.rs`, its `Rule` variants, and a
+   before-and-after pair to `tests/fixtures/normalise/` (a new N7 rule a
+   pair named after it, `n7-<rule>`); a rule that plans a removal that N7
+   makes (it rewrites the markup before N7 sees it, or N7's
+   `PLANNED_REMOVALS` gains a row) takes the fixtures it settles off the
+   runner's `UNPLANNED` list. Unit tests cover every
    rule of sections 5-7 for the table, each defect including a precondition
    mismatch, and each exemption flag of section 4.3; proptests cover
    round trips and idempotence.

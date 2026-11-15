@@ -173,11 +173,14 @@ stops at the first instance that the list does not cover or whose entry's
 precondition does not hold, while a dry run lists every one, goes on with
 the defect's proposed default and exits non-zero at its end. How a
 defect's entries work is fixed per defect (`DefectId::entry_policy`, ADR
-0047 §4): D10's are optional (an unlisted page is published), and a D3
-entry pins the index image that editors set in the source. Every run
-writes `report.md`, the editors' sign-off sheet `signoff.md` (ids, live-site
-paths and proposed resolutions only; `src/domain/import_mysql/signoff.rs`)
-and `summary.json` into the report directory.
+0047 §4): D10's are optional (an unlisted page is published), a D3
+entry pins the index image that editors set in the source, and an N7
+entry whose unchanged body no longer has an unplanned removal is listed
+as no longer needed, not a problem (research: DECISIONS R38 (D161)).
+Every run writes `report.md`, the editors' sign-off sheet `signoff.md`
+(ids, live-site paths and proposed resolutions only;
+`src/domain/import_mysql/signoff.rs`) and `summary.json` into the report
+directory.
 
 Uploaded media go below `settings.media` (ADR 0015 §3): locally
 `target/media/<env>/public` (the served tree), `tmp` (upload staging) and

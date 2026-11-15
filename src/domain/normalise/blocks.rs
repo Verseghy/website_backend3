@@ -115,13 +115,16 @@
 //! at a heading start tag below it, so when the adoption agency moves the
 //! link in the same parse, the closing waits for the pass after. So a body
 //! that also fosters a link out of a table into another link, tag soup
-//! that can need more than three passes anyway, can need a fourth pass
-//! where it settled in three without N5, and is then refused (the unit
-//! test `a_known_soup_is_refused_with_the_em`). The tests check that the
-//! rules add no refusal over their own shapes. Like every refused body,
-//! such a body stops the import's `apply`, which rolls back and names the
-//! row, and the dry run names it before that (data-migration.md §7.4,
-//! D140).
+//! that needed more than three passes anyway, needed a fourth pass where it
+//! settled in three without N5, and was refused (D143 accepted that). Since
+//! N7 runs in the pass, the sanitiser's own fixed-point loop parses and
+//! writes the body again within the first pass (ADR 0013 §5), which absorbs
+//! the parser's repairs, and that shape settles (the unit test
+//! `a_known_soup_settles_with_the_em_since_n7`). The tests check that the
+//! rules add no refusal over their own shapes. Like every refused body, a
+//! body that the passes or N7 still refuse stops the import's `apply`,
+//! which rolls back and names the row, and the dry run names it before that
+//! (data-migration.md §7.4, D140).
 //!
 //! **Cost.** One walk over the body plans every edit ([`plan`]), and the
 //! rules then edit each element they name once. The walk also decides which
@@ -482,7 +485,7 @@ fn without_italic(style: &str) -> Option<String> {
 /// reads the same pieces.
 ///
 /// - `style`: a `style` attribute value.
-fn declaration_texts(style: &str) -> Vec<(&str, bool)> {
+pub(super) fn declaration_texts(style: &str) -> Vec<(&str, bool)> {
     let mut input = Parser::new(style);
     let mut texts = Vec::new();
     loop {
@@ -555,7 +558,7 @@ fn font_style(text: &str) -> FontStyle {
 ///
 /// - `text`: one declaration as [`declaration_texts`] cuts it, one that the
 ///   sanitiser's reader reads.
-fn is_important(text: &str) -> bool {
+pub(super) fn is_important(text: &str) -> bool {
     let mut input = Parser::new(text);
     // `next` skips white space, and the content of a function or a bracket
     // as a whole, so only top-level tokens are seen.
@@ -653,7 +656,7 @@ mod tests {
 
     /// The whole normaliser over `body`.
     fn normalised(body: &str) -> Normalised {
-        normalise(body).expect("a body that settles")
+        normalise(body, &sanitizer()).expect("a body that settles")
     }
 
     /// `body` as the parse and the writer alone leave it.
@@ -944,26 +947,31 @@ mod tests {
     }
 
     #[test]
-    fn a_known_soup_is_refused_with_the_em() {
+    fn a_known_soup_settles_with_the_em_since_n7() {
         // The link in the row is fostered out of the table into the open
-        // link around the italic heading. Without N5 the next parse closes
-        // the italic heading at the fostered `h6` while it moves the links,
-        // and the body settles in three passes. With the `em` around the
-        // heading's content, the `h4` stays inside it while the links move,
-        // which leaves the italic heading directly in the outer one; only
-        // the parse after that closes the outer heading at its start tag,
-        // and the fourth pass would be the first to return its input. See
-        // "Fixed point" in the module documentation.
+        // link around the italic heading. Before N7 ran in the pass, the
+        // `em` around the heading's content kept the `h4` inside it while
+        // the parse moved the links, so the parse after that still closed
+        // the outer heading at its start tag and the body needed a fourth
+        // pass: it was refused, where its twin without the italic rule
+        // settled (D143 accepted that refusal). N7's sanitiser parses and
+        // writes the body again in its own fixed-point loop within the first
+        // pass (ADR 0013 §5), which absorbs the parser's repairs, so the body
+        // and its twin both settle now, and normalising the output again
+        // changes nothing. See "Fixed point" in the module
+        // documentation.
         let body = concat!(
             r#"<h2><a href="/x"><h2 style="font-style:italic"><table><h6><tr>"#,
             r#"<a href="/x">"#,
         );
-        assert_eq!(
-            normalise(body),
-            Err(super::super::NormaliseError::NotNormalisable { passes: 3 })
-        );
+        let once = normalised(body);
+        assert_eq!(once.report.count(Rule::ItalicHeadingToEm), 1);
+        assert_eq!(normalised(&once.html).html, once.html);
         let twin = body.replace(r#" style="font-style:italic""#, "");
-        assert!(normalise(&twin).is_ok(), "settles without the italic rule");
+        assert!(
+            normalise(&twin, &sanitizer()).is_ok(),
+            "settles without the italic rule"
+        );
     }
 
     #[test]
@@ -997,13 +1005,15 @@ mod tests {
             r#"<a href="/x"><h5><center><ol><li><h2 style="font-style:italic"><div>"#,
             r#"<blockquote><h5><em><h5><a href="/x">"#,
         );
-        let out = normalise(body).expect("the body settles");
-        let again = normalise(&out.html).expect("the output settles");
+        let out = normalise(body, &sanitizer()).expect("the body settles");
+        let again = normalise(&out.html, &sanitizer()).expect("the output settles");
         assert_eq!(again.html, out.html);
         assert!(!again.report.has_hits(), "{:?}", again.report);
         assert!(
-            out.html
-                .contains(r#"<em><h4><a href="/x"></a><a href="/x"></a></h4></em>"#),
+            out.html.contains(concat!(
+                r#"<em><h4><a href="/x" target="_blank" rel="noopener noreferrer"></a>"#,
+                r#"<a href="/x" target="_blank" rel="noopener noreferrer"></a></h4></em>"#
+            )),
             "{}",
             out.html
         );
@@ -1249,15 +1259,14 @@ mod tests {
         );
         // Inside a `center`, a `style` whose `text-align` content-v1 does
         // not keep shows the centre's alignment: N3 centres the paragraph
-        // and N5 writes the attribute's in front, so N7 keeps the last one,
-        // N3's, and both count the paragraph as unclear for review.
+        // and N5 writes the attribute's in front (`text-align: right;
+        // text-align: center; text-align: inherit`), so N7 keeps the last
+        // one it accepts, N3's, and drops the unclear one as both planned;
+        // both count the paragraph as unclear for review.
         let out = normalised(
             r#"<center><p align="right" style="text-align: inherit">Örökölt</p></center>"#,
         );
-        assert_eq!(
-            out.html,
-            r#"<p style="text-align: right; text-align: center; text-align: inherit">Örökölt</p>"#
-        );
+        assert_eq!(out.html, r#"<p style="text-align: center">Örökölt</p>"#);
         assert_eq!(
             out.report.hits().collect::<Vec<_>>(),
             [
@@ -1266,13 +1275,10 @@ mod tests {
                 (Rule::CenterAlignmentUnclear, 1),
                 (Rule::ParagraphAlignMapped, 1),
                 (Rule::ParagraphAlignUnclear, 1),
+                (Rule::UnclearAlignmentDropped, 1),
             ]
         );
-        let clean = sanitizer().sanitize(&out.html).expect("a small body").html;
-        assert_eq!(
-            clean.as_str(),
-            r#"<p style="text-align: center">Örökölt</p>"#
-        );
+        assert!(!out.report.has_unplanned_removals());
     }
 
     #[test]
@@ -1552,8 +1558,8 @@ mod tests {
         // it, with no rule hit.
         #[test]
         fn normalising_twice_equals_normalising_once(body in arb_body()) {
-            if let Ok(once) = normalise(&body) {
-                let twice = normalise(&once.html)
+            if let Ok(once) = normalise(&body, &sanitizer()) {
+                let twice = normalise(&once.html, &sanitizer())
                     .map_err(|error| TestCaseError::fail(format!("{body:?}: the output was refused: {error}")))?;
                 prop_assert_eq!(&twice.html, &once.html, "{:?}", body);
                 prop_assert!(!twice.report.has_hits(), "{:?}: {:?}", body, twice.report);
@@ -1561,17 +1567,17 @@ mod tests {
         }
 
         // The block rules add no refusal: a body is refused only when its
-        // twin, which they leave alone, is refused too. Some tag soup that
-        // nests links needs more than three passes with or without N5 (the
-        // documentation of `super`, "Fixed point"), so "never refused"
-        // would not hold; one shape where N5 adds a refusal is pinned in
-        // `a_known_soup_is_refused_with_the_em`.
+        // twin, which they leave alone, is refused too. Before N7 ran in the
+        // pass, some tag soup that nests links needed more than three passes
+        // with or without N5, and one shape needed a fourth only with N5
+        // (`a_known_soup_settles_with_the_em_since_n7`); the property keeps
+        // guarding that the rules never add one.
         #[test]
         fn the_block_rules_add_no_refusal(pieces in arb_pieces(&[SHAPES, OTHER, MOVING])) {
             let body = pieces.concat();
-            if normalise(&body).is_err() {
+            if normalise(&body, &sanitizer()).is_err() {
                 let twin = twin_body(&pieces);
-                prop_assert!(normalise(&twin).is_err(), "{:?} is refused, but not {:?}", body, twin);
+                prop_assert!(normalise(&twin, &sanitizer()).is_err(), "{:?} is refused, but not {:?}", body, twin);
             }
         }
 
@@ -1611,7 +1617,7 @@ mod tests {
         #[test]
         fn the_search_text_is_unchanged(body in arb_plain_body()) {
             // A refused body is the property above's.
-            if let Ok(out) = normalise(&body) {
+            if let Ok(out) = normalise(&body, &sanitizer()) {
                 let words = |html: &str| html_to_search_text(html).split(' ').map(str::to_owned).collect::<Vec<_>>().concat();
                 prop_assert_eq!(words(&out.html), words(&body), "{:?}", out.html);
             }

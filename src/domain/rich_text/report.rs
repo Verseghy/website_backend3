@@ -598,7 +598,9 @@ fn explain_attributes<'a>(
 ///
 /// The removal report and [`super::validate::validate_content`] both decide
 /// image and embed sources here, so the index the validator gives a removed
-/// image cannot disagree with the report's count of removed images.
+/// image cannot disagree with the report's count of removed images. The
+/// import normaliser's N7 asks it too, to tell which `img` the structural
+/// pass keeps and gives its locked `style` (`domain::normalise`).
 ///
 /// - `policy`: supplies the hosts and prefixes of the URL rules.
 /// - `tag`: the element, as the HTML parser reports it; its rule must list
@@ -606,7 +608,7 @@ fn explain_attributes<'a>(
 /// - `name`: the attribute name.
 /// - `value`: the value after character references are decoded.
 #[must_use]
-pub(super) fn url_outcome<'a>(
+pub(crate) fn url_outcome<'a>(
     policy: &SanitizePolicy,
     tag: &str,
     name: &str,

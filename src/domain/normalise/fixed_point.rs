@@ -3,75 +3,64 @@
 //!
 //! Every body the import writes must be a fixed point three ways:
 //! normalising it again, sanitising it again, and loading and saving it in
-//! the admin editor each return it byte for byte. [`check_fixed_point`]
-//! runs the first two, the ones the server can run; the editor round trip
-//! runs in the admin's test suite over the normaliser's fixture outputs,
-//! and over every body in the rehearsals (ADR 0013 §10, editor.md §13.4).
+//! the admin editor each return it byte for byte. [`super::normalise`]
+//! itself ends with the first two for its own output: its loop stops only
+//! at a pass that returns its input, and it then sanitises the output once
+//! more. [`check_fixed_point`] runs both on a body from elsewhere, such as
+//! a stored one that `content_normalize` reads. The editor round trip runs
+//! in the admin's test suite over the normaliser's fixture outputs, and
+//! over every body in the rehearsals (ADR 0013 §10, editor.md §13.4).
 //!
 //! A body that fails a check is not written: the import stops on it, and
 //! its dry run lists it with the reason (data-migration.md §4.2, editor.md
 //! §13.6 P7(f)). The errors say which check failed and from which byte the
 //! bytes differ, and carry the report of the second run, which names what
-//! that run would still change. Until N7 joins the normaliser, a legacy body
-//! that holds markup outside content-v1 fails the sanitiser check, which is
-//! what N7 is for; a content-v1 body passes both checks.
+//! that run would still change. Since N7 runs inside the normaliser, a body
+//! outside content-v1 fails the first check: normalising it again
+//! sanitises it.
 
 use super::{NormaliseError, NormaliseReport, normalise};
-use crate::domain::rich_text::{RemovalReport, SanitizeError, Sanitizer};
+use crate::domain::rich_text::Sanitizer;
 
-/// Why a normalised body is not at its fixed point.
+/// Why a body is not at its fixed point.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FixedPointError {
-    /// Normalising the body again was refused.
+    /// Normalising the body again was refused, by the normaliser's own
+    /// passes, by the sanitiser of N7, or by N9's sanitiser check.
     #[error("normalising the body again was refused: {0}")]
     NormaliseRefused(NormaliseError),
-    /// Normalising the body again changed it: `normalise(out) != out`.
+    /// Normalising the body again changed it: `normalise(out) != out`. As
+    /// the normaliser's output is the sanitiser's fixed point, this also
+    /// covers a body that the sanitiser would change.
     #[error("normalising the body again changes it from byte {at}")]
     Renormalised {
         /// The byte offset of the first difference.
         at: usize,
-        /// The report of the second run: the rules that changed it.
+        /// The report of the second run: the rules that changed it, and
+        /// what N7 removed.
         report: NormaliseReport,
-    },
-    /// The sanitiser refused the body.
-    #[error("the sanitiser refused the body: {0}")]
-    SanitiseRefused(SanitizeError),
-    /// Sanitising the body changed it: `S(out) != out`.
-    #[error("sanitising the body changes it from byte {at}")]
-    Resanitised {
-        /// The byte offset of the first difference.
-        at: usize,
-        /// What the sanitiser removed or rewrote.
-        report: RemovalReport,
     },
 }
 
 /// Checks that `out` is a fixed point of the normaliser and of the
 /// sanitiser (N9).
 ///
-/// - `out`: a body as the normaliser wrote it.
+/// - `out`: a body as the normaliser wrote it, or as it is stored.
 /// - `sanitizer`: the deployment's sanitiser, the one every write path
 ///   uses (ADR 0013 §5).
 ///
 /// # Errors
 ///
-/// The first check that fails, as a [`FixedPointError`]: the normaliser
-/// check runs first.
+/// [`FixedPointError::NormaliseRefused`] when normalising `out` is refused,
+/// and [`FixedPointError::Renormalised`] when it changes `out`. Normalising
+/// ends with the sanitiser check `S(normalise(out)) == normalise(out)`, so
+/// when `normalise(out) == out` holds, `S(out) == out` holds too.
 pub fn check_fixed_point(out: &str, sanitizer: &Sanitizer) -> Result<(), FixedPointError> {
-    let again = normalise(out).map_err(FixedPointError::NormaliseRefused)?;
+    let again = normalise(out, sanitizer).map_err(FixedPointError::NormaliseRefused)?;
     if again.html != out {
         return Err(FixedPointError::Renormalised {
             at: first_difference(out, &again.html),
             report: again.report,
-        });
-    }
-    let result = sanitizer
-        .sanitize(out)
-        .map_err(FixedPointError::SanitiseRefused)?;
-    if result.html.as_str() != out {
-        return Err(FixedPointError::Resanitised {
-            at: first_difference(out, result.html.as_str()),
-            report: result.report,
         });
     }
     Ok(())
@@ -81,7 +70,7 @@ pub fn check_fixed_point(out: &str, sanitizer: &Sanitizer) -> Result<(), FixedPo
 /// length of the shorter one when it is a prefix of the other.
 ///
 /// - `a`, `b`: the two texts.
-fn first_difference(a: &str, b: &str) -> usize {
+pub(super) fn first_difference(a: &str, b: &str) -> usize {
     a.bytes()
         .zip(b.bytes())
         .position(|(x, y)| x != y)
@@ -122,20 +111,31 @@ mod tests {
     }
 
     #[test]
-    fn a_body_outside_content_v1_fails_the_sanitiser_check() {
+    fn a_body_outside_content_v1_fails_and_names_what_n7_removes() {
         let result = check_fixed_point(r#"<p class="x">a</p>"#, &sanitizer());
-        let Err(FixedPointError::Resanitised { at, report }) = result else {
+        let Err(FixedPointError::Renormalised { at, report }) = result else {
             panic!("{result:?}");
         };
         assert_eq!(at, 2);
-        assert_eq!(report.count(RemovalRule::AttributeNotAllowed), 1);
-        let error = FixedPointError::Resanitised {
+        let removals: Vec<_> = report
+            .unplanned_removals()
+            .map(|(removal, count)| (removal.rule, removal.to_string(), count))
+            .collect();
+        assert_eq!(
+            removals,
+            [(
+                RemovalRule::AttributeNotAllowed,
+                "attribute_not_allowed p[class]".to_owned(),
+                1
+            )]
+        );
+        let error = FixedPointError::Renormalised {
             at,
-            report: RemovalReport::default(),
+            report: NormaliseReport::default(),
         };
         assert_eq!(
             error.to_string(),
-            "sanitising the body changes it from byte 2"
+            "normalising the body again changes it from byte 2"
         );
     }
 
@@ -143,26 +143,14 @@ mod tests {
     fn refusals_are_passed_on() {
         let deep = "<div>".repeat(300);
         let result = check_fixed_point(&deep, &sanitizer());
-        assert!(
-            matches!(
-                result,
-                Err(FixedPointError::Renormalised { .. } | FixedPointError::SanitiseRefused(_))
-            ),
-            "{result:?}"
-        );
-        let deep = normalise(&deep)
-            .expect("the normaliser has no depth limit")
-            .html;
-        let result = check_fixed_point(&deep, &sanitizer());
-        let Err(FixedPointError::SanitiseRefused(error)) = result else {
+        let Err(FixedPointError::NormaliseRefused(NormaliseError::SanitiseRefused(error))) = result
+        else {
             panic!("{result:?}");
         };
         assert_eq!(error.code(), Some("content_too_deep"));
-        let result = check_fixed_point("<plaintext>x", &sanitizer());
-        assert!(
-            matches!(result, Err(FixedPointError::NormaliseRefused(_))),
-            "{result:?}"
-        );
+        // The normaliser's own refusal: no known body still changes after
+        // three passes now that N7 runs in them (`settle` is tested with a
+        // pass that never settles), so only its message is checked here.
         assert_eq!(
             FixedPointError::NormaliseRefused(NormaliseError::NotNormalisable { passes: 3 })
                 .to_string(),
@@ -190,20 +178,17 @@ mod tests {
             prop_assert!(at == left.len() || at == right.len() || left.as_bytes()[at] != right.as_bytes()[at]);
         }
 
-        // Whatever the sanitiser writes and the normaliser keeps, N9
-        // accepts: a body that went through both is at both fixed points.
+        // Whatever the normaliser writes, N9 accepts: its output is at both
+        // fixed points.
         #[test]
-        fn sanitised_and_normalised_bodies_pass(words in prop::collection::vec("[a-zé]{1,6}", 0..6), tags in prop::collection::vec(prop::sample::select(&["p", "h2", "strong", "em", "li", "center", "div", "b"][..]), 6)) {
+        fn normalised_bodies_pass(words in prop::collection::vec("[a-zé]{1,6}", 0..6), tags in prop::collection::vec(prop::sample::select(&["p", "h2", "strong", "em", "li", "center", "div", "b"][..]), 6)) {
             let sanitizer = sanitizer();
             let mut body = String::new();
             for (word, tag) in words.iter().zip(&tags) {
                 let _ = write!(body, "<{tag}>{word}</{tag}>");
             }
-            let clean = sanitizer.sanitize(&body).expect("a small body").html.into_string();
-            let out = normalise(&clean).expect("sanitised markup settles").html;
-            if sanitizer.sanitize(&out).expect("a small body").html.as_str() == out {
-                prop_assert_eq!(check_fixed_point(&out, &sanitizer), Ok(()));
-            }
+            let out = normalise(&body, &sanitizer).expect("simple markup settles").html;
+            prop_assert_eq!(check_fixed_point(&out, &sanitizer), Ok(()));
         }
     }
 }
