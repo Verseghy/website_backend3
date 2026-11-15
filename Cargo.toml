@@ -173,8 +173,11 @@ mime_guess = { version = "2", default-features = false }
 # attributes kept in place, `rel` appended last, the `swap_remove` in its
 # attribute filter; editor.md §7.4), which the "Pinned ammonia behaviour" unit
 # tests of editor.md §13.6 pin, so every bump is a deliberate PR that runs them.
-ammonia = "=4.2.4"
-# The HTML parser of ammonia 4.2.4 ("^0.40"). The sanitiser parses its input
+# 4.2.5 fixes RUSTSEC-2026-0533 in a part of its namespace check that
+# content-v1 never reaches, and changed no output (editor.md §3.5); one of
+# those tests holds the fix itself and fails on a version without it.
+ammonia = "=4.2.5"
+# The HTML parser of ammonia 4.2.5 ("^0.40"). The sanitiser parses its input
 # with this same copy and in the same fragment context as ammonia does, to
 # explain what ammonia removed (the removal report, editor.md §7.2).
 html5ever = "0.40.1"
@@ -184,7 +187,7 @@ html5ever = "0.40.1"
 # (html5ever 0.36, cssparser 0.36, selectors 0.33), so the graph holds two
 # copies of html5ever, markup5ever, tendril, string_cache, web_atoms,
 # cssparser, selectors, ego-tree and servo_arc, and one more version of the
-# phf crates. ammonia 4.2.4
+# phf crates. ammonia 4.2.5
 # requires html5ever ^0.40, so they cannot be merged, and deny.toml only
 # warns about duplicates. The default features add a command-line binary
 # (`main`) and a parse-error list (`errors`) that backend3 does not use.
@@ -197,7 +200,7 @@ scraper = { version = "0.29", default-features = false }
 # another line would be a different type from the one scraper parses into.
 ego-tree = "0.11"
 # The CSS tokenizer of the sanitiser's style grammar (editor.md §7.3): the
-# cssparser 0.38 line that ammonia 4.2.4 and scraper 0.29 already require
+# cssparser 0.38 line that ammonia 4.2.5 and scraper 0.29 already require
 # ("^0.38.0"), so it adds no crate to the graph. Only its tokenizer, block
 # handling and colour helpers are used; ammonia's own style filter, built on
 # the same crate, is never enabled (ADR 0013 §5).
