@@ -6,6 +6,7 @@ mod admin_ui;
 mod auth_activity;
 mod auth_login;
 mod auth_logout;
+mod auth_refresh;
 mod auth_session;
 mod media_upload;
 mod metrics;

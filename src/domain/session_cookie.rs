@@ -30,6 +30,11 @@
 //! deleting `Set-Cookie` names the same cookie (name, host and `Path`), and
 //! refuses a `__Host-` cookie, the deleting one included, without `Secure`
 //! and `Path=/`.
+//!
+//! The sliding refresh (ADR 0006 §1) sets the same cookie again, with a new
+//! token and the new token's lifetime as `Max-Age`. [`names_session_cookie`]
+//! tells whether an answer already sets, replaces or deletes it, so that the
+//! passive refresh never adds a second one beside a handler's own.
 
 /// The name of the admin session cookie (ADR 0006 §1). `auth.jwt.location`
 /// in every `config/<env>.yaml` reads the token from this cookie first.
@@ -126,6 +131,48 @@ pub fn session_cookie(token: &str, max_age_secs: u64) -> Result<String, SessionC
 #[must_use]
 pub fn cleared_session_cookie() -> String {
     format!("{SESSION_COOKIE_NAME}=; {COOKIE_ATTRIBUTES}; Max-Age=0")
+}
+
+/// Whether a `Set-Cookie` header value sets, replaces or deletes the session
+/// cookie: whether the name of its cookie is [`SESSION_COOKIE_NAME`].
+///
+/// - `set_cookie`: the header value's bytes, which need not be UTF-8.
+///
+/// The name is read as a browser reads it (RFC 6265 §5.2): the part before
+/// the first `;`, up to its first `=`, without the spaces and tabs around
+/// it. Cookie names are case-sensitive. A value without a `=` there sets no
+/// cookie at all and names none.
+///
+/// The admin route table's guard asks it before it adds the passive
+/// refresh's cookie to an answer (ADR 0006 §1): an answer whose handler
+/// already set the session cookie (the logout's deletion, the explicit
+/// refresh, later a password change) keeps that cookie alone, because a
+/// browser keeps the last of two cookies with one name.
+#[must_use]
+pub fn names_session_cookie(set_cookie: &[u8]) -> bool {
+    let pair = set_cookie
+        .split(|&byte| byte == b';')
+        .next()
+        .unwrap_or_default();
+    let Some(equals) = pair.iter().position(|&byte| byte == b'=') else {
+        return false;
+    };
+    trim_space_and_tab(&pair[..equals]) == SESSION_COOKIE_NAME.as_bytes()
+}
+
+/// `bytes` without the spaces and horizontal tabs at either end: RFC 6265
+/// §5.2's whitespace around a cookie name, and nothing wider.
+fn trim_space_and_tab(bytes: &[u8]) -> &[u8] {
+    let is_blank = |byte: &u8| *byte == b' ' || *byte == b'\t';
+    let start = bytes
+        .iter()
+        .position(|byte| !is_blank(byte))
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !is_blank(byte))
+        .map_or(start, |last| last + 1);
+    &bytes[start..end]
 }
 
 /// The cookie that a `Set-Cookie` value names, and its attributes: the name
@@ -257,6 +304,42 @@ mod tests {
     }
 
     #[test]
+    fn the_session_cookie_is_recognised_by_its_name_only() {
+        // What this module writes: setting and deleting.
+        let set = session_cookie("aaa.bbb.ccc", 7200).expect("valid");
+        assert!(names_session_cookie(set.as_bytes()));
+        assert!(names_session_cookie(cleared_session_cookie().as_bytes()));
+        for (value, names) in [
+            ("__Host-admin_session=x", true),
+            (" __Host-admin_session\t=x; Path=/", true),
+            ("__Host-admin_session=", true),
+            // Another cookie, or the name in the wrong place.
+            ("theme=dark; __Host-admin_session=x", false),
+            ("__Host-admin_mfa=x; HttpOnly", false),
+            ("__host-admin_session=x", false),
+            ("__Host-admin_session_old=x", false),
+            ("x=__Host-admin_session", false),
+            // No name-value pair at all.
+            ("__Host-admin_session", false),
+            ("__Host-admin_session; Max-Age=0", false),
+            ("", false),
+        ] {
+            assert_eq!(names_session_cookie(value.as_bytes()), names, "{value:?}");
+        }
+        // A value that is not UTF-8 is read as bytes.
+        assert!(names_session_cookie(b"__Host-admin_session=\xff\xfe"));
+        assert!(!names_session_cookie(b"\xff=x"));
+    }
+
+    #[test]
+    fn trim_space_and_tab_trims_only_those() {
+        assert_eq!(trim_space_and_tab(b" \t a b \t"), b"a b");
+        assert_eq!(trim_space_and_tab(b"\n a"), b"\n a");
+        assert_eq!(trim_space_and_tab(b"  "), b"");
+        assert_eq!(trim_space_and_tab(b""), b"");
+    }
+
+    #[test]
     fn errors_say_what_to_fix() {
         let message = SessionCookieError::InvalidCharacter {
             character: ';',
@@ -319,6 +402,34 @@ mod tests {
             prop_assert_eq!(set_attributes, cleared_attributes);
             let empty_value = format!("{SESSION_COOKIE_NAME}=;");
             prop_assert!(cleared.starts_with(&empty_value));
+        }
+
+        #[test]
+        fn a_set_cookie_names_the_session_cookie_exactly_when_its_name_is_it(
+            name in prop_oneof![
+                3 => Just(SESSION_COOKIE_NAME.to_owned()),
+                1 => "[ \t]{0,2}__Host-admin_session[ \t]{0,2}",
+                // Cookie-name characters: no `=`, `;` or blank.
+                2 => "[!-:<>-~]{0,24}",
+            ],
+            value in "[!-:<-~]{0,30}",
+            attributes in "(; [A-Za-z-]{1,8}(=[!-:<-~]{0,8})?){0,4}",
+        ) {
+            let header = format!("{name}={value}{attributes}");
+            prop_assert_eq!(
+                names_session_cookie(header.as_bytes()),
+                name.trim_matches([' ', '\t']) == SESSION_COOKIE_NAME,
+                "{}", header
+            );
+        }
+
+        #[test]
+        fn every_cookie_this_module_writes_names_the_session_cookie(
+            token in JWT_LIKE,
+            max_age in 1..=u64::MAX,
+        ) {
+            let set = session_cookie(&token, max_age).expect("valid");
+            prop_assert!(names_session_cookie(set.as_bytes()));
         }
     }
 }

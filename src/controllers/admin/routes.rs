@@ -37,7 +37,17 @@
 //!    does not meet it gets `403 forbidden`, with the Hungarian message in
 //!    the admin (ADR 0021 §4);
 //! 3. hands the opened session to the handler, whose
-//!    [`super::session::AdminSession`] takes it from the request.
+//!    [`super::session::AdminSession`] takes it from the request;
+//! 4. adds the passive sliding refresh to the answer (ADR 0006 §1): a full
+//!    `admin` session that the session cookie carries, with less than
+//!    3,600 s of its token left, gets a renewed `__Host-admin_session`
+//!    cookie, on the handler's answer or on the `403`, unless the handler
+//!    set the session cookie itself (the logout's deletion, the explicit
+//!    refresh). A Bearer token and a restricted session never get one. The
+//!    maintainer kept the refresh on the `403` as built on 2026-11-15:
+//!    "Keep as built: every guarded answer, the 403 included" (research:
+//!    DECISIONS R35 (D156); ADR 0006 §1 quotes the question), so a
+//!    handler's own record-level `403` carries it too.
 //!
 //! So `401` is always decided before `403` (ADR 0007 §5's flowchart), and
 //! both before the handler reads anything: a list that the account may not
@@ -86,7 +96,7 @@ use axum::{
     extract::{DefaultBodyLimit, Request},
     handler::Handler,
     http::{HeaderValue, Method, header::CACHE_CONTROL},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{MethodFilter, MethodRouter, on},
 };
 use loco_rs::{app::AppContext, controller::Routes};
@@ -96,7 +106,7 @@ use super::{
     JSON_BODY_LIMIT, auth, error_response,
     session::{
         AcceptedScopes, AdminOrPasswordChange, AdminScope, accepted_scopes, open_session,
-        session_refusal_response,
+        passive_refresh_cookie, session_refusal_response, with_passive_refresh,
     },
 };
 use crate::{
@@ -121,6 +131,9 @@ pub fn table() -> Vec<AdminRoute> {
         // POST only (ADR 0006 §2): axum answers every other method with 405.
         AdminRoute::post("/auth/logout", Requirement::AnyActiveUser, auth::logout)
             .accepting::<AdminOrPasswordChange>(),
+        // The explicit sliding refresh (ADR 0006 §1): a full session only,
+        // so a `password_change` session cannot extend itself (§4).
+        AdminRoute::post("/auth/refresh", Requirement::AnyActiveUser, auth::refresh),
     ]
 }
 
@@ -398,8 +411,9 @@ struct Guard {
 /// What the guard decided about a request.
 enum Admission {
     /// Call the handler with this request, which carries the opened session
-    /// when the requirement needs one.
-    Admitted(Request),
+    /// when the requirement needs one, and add the passive refresh's
+    /// `Set-Cookie` value, if any, to its answer.
+    Admitted(Request, Option<HeaderValue>),
     /// Send this answer instead of calling the handler.
     Refused(Response),
 }
@@ -414,14 +428,25 @@ impl Guard {
     /// The answer of a refused request is the session's `401 unauthorized`
     /// or `500` ([`open_session`], [`session_refusal_response`]), or
     /// `403 forbidden` for an account that does not meet the requirement.
+    ///
+    /// Once the session holds, the guard also decides its passive refresh
+    /// (ADR 0006 §1, [`passive_refresh_cookie`]): a full `admin` session in
+    /// the session cookie with less than 3,600 s left gets a renewed cookie
+    /// on its answer, the handler's or the `403`, unless the handler sets
+    /// the session cookie itself ([`with_passive_refresh`]). A failure to
+    /// build it (no app clock, no `auth.jwt`) answers Loco's `500`.
     async fn admit(self, request: Request, ctx: &AppContext) -> Admission {
         if !self.requirement.needs_session() {
-            return Admission::Admitted(request);
+            return Admission::Admitted(request, None);
         }
         let (mut parts, body) = request.into_parts();
         let session = match open_session(&mut parts, ctx, self.scopes).await {
             Ok(session) => session,
             Err(error) => return Admission::Refused(session_refusal_response(error)),
+        };
+        let refresh = match passive_refresh_cookie(&session, ctx) {
+            Ok(refresh) => refresh,
+            Err(error) => return Admission::Refused(error.into_response()),
         };
         if !self.requirement.is_met_by(&session.grants) {
             // DEBUG, like the 401: the admin hides what an account may not
@@ -434,10 +459,13 @@ impl Guard {
                 path = parts.uri.path(),
                 "admin request refused: the account does not meet the route's requirement"
             );
-            return Admission::Refused(error_response(ErrorCode::Forbidden));
+            return Admission::Refused(with_passive_refresh(
+                error_response(ErrorCode::Forbidden),
+                refresh,
+            ));
         }
         session.hand_over(&mut parts);
-        Admission::Admitted(Request::from_parts(parts, body))
+        Admission::Admitted(Request::from_parts(parts, body), refresh)
     }
 }
 
@@ -458,7 +486,8 @@ where
 {
     type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
 
-    /// Runs the guard, then the handler with the same state.
+    /// Runs the guard, then the handler with the same state, and adds the
+    /// passive refresh's cookie to the handler's answer.
     ///
     /// - `request`: the request.
     /// - `state`: the router's state, which the guard reads the database and
@@ -466,7 +495,9 @@ where
     fn call(self, request: Request, state: AppContext) -> Self::Future {
         Box::pin(async move {
             match self.guard.admit(request, &state).await {
-                Admission::Admitted(request) => self.handler.call(request, state).await,
+                Admission::Admitted(request, refresh) => {
+                    with_passive_refresh(self.handler.call(request, state).await, refresh)
+                }
                 Admission::Refused(answer) => answer,
             }
         })
@@ -514,6 +545,13 @@ mod tests {
                 "/api/admin/auth/logout".to_owned(),
                 Requirement::AnyActiveUser,
                 own_account,
+                RequestBody::Json,
+            ),
+            (
+                Method::POST,
+                "/api/admin/auth/refresh".to_owned(),
+                Requirement::AnyActiveUser,
+                &[SessionScope::Admin][..],
                 RequestBody::Json,
             ),
         ] {

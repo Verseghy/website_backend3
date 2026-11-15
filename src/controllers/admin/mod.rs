@@ -5,8 +5,10 @@
 //! builder of the admin API's router, which `App::routes` adds once. Its
 //! guard answers `401 unauthorized` to a request without a valid session
 //! and `403 forbidden` to an account that does not meet the requirement,
-//! before the handler runs, and every admin response carries
-//! `Cache-Control: no-store` (ADR 0023 §6). A new admin route is one more
+//! before the handler runs, renews a full session in the session cookie
+//! that has less than an hour left (the passive sliding refresh, ADR 0006
+//! §1), and every admin response carries `Cache-Control: no-store`
+//! (ADR 0023 §6). A new admin route is one more
 //! entry of [`routes::table`]; a route mounted any other way fails
 //! `tests/requests/admin_routes.rs` (in `App::routes`) or
 //! `tests/architecture/admin_mounts.rs` (in another hook, within the limits

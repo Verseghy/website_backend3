@@ -15,6 +15,7 @@ use backend3::{
     app::enforce_database_guard,
     domain::{
         image_optimise::{PixelBudget, PngEffort},
+        session::AbsoluteLimit,
         session_jwt::SESSION_LIFETIME_SECS,
         totp_secret::{PUBLISHED_LOCAL_KEY, PUBLISHED_LOCAL_KEY_TEXT, TotpEncryptionKey},
     },
@@ -449,4 +450,67 @@ fn production_media_settings_are_the_volume_and_its_base_url_has_no_default() {
         ]
     );
     assert!(source.contains("\n    pixel_budget: 50000000\n"));
+}
+
+/// The lines of `settings.admin_auth` in `source` other than comments and
+/// the TOTP key, whose value differs between the files on purpose.
+fn admin_auth_values(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .skip_while(|line| *line != "  admin_auth:")
+        .skip(1)
+        .take_while(|line| line.starts_with("    "))
+        .filter(|line| {
+            let line = line.trim_start();
+            !line.starts_with('#') && !line.starts_with("totp_encryption_key:")
+        })
+        .collect()
+}
+
+#[test]
+fn every_config_writes_out_the_admin_auth_defaults_of_adr_0006() {
+    // ADR 0006 §8's four values, which the maintainer kept (research:
+    // DECISIONS R9, D07). The code has no default for them, so every file,
+    // production included, writes them out, with the same values: a
+    // session limit tried locally is the one production enforces.
+    let expected = [
+        "    session_absolute_max_secs: 43200",
+        "    reset_link_ttl_secs: 86400",
+        "    temp_password_ttl_secs: 259200",
+        "    force_change_short_legacy_password: true",
+    ];
+    for file in [
+        "config/development.yaml",
+        "config/test.yaml",
+        "config/e2e.yaml",
+        "config/production.yaml",
+    ] {
+        let source = std::fs::read_to_string(repository_root().join(file)).expect(file);
+        assert_eq!(admin_auth_values(&source), expected, "{file}");
+    }
+    // And the loaded settings of the local files are those values.
+    for environment in local_environments() {
+        let settings = Settings::from_section(load(&environment).settings.as_ref())
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        let admin_auth = settings.admin_auth;
+        assert_eq!(
+            admin_auth.session_absolute_max_secs.secs(),
+            AbsoluteLimit::DEFAULT_SECS,
+            "{environment}"
+        );
+        assert_eq!(
+            admin_auth.reset_link_ttl_secs.get(),
+            86_400,
+            "{environment}"
+        );
+        assert_eq!(
+            admin_auth.temp_password_ttl_secs.get(),
+            259_200,
+            "{environment}"
+        );
+        assert!(
+            admin_auth.force_change_short_legacy_password,
+            "{environment}"
+        );
+    }
 }

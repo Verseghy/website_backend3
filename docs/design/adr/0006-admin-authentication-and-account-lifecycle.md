@@ -39,9 +39,15 @@ backend3 keeps Loco's JWT and its user extractor. It stores the token in a cooki
 | Cookie attributes | `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=7200` |
 | Claims | Loco's `pid` (the user's UUID, [ADR 0009](0009-clean-domain-schema-with-preserved-integer-ids.md)) and `exp`, plus custom claims: `tv` (the user's token version), `scope` (`admin`, `password_change` or `mfa`) and `auth_time` (when the password step succeeded) |
 | Sliding refresh, passive | When a request with a valid `admin`-scope token arrives and less than 3,600 s of the token's lifetime remain, the response sets a new cookie that expires 2 hours later. The 3,600 s threshold applies only to this path |
-| Sliding refresh, explicit | `POST /api/admin/auth/refresh` always sets a new cookie that expires 2 hours later. The admin UI calls it on user activity (typing or clicking) whenever at least 10 minutes have passed since its previous call, so a long editing session without saves stays signed in |
+| Sliding refresh, explicit | `POST /api/admin/auth/refresh` always sets a new cookie that expires 2 hours later, except that when less than one whole second is left before the absolute limit, or none, it answers 204 without a cookie, and the session ends with the token it has ("Keep 204 without a cookie (as built)", 2026-11-15; research: DECISIONS R35 (D155)). The admin UI calls it on user activity (typing or clicking) whenever at least 10 minutes have passed since its previous call, so a long editing session without saves stays signed in |
 | Absolute limit | Neither refresh path sets an expiry later than `auth_time` plus `admin_auth.session_absolute_max_secs` (default 43,200 s, 12 hours; section 8). After that the user signs in again |
 | Idle result | The session ends between 1 h 50 min and 2 h after the last user activity, unless the absolute limit ends it earlier: the last explicit refresh happened less than 10 minutes before that activity, and no refresh sets an expiry more than 2 hours after its request. The next request after expiry answers 401 |
+
+The maintainer settled three readings of these rows on 2026-11-15, each as built (third decision register; research: DECISIONS R35):
+
+- Asked "ADR 0006 §3 says a Bearer token 'is not refreshed', but it does not say what `POST /api/admin/auth/refresh` answers when a script sends one. As built, the route answers `204 No Content` with no cookie and renews nothing. Should that stay? Should the route refuse the request with `403` and a new error code such as `bearer_not_refreshed`? Or should it answer the existing `401 unauthorized`?", the maintainer answered "Keep as built: 204 without a cookie" (research: DECISIONS R35 (D154)). The route renews nothing for a Bearer token, so a script's token still ends at the `expires_at` that `/auth/token` returned (section 3).
+- Asked "`POST /api/admin/auth/refresh` can have nothing left to renew. That happens when less than one whole second remains before the session's absolute end (`auth_time` plus `session_absolute_max_secs`). It also happens when the limit was lowered and a session is already past its new end while its token, issued under the old limit, still works. In both cases should the route answer 204 without a cookie, as built, or 401?", the maintainer answered "Keep 204 without a cookie (as built)" (research: DECISIONS R35 (D155)). The session ends with the token it has, and a 401 keeps one meaning on every admin route: no valid session.
+- Asked "Once the route table's guard has opened a session, it renews a full cookie session that has less than 3,600 s left on every answer it gives, including its own `403 forbidden`, because the session itself is valid. Should that stay as built? Should no 403 carry the refresh, whether it is the guard's or a handler's own record-level 403? Or should only a successful answer carry it?", the maintainer answered "Keep as built: every guarded answer, the 403 included" (research: DECISIONS R35 (D156)). The passive row therefore applies to every answer to such a request: the handler's, the route table's `403 forbidden` ([ADR 0007](0007-authorization-four-roles-enforced-on-every-operation.md) §5) and a handler's own record-level 403.
 
 backend3 wraps Loco's `JWTWithUser<users::Model>` in its own admin extractor. After Loco has checked the signature and expiry and loaded the user, the extractor rejects the request with 401 when any of these holds:
 
@@ -258,6 +264,8 @@ Four values are set by this ADR, not by the decision record. Each is a typed set
 
 The settings struct validates at boot and names the bad key: each duration must be positive, and `session_absolute_max_secs` must be at least the 7,200 s token lifetime.
 
+The maintainer kept the four defaults on 2026-10-25. Asked "Do you keep the admin_auth defaults: session_absolute_max_secs 43200, reset_link_ttl_secs 86400, temp_password_ttl_secs 259200, force_change_short_legacy_password true?", the maintainer answered "Keep 43200 / 86400 / 259200 / true" (decision-register item D07; research: DECISIONS R9). The settings have no default in the code: every `config/<env>.yaml` writes the four values out, so a missing or misspelt key stops the boot.
+
 ## Consequences
 
 Positive:
@@ -283,7 +291,7 @@ Follow-up work and what must be true in code and tests:
   - a wrong password, an unknown e-mail address, an inactive account and a trashed account give byte-identical 401 responses;
   - each `token_version` event in section 2 invalidates a second, independently issued token for the same user;
   - a snapshot test pins the `Set-Cookie` attributes;
-  - with an injected clock: the passive refresh fires only with less than 3,600 s left; `/refresh` always sets a new 2-hour cookie; with user activity ending at T, the session ends no earlier than T + 1 h 50 min and no later than T + 2 h; no refresh sets an expiry past `auth_time` plus `admin_auth.session_absolute_max_secs`;
+  - with an injected clock: the passive refresh fires only with less than 3,600 s left; `/refresh` always sets a new 2-hour cookie, except that with less than one whole second left before the absolute limit, or none, it answers 204 without a cookie ("Keep 204 without a cookie (as built)", 2026-11-15; research: DECISIONS R35 (D155)); with user activity ending at T, the session ends no earlier than T + 1 h 50 min and no later than T + 2 h; no refresh sets an expiry past `auth_time` plus `admin_auth.session_absolute_max_secs`;
   - `password_change` and `mfa` tokens are rejected on every other route; a valid mfa cookie reaches `/totp`, and the same token sent as `__Host-admin_session` or as a Bearer token is rejected everywhere else;
   - `/auth/token` answers 403 `password_change_required` for a temporary password, for `must_change_password` and for a legacy password shorter than 12 characters, and never returns a `password_change` or `mfa` token;
   - the `Origin` check rejects cookie writes from another origin, including a sibling host such as `https://verseghy-gimnazium.net`, and ignores Bearer requests;
@@ -313,7 +321,8 @@ Follow-up work and what must be true in code and tests:
 
 ## References
 
-- research: DECISIONS 5, 10a, 10b, 10c, 10d, 10e, 33, 35 and 42 (2026-10-24)
+- research: DECISIONS 5, 10a, 10b, 10c, 10d, 10e, 33, 35 and 42 (2026-10-24); DECISIONS R9, decision-register item D07 (answer of 2026-10-25: the four section 8 defaults kept)
+- research: DECISIONS R35 (D154, D155, D156), the answers of 2026-11-15 that keep the refresh answers of section 1 as built; research: third decision register D154 to D156 (the questions, their context and the options)
 - research: QUESTIONS Q5, Q10
 - research: SYNTHESIS §3.2 (backend1 authentication), §3.3.2 (role counts), §4.3.8 (auth tables), §6.3.2 (MySQL and hash probe), §6.4 (Loco authentication), §7.4 (iam)
 - loco-rs@1.2.0:src/auth/jwt.rs, src/config/auth.rs, src/hash.rs

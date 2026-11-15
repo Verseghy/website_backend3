@@ -20,6 +20,9 @@
 //! encryption key is decoded and checked here, so every command refuses a bad
 //! key at boot instead of the first sign-in failing (ADR 0006 §6); the
 //! settings keep only the derived cipher key, never the configured value.
+//! The session limits and credential lifetimes of ADR 0006 §8 are checked
+//! here too, each naming its key: every duration at least one second, and
+//! the absolute session limit at least the two-hour session lifetime.
 //!
 //! The admin session's JWT configuration, `auth.jwt`, is Loco's own section
 //! and not part of `settings:`, but it is checked here too, by
@@ -54,7 +57,7 @@
 //! upload, not here, so production starts before its volume is mounted and
 //! tasks, which never upload, do not need it.
 
-use std::{net::IpAddr, path::PathBuf};
+use std::{net::IpAddr, num::NonZeroU64, path::PathBuf};
 
 use loco_rs::{
     config::{Auth, JWTLocation, JWTLocationConfig},
@@ -68,6 +71,7 @@ use crate::domain::{
     image_optimise::{PixelBudget, PngEffort},
     import_mysql::source::{SOURCE_DATABASE_URL_ENV, SOURCE_DATABASE_URL_KEY, SourceDatabaseUrl},
     media_rules::{MediaDirsError, check_media_dirs},
+    session::AbsoluteLimit,
     session_jwt::{
         ExpirationError, JwtSecret, LocationsError, TokenLocation, check_expiration,
         check_locations,
@@ -166,6 +170,13 @@ fn public_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BaseUrl
 
 /// Settings of admin sign-in (ADR 0006).
 ///
+/// The four values of ADR 0006 §8 have no serde default: every committed
+/// configuration writes them out with the ADR's defaults, which the
+/// maintainer kept (research: DECISIONS R9, D07), so a missing or misspelt
+/// key stops the boot instead of falling back to a value nobody chose. The
+/// durations are checked here: each is at least one second, and the
+/// absolute session limit at least the two-hour session lifetime.
+///
 /// `Debug` never shows the key: [`TotpEncryptionKey`] prints as redacted.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -177,6 +188,65 @@ pub struct AdminAuthSettings {
     /// throwaway key that is not a secret.
     #[serde(deserialize_with = "totp_encryption_key")]
     pub totp_encryption_key: TotpEncryptionKey,
+    /// `session_absolute_max_secs`: no session refresh sets an expiry later
+    /// than the session's `auth_time` plus this (ADR 0006 §1, §8); 43,200 s,
+    /// 12 hours, in every committed configuration. At least 7,200 s.
+    #[serde(deserialize_with = "absolute_limit")]
+    pub session_absolute_max_secs: AbsoluteLimit,
+    /// `reset_link_ttl_secs`: how long a one-time reset link stays valid
+    /// (ADR 0006 §5, §8); 86,400 s, 24 hours, in every committed
+    /// configuration. At least one second.
+    #[serde(deserialize_with = "positive_secs")]
+    pub reset_link_ttl_secs: NonZeroU64,
+    /// `temp_password_ttl_secs`: how long a temporary password stays valid
+    /// (ADR 0006 §5, §8); 259,200 s, 72 hours, in every committed
+    /// configuration. At least one second.
+    #[serde(deserialize_with = "positive_secs")]
+    pub temp_password_ttl_secs: NonZeroU64,
+    /// `force_change_short_legacy_password`: whether a legacy password
+    /// shorter than 12 characters yields only a `password_change` session
+    /// (ADR 0006 §6, §8); `true` in every committed configuration.
+    pub force_change_short_legacy_password: bool,
+}
+
+/// The full key of [`AdminAuthSettings::session_absolute_max_secs`], for
+/// error messages.
+pub const SESSION_ABSOLUTE_MAX_SECS_KEY: &str = "settings.admin_auth.session_absolute_max_secs";
+/// The full key of [`AdminAuthSettings::reset_link_ttl_secs`], for error
+/// messages.
+pub const RESET_LINK_TTL_SECS_KEY: &str = "settings.admin_auth.reset_link_ttl_secs";
+/// The full key of [`AdminAuthSettings::temp_password_ttl_secs`], for error
+/// messages.
+pub const TEMP_PASSWORD_TTL_SECS_KEY: &str = "settings.admin_auth.temp_password_ttl_secs";
+/// The full key of [`AdminAuthSettings::force_change_short_legacy_password`],
+/// for error messages.
+pub const FORCE_CHANGE_SHORT_LEGACY_PASSWORD_KEY: &str =
+    "settings.admin_auth.force_change_short_legacy_password";
+
+/// Reads `settings.admin_auth.session_absolute_max_secs` and checks it with
+/// [`AbsoluteLimit::new`], whose message says what to set. The error goes
+/// back through serde, so [`Settings::from_section`] reports it at the key's
+/// full path.
+///
+/// - `deserializer`: the deserializer at that key.
+fn absolute_limit<'de, D: Deserializer<'de>>(deserializer: D) -> Result<AbsoluteLimit, D::Error> {
+    AbsoluteLimit::new(u64::deserialize(deserializer)?).map_err(D::Error::custom)
+}
+
+/// Reads a lifetime in seconds of `settings.admin_auth` and refuses zero,
+/// which would make the credential expire as it is issued (ADR 0006 §8:
+/// "each duration must be positive"). A negative or fractional value is
+/// already refused as a `u64`. The error goes back through serde, so
+/// [`Settings::from_section`] reports it at the key's full path.
+///
+/// - `deserializer`: the deserializer at that key.
+fn positive_secs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NonZeroU64, D::Error> {
+    NonZeroU64::new(u64::deserialize(deserializer)?).ok_or_else(|| {
+        D::Error::custom(
+            "is 0 seconds; a lifetime must be at least 1 second (ADR 0006 §8; see \
+             config/production.yaml for the defaults)",
+        )
+    })
 }
 
 /// The full key of [`AdminAuthSettings::totp_encryption_key`], for error
@@ -425,7 +495,9 @@ pub enum SettingsError {
     #[error(
         "the configuration has no `settings:` section; backend3 needs at least \
          {ADMIN_UI_DIST_DIR_KEY}, {METRICS_BINDING_KEY}, {METRICS_PORT_KEY}, \
-         {TOTP_ENCRYPTION_KEY_KEY}, {IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY}, \
+         {TOTP_ENCRYPTION_KEY_KEY}, {SESSION_ABSOLUTE_MAX_SECS_KEY}, {RESET_LINK_TTL_SECS_KEY}, \
+         {TEMP_PASSWORD_TTL_SECS_KEY}, {FORCE_CHANGE_SHORT_LEGACY_PASSWORD_KEY}, \
+         {IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY}, \
          {IMAGE_OPTIMISATION_PNG_KEY}, {IMPORT_SOURCE_DATABASE_URL_KEY} and {MEDIA_KEY} \
          (root, tmp_dir, trash_dir, min_free_bytes, public_base_url, serve_storage); see \
          config/test.yaml for an example"
@@ -522,7 +594,8 @@ impl Settings {
     /// is missing, has an unknown or missing key, a value of the wrong type
     /// (a metrics binding that is not an IP address and a metrics port above
     /// 65535 included), an empty `dist_dir`, metrics port 0, a TOTP
-    /// encryption key that is not base64 of at least 64 bytes, a PNG
+    /// encryption key that is not base64 of at least 64 bytes, an absolute
+    /// session limit below 7,200 s, a credential lifetime of 0 s, a PNG
     /// effort that [`PngEffort::new`] refuses, a pixel budget of 0, a public
     /// media base URL that [`BaseUrl::parse`] refuses, or media directories
     /// that [`check_media_dirs`] refuses.
@@ -659,7 +732,19 @@ mod tests {
 
     /// A valid `admin_auth` value, with the local environments' key.
     fn admin_auth() -> Value {
-        json!({ "totp_encryption_key": PUBLISHED_LOCAL_KEY })
+        admin_auth_with_key(&json!(PUBLISHED_LOCAL_KEY))
+    }
+
+    /// The `admin_auth` value of the committed configurations, with the TOTP
+    /// key `key`.
+    fn admin_auth_with_key(key: &Value) -> Value {
+        json!({
+            "totp_encryption_key": key,
+            "session_absolute_max_secs": 43_200,
+            "reset_link_ttl_secs": 86_400,
+            "temp_password_ttl_secs": 259_200,
+            "force_change_short_legacy_password": true,
+        })
     }
 
     /// The `image_optimisation` value of the committed configuration files.
@@ -758,7 +843,7 @@ mod tests {
         json!({
             "admin_ui": { "dist_dir": "x" },
             "metrics": metrics(),
-            "admin_auth": { "totp_encryption_key": key },
+            "admin_auth": admin_auth_with_key(key),
             "image_optimisation": image_optimisation(),
             "import": import(),
             "media": media(),
@@ -834,6 +919,10 @@ mod tests {
                 admin_auth: AdminAuthSettings {
                     totp_encryption_key: TotpEncryptionKey::from_base64(PUBLISHED_LOCAL_KEY)
                         .expect("valid"),
+                    session_absolute_max_secs: AbsoluteLimit::new(43_200).expect("valid"),
+                    reset_link_ttl_secs: NonZeroU64::new(86_400).expect("positive"),
+                    temp_password_ttl_secs: NonZeroU64::new(259_200).expect("positive"),
+                    force_change_short_legacy_password: true,
                 },
                 image_optimisation: ImageOptimisationSettings {
                     pixel_budget: PixelBudget::DEFAULT,
@@ -852,6 +941,148 @@ mod tests {
                 },
             }
         );
+    }
+
+    /// A complete section whose `admin_auth.<key>` is `value`, or has no
+    /// `<key>` when `value` is `None`.
+    fn with_admin_auth(key: &str, value: Option<Value>) -> Value {
+        let mut admin_auth = admin_auth();
+        let members = admin_auth.as_object_mut().expect("an object");
+        match value {
+            Some(value) => members.insert(key.to_owned(), value),
+            None => members.remove(key),
+        };
+        json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": metrics(),
+            "admin_auth": admin_auth,
+            "image_optimisation": image_optimisation(),
+            "import": import(),
+            "media": media(),
+        })
+    }
+
+    /// The `admin_auth` settings of a section whose `admin_auth.<key>` is
+    /// `value`.
+    fn admin_auth_where(key: &str, value: Value) -> AdminAuthSettings {
+        Settings::from_section(Some(&with_admin_auth(key, Some(value))))
+            .unwrap_or_else(|error| panic!("{key}: {error}"))
+            .admin_auth
+    }
+
+    #[test]
+    fn the_session_limits_and_credential_lifetimes_are_read_as_configured() {
+        assert_eq!(
+            admin_auth_where("session_absolute_max_secs", json!(7200))
+                .session_absolute_max_secs
+                .secs(),
+            7200
+        );
+        assert_eq!(
+            admin_auth_where("session_absolute_max_secs", json!(u64::MAX))
+                .session_absolute_max_secs
+                .secs(),
+            u64::MAX
+        );
+        assert_eq!(
+            admin_auth_where("reset_link_ttl_secs", json!(1))
+                .reset_link_ttl_secs
+                .get(),
+            1
+        );
+        assert_eq!(
+            admin_auth_where("temp_password_ttl_secs", json!(1))
+                .temp_password_ttl_secs
+                .get(),
+            1
+        );
+        assert!(
+            !admin_auth_where("force_change_short_legacy_password", json!(false))
+                .force_change_short_legacy_password
+        );
+    }
+
+    #[test]
+    fn bad_session_limits_and_credential_lifetimes_name_their_key() {
+        // ADR 0006 §8: "each duration must be positive, and
+        // session_absolute_max_secs must be at least the 7,200 s token
+        // lifetime". Each refusal names the full key and says what to set.
+        let absolute = "is {} seconds; the absolute session limit must be at least 7200 seconds";
+        let lifetime = "is 0 seconds; a lifetime must be at least 1 second";
+        let cases = [
+            (
+                "session_absolute_max_secs",
+                json!(0),
+                absolute.replace("{}", "0"),
+            ),
+            (
+                "session_absolute_max_secs",
+                json!(7199),
+                absolute.replace("{}", "7199"),
+            ),
+            (
+                "session_absolute_max_secs",
+                json!(-1),
+                "invalid value: integer `-1`".to_owned(),
+            ),
+            (
+                "session_absolute_max_secs",
+                json!("12h"),
+                "invalid type: string".to_owned(),
+            ),
+            (
+                "session_absolute_max_secs",
+                json!(43_200.5),
+                "invalid type: floating point".to_owned(),
+            ),
+            ("reset_link_ttl_secs", json!(0), lifetime.to_owned()),
+            (
+                "reset_link_ttl_secs",
+                json!(-86_400),
+                "invalid value: integer".to_owned(),
+            ),
+            ("temp_password_ttl_secs", json!(0), lifetime.to_owned()),
+            (
+                "temp_password_ttl_secs",
+                Value::Null,
+                "invalid type: null".to_owned(),
+            ),
+            (
+                "force_change_short_legacy_password",
+                json!("yes"),
+                "invalid type: string".to_owned(),
+            ),
+            (
+                "force_change_short_legacy_password",
+                json!(1),
+                "invalid type: integer".to_owned(),
+            ),
+        ];
+        for (key, value, expected) in cases {
+            let (path, message) = invalid(&with_admin_auth(key, Some(value.clone())));
+            assert_eq!(
+                path,
+                format!("settings.admin_auth.{key}"),
+                "{value}: {message}"
+            );
+            assert!(message.starts_with(&expected), "{key} = {value}: {message}");
+        }
+        // The key constants are the paths the errors name.
+        for (key, constant) in [
+            ("session_absolute_max_secs", SESSION_ABSOLUTE_MAX_SECS_KEY),
+            ("reset_link_ttl_secs", RESET_LINK_TTL_SECS_KEY),
+            ("temp_password_ttl_secs", TEMP_PASSWORD_TTL_SECS_KEY),
+            (
+                "force_change_short_legacy_password",
+                FORCE_CHANGE_SHORT_LEGACY_PASSWORD_KEY,
+            ),
+        ] {
+            assert_eq!(constant, format!("settings.admin_auth.{key}"));
+            // No default: a missing key stops the boot and names it.
+            let (path, message) = invalid(&with_admin_auth(key, None));
+            assert_eq!(path, "settings.admin_auth", "{key}: {message}");
+            assert_eq!(message, format!("missing field `{key}`"), "{key}");
+        }
     }
 
     #[test]
@@ -941,6 +1172,10 @@ mod tests {
             METRICS_BINDING_KEY,
             METRICS_PORT_KEY,
             TOTP_ENCRYPTION_KEY_KEY,
+            SESSION_ABSOLUTE_MAX_SECS_KEY,
+            RESET_LINK_TTL_SECS_KEY,
+            TEMP_PASSWORD_TTL_SECS_KEY,
+            FORCE_CHANGE_SHORT_LEGACY_PASSWORD_KEY,
             IMAGE_OPTIMISATION_PNG_KEY,
             IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY,
             IMPORT_SOURCE_DATABASE_URL_KEY,
@@ -1638,6 +1873,48 @@ mod tests {
     }
 
     proptest! {
+        /// Every absolute limit from the lifetime up loads as configured,
+        /// and every shorter one is refused at its key.
+        #[test]
+        fn absolute_limits_load_exactly_from_two_hours_up(secs in any::<u64>()) {
+            let section = with_admin_auth("session_absolute_max_secs", Some(json!(secs)));
+            match Settings::from_section(Some(&section)) {
+                Ok(settings) => {
+                    prop_assert!(secs >= 7200);
+                    prop_assert_eq!(settings.admin_auth.session_absolute_max_secs.secs(), secs);
+                }
+                Err(SettingsError::Invalid { path, .. }) => {
+                    prop_assert!(secs < 7200);
+                    prop_assert_eq!(path, SESSION_ABSOLUTE_MAX_SECS_KEY);
+                }
+                Err(other) => prop_assert!(false, "{other}"),
+            }
+        }
+
+        /// Every credential lifetime but zero loads as configured.
+        #[test]
+        fn credential_lifetimes_load_exactly_when_positive(
+            secs in prop_oneof![Just(0_u64), any::<u64>()],
+            key in proptest::sample::select(vec!["reset_link_ttl_secs", "temp_password_ttl_secs"]),
+        ) {
+            let section = with_admin_auth(key, Some(json!(secs)));
+            match Settings::from_section(Some(&section)) {
+                Ok(settings) => {
+                    let loaded = if key == "reset_link_ttl_secs" {
+                        settings.admin_auth.reset_link_ttl_secs
+                    } else {
+                        settings.admin_auth.temp_password_ttl_secs
+                    };
+                    prop_assert_eq!(loaded.get(), secs);
+                }
+                Err(SettingsError::Invalid { path, .. }) => {
+                    prop_assert_eq!(secs, 0);
+                    prop_assert_eq!(path, format!("settings.admin_auth.{key}"));
+                }
+                Err(other) => prop_assert!(false, "{other}"),
+            }
+        }
+
         #[test]
         fn any_ip_address_and_non_zero_port_round_trip(
             binding in any::<IpAddr>(),

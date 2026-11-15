@@ -68,6 +68,26 @@
 //! - a logout writes `logout` on the transaction of its revocation
 //!   ([`users::ActiveModel::log_out`]), so a failed entry keeps every session
 //!   and the cookie.
+//!
+//! The explicit sliding refresh, `POST /api/admin/auth/refresh`
+//! (ADR 0006 §1), renews the full `admin` session of the session cookie:
+//! `204 No Content` with a new `__Host-admin_session` cookie that expires
+//! two hours later, whatever was left of the old one, but never later than
+//! the session's `auth_time` plus `admin_auth.session_absolute_max_secs`
+//! (12 hours). The new token keeps the `auth_time`, so the limit counts
+//! from the sign-in. The admin UI calls it on typing or clicking at most
+//! every 10 minutes (`admin/src/auth/activity-refresh.ts`). At the absolute
+//! limit, and for a Bearer token, which is never refreshed (ADR 0006 §3),
+//! it answers `204` without a cookie: the session keeps the token it has
+//! and ends with it. The maintainer kept both answers as built on
+//! 2026-11-15, "Keep as built: 204 without a cookie" for a Bearer token and
+//! "Keep 204 without a cookie (as built)" at the absolute limit (research:
+//! DECISIONS R35 (D154, D155); ADR 0006 §1 quotes the questions). A
+//! `password_change` session gets the route table's
+//! `401`, since ADR 0006 §4 opens only three routes to it. The passive
+//! refresh, which every other admin route gets from the route table's
+//! guard, is the same renewal; its arithmetic for both is
+//! [`crate::domain::session`]. A request body, if any, is not read.
 
 use axum::{
     Json,
@@ -79,11 +99,16 @@ use loco_rs::prelude::*;
 use super::{
     client_context::ClientContext,
     error_response, json_rejection_response,
-    session::{AdminOrPasswordChange, AdminSession},
+    session::{
+        AdminOrPasswordChange, AdminSession, renewed_session_cookie, session_limits, session_times,
+    },
 };
 use crate::{
     app::clock,
-    domain::session_cookie::{cleared_session_cookie, session_cookie},
+    domain::{
+        session::explicit_renewal,
+        session_cookie::{cleared_session_cookie, session_cookie},
+    },
     dtos::admin::{
         auth::{LoginRequest, LoginResponse, LoginStep, MeResponse},
         error::ErrorCode,
@@ -285,4 +310,46 @@ pub async fn logout(
         .status(StatusCode::NO_CONTENT)
         .header(SET_COOKIE, cleared_session_cookie())
         .empty()
+}
+
+/// `POST /api/admin/auth/refresh`: renews the signed-in session's cookie
+/// (ADR 0006 §1, "Sliding refresh, explicit").
+///
+/// - `ctx`: the application context; the handler takes the app clock, the
+///   session limits and the `auth.jwt` configuration from it.
+/// - `session`: the checked admin session; a full `admin` one only. Without
+///   one the route table's guard has already answered `401 unauthorized`.
+///
+/// The answer is `204 No Content`. For the session cookie it carries a new
+/// cookie and token that expire two hours after the request, or at the
+/// session's absolute end, whichever comes first
+/// ([`explicit_renewal`]); the `Max-Age` is the new token's lifetime. At
+/// the absolute end, and for a Bearer token, it carries none (the module
+/// documentation says why). The guard adds no passive refresh beside it:
+/// it leaves an answer that sets the session cookie alone.
+///
+/// # Errors
+///
+/// An internal error (`500`) when the context has no app clock, no session
+/// limits or no `auth.jwt` section, when the token lacks an integer
+/// `auth_time` or `exp` (a defect of the code that signed it), or when the
+/// token or its cookie cannot be built. Never a `401` while the session
+/// still holds: on every admin route a `401` means no valid session
+/// (research: DECISIONS R35 (D155)).
+#[debug_handler]
+pub async fn refresh(State(ctx): State<AppContext>, session: AdminSession) -> Result<Response> {
+    let times = session_times(&session.claims)?;
+    let now = clock(&ctx)?.now();
+    let limit = session_limits(&ctx)?.absolute;
+    let answer = format::render().status(StatusCode::NO_CONTENT);
+    let Some(renewed) = explicit_renewal(session.carrier, now, times, limit) else {
+        tracing::debug!(
+            user_id = session.user.id,
+            carrier = ?session.carrier,
+            "explicit session refresh: nothing to renew (a Bearer token, or the absolute limit)"
+        );
+        return answer.empty();
+    };
+    let cookie = renewed_session_cookie(&session.user, times, renewed, &ctx)?;
+    answer.header(SET_COOKIE, cookie).empty()
 }

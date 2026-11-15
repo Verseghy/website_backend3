@@ -53,8 +53,9 @@ function json(status: number, body: unknown): Response {
 /**
  * A stand-in for the admin API's `/auth` routes: `/auth/me` answers the
  * account while `signedIn` is true and `401 unauthorized` otherwise,
- * `/auth/login` signs in with `password`, and `/auth/logout` ends the
- * session (`204`), or answers `401` when there is none.
+ * `/auth/login` signs in with `password`, `/auth/logout` ends the
+ * session (`204`), or answers `401` when there is none, and `/auth/refresh`
+ * renews it (`204`), or answers `401` when there is none.
  */
 class FakeAuthApi {
   /** Whether the browser holds a session cookie. */
@@ -86,6 +87,16 @@ class FakeAuthApi {
       }
       this.signedIn = true
       return json(200, { step: "done" })
+    }
+    if (url === "/api/admin/auth/refresh" && init?.method === "POST") {
+      return this.signedIn
+        ? new Response(null, { status: 204 })
+        : json(401, {
+            error: "unauthorized",
+            description: "d",
+            field: null,
+            params: {},
+          })
     }
     if (url === "/api/admin/auth/logout" && init?.method === "POST") {
       if (!this.signedIn) {
@@ -123,12 +134,19 @@ class FakeAuthApi {
  *   passes them.
  * @param api - the fake `/auth` routes; signed in unless the test says
  *   otherwise.
+ * @param activity - where the session's activity tracker listens and its
+ *   clock; by default a target that no test dispatches on, so the tracker
+ *   stays quiet.
  * @returns the memory router, to inspect its location.
  */
 function mountAdmin(
   entry: string,
   developmentRoutes?: ReactNode,
-  api: FakeAuthApi = new FakeAuthApi(true)
+  api: FakeAuthApi = new FakeAuthApi(true),
+  activity: { target: EventTarget; now: () => number } = {
+    target: new EventTarget(),
+    now: () => 0,
+  }
 ) {
   const router = createMemoryRouter(
     adminRoutes(
@@ -144,6 +162,8 @@ function mountAdmin(
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
         sourceCommit={SHA}
         developmentRoutes={developmentRoutes}
+        activityTarget={activity.target}
+        now={activity.now}
       />
     ),
     { initialEntries: [entry] }
@@ -341,6 +361,37 @@ describe("AdminApp without a session", () => {
 })
 
 describe("AdminApp with a session", () => {
+  it("refreshes the session on typing or clicking, at most every 10 minutes (ADR 0006 §1)", async () => {
+    const api = new FakeAuthApi(true)
+    let time = 1_800_000_000_000
+    // The window, as main.tsx passes it: Testing Library's clicks and key
+    // presses reach it.
+    mountAdmin("/admin", undefined, api, { target: window, now: () => time })
+    const dashboard = await screen.findByTestId("dashboard")
+    const refreshes = () =>
+      api.fetch.mock.calls.filter(
+        ([url, init]) =>
+          url === "/api/admin/auth/refresh" && init?.method === "POST"
+      ).length
+    expect(refreshes()).toBe(0)
+
+    const user = userEvent.setup()
+    // The first activity refreshes at once.
+    await user.click(dashboard)
+    await waitFor(() => expect(refreshes()).toBe(1))
+    // Nine minutes later, more clicks and keys: no call.
+    time += 9 * 60 * 1000
+    await user.click(dashboard)
+    await user.keyboard("a")
+    expect(refreshes()).toBe(1)
+    // Ten minutes after the call, a key press refreshes again.
+    time += 60 * 1000
+    await user.keyboard("b")
+    await waitFor(() => expect(refreshes()).toBe(2))
+    // Nothing but the refresh was posted, and the page stays.
+    expect(screen.getByTestId("dashboard")).toBeInTheDocument()
+  })
+
   it("asks /auth/me before it renders a page", async () => {
     const api = new FakeAuthApi(true)
     mountAdmin("/admin", undefined, api)

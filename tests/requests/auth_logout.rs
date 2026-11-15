@@ -30,7 +30,10 @@ use loco_rs::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::support::with_server;
+use crate::support::{
+    session_refresh::{place_session, renewed_cookie},
+    with_server, with_server_at,
+};
 
 const LOGIN: &str = "/api/admin/auth/login";
 const LOGOUT: &str = "/api/admin/auth/logout";
@@ -279,12 +282,30 @@ async fn logout_near_expiry_sets_only_the_clearing_cookie() {
     // value would leave a cookie behind the logout. The refresh must leave
     // logout out: with 600 s left, the answer still carries the clearing
     // `Set-Cookie` alone, and the session ends.
-    with_server(|server, ctx| async move {
+    //
+    // The app clock is placed 600 s before the token's `exp`, an hour after
+    // its `auth_time` (tests/support/session_refresh.rs), so the refresh is
+    // live: the same token on `/auth/me` gets a renewed cookie first.
+    with_server_at(instant(), |server, ctx, clock| async move {
         let user = account(&ctx, "lejaro@example.test", |_| {}).await;
-        let near_expiry = user
-            .generate_session_token(&secret(&ctx), 600, instant())
-            .expect("signed");
-        assert_eq!(me_statuses(&server, &near_expiry).await, OPEN);
+        let placed = place_session(
+            &ctx,
+            &clock,
+            &user,
+            TimeDelta::hours(1),
+            TimeDelta::seconds(600),
+        );
+        let near_expiry = placed.token;
+        let me = server
+            .get(ME)
+            .add_header(COOKIE, session_cookie_header(&near_expiry))
+            .await;
+        assert_eq!(me.status_code(), StatusCode::OK);
+        assert_eq!(
+            renewed_cookie(&me).map(|cookie| cookie.max_age),
+            Some(7200),
+            "the passive refresh is due on /auth/me"
+        );
 
         assert_logged_out(
             &logout_with_cookie(&server, &near_expiry).await,

@@ -124,6 +124,19 @@ settings:
     # refuses it." Production reads its own key from TOTP_ENCRYPTION_KEY,
     # with no default, and refuses this one at boot (ADR 0034 §3).
     totp_encryption_key: "YmFja2VuZDMgVE9UUCBlbmNyeXB0aW9uIGtleTogcHVibGljIGFuZCB0aHJvd2F3YXksIGZvciBkZXZlbG9wbWVudCwgdGVzdCBhbmQgZTJlIG9ubHk7IHByb2R1Y3Rpb24gcmVmdXNlcyBpdC4="
+    # The session limits and credential lifetimes of ADR 0006 §8, with the
+    # ADR's defaults, which the maintainer kept (research: DECISIONS R9,
+    # D07). No key has a default in the code, so each is written out; boot
+    # refuses a duration of 0 and an absolute limit below 7200, naming the
+    # key. `session_absolute_max_secs`: no session refresh sets an expiry
+    # later than the sign-in plus this, 12 hours (ADR 0006 §1).
+    session_absolute_max_secs: 43200
+    # A reset link lasts 24 hours, a temporary password 72 hours (§5).
+    reset_link_ttl_secs: 86400
+    temp_password_ttl_secs: 259200
+    # A legacy password shorter than 12 characters yields only a
+    # password_change session (§6).
+    force_change_short_legacy_password: true
   # How uploaded images are optimised (ADR 0015 §7, ADR 0033).
   # `pixel_budget`: the largest pixel count decoded for one image, 50
   # megapixels (ADR 0015 §7). `png`: the oxipng preset by image size

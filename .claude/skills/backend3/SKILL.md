@@ -199,7 +199,15 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    opens a session itself: on a route outside the table, or a `Public` one,
    it answers `500`. Never take Loco's `JWT` or `JWTWithUser` in an admin
    handler: they skip these checks. A request test covers the route's `401`
-   without a session and its `403` (recipe 10).
+   without a session and its `403` (recipe 10). The guard also renews a full
+   session in the session cookie that has less than an hour left (the
+   passive sliding refresh, ADR 0006 §1), on the handler's answer: a
+   handler that ends or replaces the session (logout, a password or
+   two-factor change) sets the `__Host-admin_session` cookie itself, with
+   `domain::session_cookie`, and the guard then adds none beside it, so the
+   handler's cookie is the answer's only one. `session.carrier` says whether
+   the token came in the cookie or as a Bearer token, which is never
+   refreshed (ADR 0006 §3).
 8. **Public endpoint**, if the feature has one: recipe 3.
 9. **Admin screen** under `admin/src/`: resources through backend3's own data
    provider in `admin/src/data-provider/` (never `ra-data-json-server` or
@@ -781,14 +789,24 @@ interface is `Clock` in `src/domain/clock.rs`.
    (loco-rs 1.2.0 `src/auth/jwt.rs`). A handler that wants a token to end at
    an instant `target` passes `target - clock(&ctx)?.now()` as the lifetime;
    in production the app clock is the system clock, so `exp` is `target`, to
-   the second. Under a `TestClock` the lifetime is still exact, but `exp` is
-   the wall clock plus it, and moving the test clock neither ages nor
-   expires a token. Session tests (ADR 0006 section 1) assert exactly what
+   the second, or one second later when the system clock's second turns
+   between the app clock's reading and Loco's. A deadline that `exp` must
+   never pass, such as the absolute session limit, counts the lifetime from
+   "now" rounded up instead (`domain::session::renewal`), so that it may end
+   up to one second early but never late. Under a `TestClock` the lifetime
+   is still exact, but `exp` is the wall clock plus it, and moving the test
+   clock neither ages nor expires a token. Session tests (ADR 0006 section 1) assert exactly what
    the handler derives from the app clock (the lifetime, and values computed
    from it such as a cookie's `Max-Age`), and check `exp` only against that
    lifetime added to wall-clock readings taken just before and after the
    request. These readings and the boot test of the system clock are the
-   only reads of the wall clock in tests.
+   only reads of the wall clock in tests. To test a rule that compares a
+   token's `exp` or `auth_time` with "now" (the sliding refresh), place the
+   app clock relative to a real token instead of ageing the token:
+   `tests/support/session_refresh::place_session` signs it, reads the `exp`
+   Loco wrote and sets the `TestClock` to that `exp` minus the time left, so
+   Loco still accepts the token while the rule sees exactly the remaining
+   time and the `auth_time` the test chose (`tests/requests/auth_refresh.rs`).
 5. **Generated code.** The first `cargo loco db entities` for a table with
    `updated_at` writes `src/models/<name>.rs` with a `before_save` that sets
    `updated_at` to `chrono::Utc::now()` on an update that left it unchanged
@@ -1046,7 +1064,14 @@ outside the table; its documentation lists what a text check cannot see.
    then an account that does not meet the requirement, `403 forbidden`,
    before the handler reads its body. A list the account may not see is
    therefore a `403`, never `[]`. Every answer carries
-   `Cache-Control: no-store`.
+   `Cache-Control: no-store`. A full `admin` session in the session cookie
+   with less than 3,600 s left gets a renewed cookie on whatever the guard
+   answers, the handler's answer or the `403` (the passive refresh,
+   ADR 0006 §1), unless the handler set the session cookie itself; a new
+   route gets it without further work, and so does a handler's own
+   record-level `403` (step 2). The maintainer kept this as built on
+   2026-11-15: "Keep as built: every guarded answer, the 403 included"
+   (research: DECISIONS R35 (D156)).
 4. **Test** the route in `tests/requests/<name>.rs`: its `401` without a
    session, its `403` for an account that lacks the requirement (an
    account with one role or one extra grant, `tests/support/admin_probe.rs`

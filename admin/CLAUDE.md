@@ -101,6 +101,15 @@ ADR 0005 (bindings) before changing anything here.
   nothing to end. A sign-out that the server did not confirm (`204`, or
   `401` for a session that had ended already) keeps the user signed in and
   says so; it never looks done while the cookie still holds a session.
+  The signed-in pages keep the session alive (ADR 0006 §1): the layout
+  mounts `src/auth/SessionKeepAlive.tsx`, whose tracker
+  (`src/auth/activity-refresh.ts`) calls the auth provider's
+  `refreshSession` (`POST /auth/refresh`) on typing or clicking, at most
+  every 10 minutes; `main.tsx` passes it `window` and `Date.now`. A failed
+  refresh never signs out: the next real request's `401` does. The tracker
+  starts no call while one is open, so `refreshSession` gives up after
+  `REFRESH_TIMEOUT_MS` (30 seconds): a stalled request must never stop the
+  refresh for good (`src/test/hanging-fetch.ts` stands in for one).
 - **Clean room (ADR 0011 §8, ADR 0018 §3.4).** Never install an
   `@react-admin/` package (react-admin's Enterprise Edition), and never read
   or copy Enterprise source, types, styles or examples. `npm run clean-room`
