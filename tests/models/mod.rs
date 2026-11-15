@@ -3,6 +3,7 @@
 mod activity_log;
 mod grants;
 mod job_queue;
+mod legacy_passwords;
 mod media;
 mod owned_files;
 mod revisions;

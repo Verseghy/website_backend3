@@ -236,6 +236,23 @@ sha2 = { version = "0.11", default-features = false }
 # trailing bits), and the 0.23 line is already in the build through lettre
 # (loco-rs 1.2.0).
 base64 = "0.23"
+# The legacy password hashes (ADR 0006 §4): the importer copies each Laravel
+# `$2y$10$` hash unchanged, and the sign-in verifies a `$2y$`, `$2a$` or
+# `$2b$` hash once with this crate, the one iam uses, then stores an Argon2id
+# hash in its place (src/models/users.rs). loco-rs hashes with Argon2id only
+# and has no bcrypt verifier. MIT; it adds itself and blowfish 0.10 (MIT OR
+# Apache-2.0) to the build: its other dependencies (cipher 0.5, getrandom
+# 0.4, base64 0.23, subtle, zeroize, byteorder) are already there. Default
+# features (`std`, `zeroize`): `verify` needs `std` (or `alloc`), `std` also
+# gives `hash` its random salt, with which the tests make legacy fixtures
+# from invented passwords at run time (ADR 0006, follow-up work), and
+# `zeroize` wipes the copy of the password that bcrypt pads.
+bcrypt = "0.19.3"
+# Unicode normalisation, for the length of a password as ADR 0006 §6 counts
+# it: Unicode scalar values after NFC (src/domain/password_hash.rs). The
+# sign-in measures a legacy password with it. sqlx-postgres already builds it
+# through stringprep, so it adds no crate.
+unicode-normalization = "0.1"
 # DTO-to-TypeScript bindings for the admin API (ADR 0005 §2): major 12 with
 # chrono-impl and serde-compat, as in Loco's own template.
 ts-rs = { version = "12", features = ["chrono-impl", "serde-compat"] }
@@ -473,7 +490,11 @@ ego-tree = { workspace = true }
 cssparser = { workspace = true }
 ts-rs = { workspace = true }
 utoipa = { workspace = true }
-chrono = { workspace = true }
+# `serde`: the admin API sends an instant as chrono writes it, RFC 3339 in
+# UTC (ADR 0005 §3), such as the `expires_at` of a script's Bearer token
+# (dtos::admin::auth::TokenResponse). loco-rs 1.2.0 already turns the
+# feature on, so it adds no crate, but the DTOs say that they need it.
+chrono = { workspace = true, features = ["serde"] }
 chrono-tz = { workspace = true }
 prometheus-client = { workspace = true }
 aes-gcm = { workspace = true }
@@ -482,6 +503,8 @@ hmac = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
+bcrypt = { workspace = true }
+unicode-normalization = { workspace = true }
 mozjpeg = { workspace = true }
 oxipng = { workspace = true }
 miniz_oxide = { workspace = true }

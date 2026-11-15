@@ -6,20 +6,28 @@
 //! the key the caller passes in, and the code check itself is
 //! [`crate::domain::totp`].
 //!
-//! Passwords are hashed and verified only through `loco_rs::hash`, which uses
+//! Passwords are hashed and verified through `loco_rs::hash`, which uses
 //! Argon2id with the argon2 crate's default parameters (ADR 0006 §4). The
-//! pure decision of which verifier a stored value needs is
-//! [`crate::domain::password_hash`]; this module performs the verification.
+//! one exception is the legacy bcrypt hash that the importer copies from
+//! Laravel (`$2y$10$...`, ADR 0017): loco-rs has no bcrypt verifier, so
+//! [`check_stored_password`] verifies it with the `bcrypt` crate, and a
+//! sign-in that it lets in stores an Argon2id hash of the same password in
+//! its place, on the sign-in's own `UPDATE` ([`AcceptedSignIn`],
+//! [`ActiveModel::record_sign_in`]). The pure decision of which verifier a
+//! stored value needs is [`crate::domain::password_hash`]; this module
+//! performs the verification.
 //!
-//! A failed check that has no Argon2id hash to verify (an account without a
-//! password, pending or anonymised; a legacy bcrypt hash; a value of an
-//! unknown kind; an e-mail address that matches no account) verifies the
-//! constant [`DUMMY_PASSWORD_HASH`] instead. That costs one Argon2id
-//! verification with the default parameters, as a wrong password does for a
-//! hash that `hash_password` wrote, so sign-in can answer every failure in
-//! about the same time (ADR 0006 §4, "Same answer for every failure"). A
-//! stored Argon2id value is verified with its own parameters, and backend3
-//! stores no Argon2id value other than `hash_password` output.
+//! A failed check that has no hash to verify (an account without a
+//! password, pending or anonymised; a value of an unknown kind; a bcrypt
+//! value that the bcrypt crate cannot read; an e-mail address that matches
+//! no account) verifies the constant [`DUMMY_PASSWORD_HASH`] instead. That
+//! costs one Argon2id verification with the default parameters, as a wrong
+//! password does for a hash that `hash_password` wrote (ADR 0006 §4, "Same
+//! answer for every failure"). A stored Argon2id value is verified with its own
+//! parameters, and backend3 stores no Argon2id value other than
+//! `hash_password` output. A wrong password for a legacy bcrypt hash costs
+//! that hash's own bcrypt verification, at the cost the hash carries (10
+//! for every imported hash).
 //!
 //! Account events (sign-in, rehash, `token_version` and the two-factor
 //! columns) are not content updates: they write no revision and leave
@@ -35,10 +43,12 @@
 //! Sign-in ([`Model::authenticate`]) and the session token
 //! ([`Model::generate_session_token`]) live here too, with the activity
 //! entries that the sign-in and the logout write (ADR 0011 §5): a completed
-//! sign-in sets `last_login_at` and writes `login`
-//! ([`ActiveModel::record_sign_in`]), a failed sign-in of a known account
-//! writes `login_failed` ([`record_failed_sign_in`]), and a logout writes
-//! `logout` ([`ActiveModel::log_out`]). Each entry is about the account
+//! sign-in sets `last_login_at`, replaces a legacy bcrypt hash, and writes
+//! `login` ([`ActiveModel::record_sign_in`]); the rehash writes no entry of
+//! its own, because ADR 0011 §5 has no such action and the `login` entry
+//! already records the sign-in that made it. A failed sign-in of a known
+//! account writes `login_failed` ([`record_failed_sign_in`]), and a logout
+//! writes `logout` ([`ActiveModel::log_out`]). Each entry is about the account
 //! (`entity` `users/<id>`, never a label: ADR 0011 §5 keeps names of people
 //! out of the log) and holds the request id and the client address of the
 //! request ([`RequestContext`]). The entries of a completed sign-in and of a
@@ -77,7 +87,7 @@ use crate::domain::{
     activity::{Action, Actor},
     authz::AccountGrants,
     email_address,
-    password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind},
+    password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind, legacy_password_must_change},
     seed::SeedAccount,
     session::{AUTH_TIME_CLAIM, AccountState, SCOPE_CLAIM, SessionScope, TOKEN_VERSION_CLAIM},
     totp::TotpSecret,
@@ -190,40 +200,104 @@ pub fn hash_password(password: &str) -> ModelResult<String> {
     hash::hash_password(password).map_err(ModelError::wrap)
 }
 
-/// Whether `password` matches the stored hash `stored`.
+/// What [`check_stored_password`] found for a password and a stored hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PasswordCheck {
+    /// The password matches the stored Argon2id hash.
+    Matches,
+    /// The password matches the stored legacy bcrypt hash (`$2y$`, `$2a$`
+    /// or `$2b$`). A sign-in that this lets in replaces the hash with an
+    /// Argon2id hash of the same password (ADR 0006 §4).
+    MatchesLegacy,
+    /// The password matches nothing that is stored: it is wrong, the
+    /// account has no password, or the stored value is not a hash that
+    /// backend3 verifies.
+    Fails,
+}
+
+impl PasswordCheck {
+    /// Whether the password matched, whatever kind of hash it matched.
+    #[must_use]
+    pub fn matched(self) -> bool {
+        self != Self::Fails
+    }
+}
+
+/// Checks `password` against the stored hash `stored`, with the verifier
+/// that the hash's kind needs ([`password_hash::classify`]).
 ///
 /// - `stored`: the account's `users.password_hash`, or `None` for an account
 ///   that has no password (pending, or anonymised).
 /// - `password`: the plain-text password to check.
 ///
-/// Only an Argon2id hash can match, and it is verified with the parameters
-/// it carries. The other cases return `false` after verifying
-/// [`DUMMY_PASSWORD_HASH`], so they cost what a wrong password costs for a
+/// - An Argon2id hash is verified with `loco_rs::hash` and the parameters
+///   it carries: [`PasswordCheck::Matches`] or [`PasswordCheck::Fails`].
+/// - A legacy bcrypt hash is verified with the `bcrypt` crate and the cost
+///   it carries: [`PasswordCheck::MatchesLegacy`] or
+///   [`PasswordCheck::Fails`]. bcrypt reads at most the first 72 bytes of a
+///   password, and the crate's `verify` truncates a longer one there, as
+///   Laravel's `password_verify` did when the hash was made, so a legacy
+///   password longer than 72 bytes still verifies (ADR 0006 §4: the people
+///   who sign in today keep their password).
+///
+/// Every other case is [`PasswordCheck::Fails`] after verifying
+/// [`DUMMY_PASSWORD_HASH`], so it costs what a wrong password costs for a
 /// `hash_password` hash:
 ///
 /// - `None`;
 /// - a value of an unknown kind, including the other Argon2 variants, which
-///   the verifier would otherwise accept;
-/// - a legacy bcrypt hash. backend3 verifies those once, with the bcrypt
-///   crate, and immediately stores an Argon2id hash instead (ADR 0006 §4);
-///   that path writes to the account, so it is its own model method, added
-///   with the bcrypt verifier. Until then a bcrypt hash never matches here.
+///   the Argon2 verifier would otherwise accept;
+/// - a value with a bcrypt prefix that the bcrypt crate cannot read (a cost
+///   outside 4 to 31, a salt or hash of the wrong length or alphabet).
 ///
 /// A malformed `$argon2id$` value never matches either, but it fails without
 /// the Argon2 work, because only the verifier parses the PHC string. Nothing
 /// stores one: the only Argon2id values backend3 writes are
 /// [`hash_password`] output.
+///
+/// It writes nothing: the sign-in stores the rehash of a legacy password
+/// ([`Model::authenticate`], [`ActiveModel::record_sign_in`]).
 #[must_use]
-pub fn verify_stored_password(stored: Option<&str>, password: &str) -> bool {
-    match stored {
-        Some(stored) if password_hash::classify(stored) == PasswordHashKind::Argon2id => {
-            hash::verify_password(password, stored)
+pub fn check_stored_password(stored: Option<&str>, password: &str) -> PasswordCheck {
+    let Some(stored) = stored else {
+        verify_dummy_password(password);
+        return PasswordCheck::Fails;
+    };
+    match password_hash::classify(stored) {
+        PasswordHashKind::Argon2id => {
+            if hash::verify_password(password, stored) {
+                PasswordCheck::Matches
+            } else {
+                PasswordCheck::Fails
+            }
         }
-        _ => {
+        PasswordHashKind::Bcrypt => match bcrypt::verify(password, stored) {
+            Ok(true) => PasswordCheck::MatchesLegacy,
+            Ok(false) => PasswordCheck::Fails,
+            // The crate refuses the value before any bcrypt work, so the
+            // dummy pays for it, as for a value of an unknown kind.
+            Err(_) => {
+                verify_dummy_password(password);
+                PasswordCheck::Fails
+            }
+        },
+        PasswordHashKind::Unknown => {
             verify_dummy_password(password);
-            false
+            PasswordCheck::Fails
         }
     }
+}
+
+/// Whether `password` matches the stored hash `stored`, an Argon2id hash or
+/// a legacy bcrypt one: [`check_stored_password`] without the kind, with the
+/// same cost on every failure.
+///
+/// - `stored`: the account's `users.password_hash`, or `None` for an account
+///   that has no password (pending, or anonymised).
+/// - `password`: the plain-text password to check.
+#[must_use]
+pub fn verify_stored_password(stored: Option<&str>, password: &str) -> bool {
+    check_stored_password(stored, password).matched()
 }
 
 /// Why [`ActiveModel::revoke_sessions`] refused an account before it wrote
@@ -270,9 +344,10 @@ pub enum RecordSignInError {
     TokenVersionNotStored,
 }
 
-/// What [`Model::authenticate`] found for a browser sign-in (ADR 0006 §4).
+/// What [`Model::authenticate`] found for a password sign-in, the browser's
+/// (`/auth/login`) or a script's (`/auth/token`) (ADR 0006 §3, §4).
 ///
-/// The sign-in answers every outcome but [`SignInOutcome::Accepted`] with
+/// Both sign-ins answer every outcome but [`SignInOutcome::Accepted`] with
 /// the same `401`; the outcomes differ only in what the activity log records
 /// (ADR 0011 §5): a failed sign-in of a known account writes `login_failed`,
 /// and one that names no known account writes nothing (research: DECISIONS
@@ -284,12 +359,13 @@ pub enum SignInOutcome {
     /// The password is right and the account may start a full `admin`
     /// session. Boxed: a whole account row is some 300 bytes, and the other
     /// outcomes are an id or nothing (clippy's `large_enum_variant`).
-    Accepted(Box<Model>),
+    Accepted(Box<AcceptedSignIn>),
     /// A live account has the address, but the sign-in failed: the password
     /// is wrong, the account has none yet, it is inactive, or, until the
     /// two-factor step and the forced password change of ADR 0006 §4 exist,
-    /// it has two-factor on or must change its password (research:
-    /// DECISIONS R15 (D74)).
+    /// it has two-factor on, must change its password, or signed in with a
+    /// legacy password that ADR 0006 §6 sends to the password change
+    /// (research: DECISIONS R15 (D74); [`legacy_password_must_change`]).
     Refused {
         /// The account's id, for its `login_failed` entry
         /// ([`record_failed_sign_in`]).
@@ -308,9 +384,45 @@ impl SignInOutcome {
     #[must_use]
     pub fn accepted(self) -> Option<Model> {
         match self {
-            Self::Accepted(user) => Some(*user),
+            Self::Accepted(sign_in) => Some(sign_in.user),
             Self::Refused { .. } | Self::UnknownAccount => None,
         }
+    }
+}
+
+/// A sign-in that [`Model::authenticate`] accepted: the account as the
+/// sign-in checked it, and the new hash that replaces a legacy one.
+// `Debug` prints both hashes, as `Model`'s own does: for test assertions
+// only, never for logging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedSignIn {
+    /// The account, as read and checked by the sign-in. Its
+    /// `token_version` is the `tv` of the token that the sign-in issues.
+    pub user: Model,
+    /// For an account that still had its legacy bcrypt hash, the Argon2id
+    /// hash of the password that matched it ([`hash_password`], a fresh
+    /// salt), which the sign-in stores in its place (ADR 0006 §4); `None`
+    /// for an account that already has an Argon2id hash.
+    pub rehashed_password: Option<String>,
+}
+
+impl IntoActiveModel<ActiveModel> for AcceptedSignIn {
+    /// The active model that [`ActiveModel::record_sign_in`] takes for this
+    /// sign-in: the checked account, every column unchanged but
+    /// `password_hash`, which holds the rehash of a legacy password.
+    ///
+    /// `record_sign_in` writes the rehash in its one `UPDATE`, which matches
+    /// the row only while it still has the `token_version` that the sign-in
+    /// checked. A password that an `edit users` holder replaced in the
+    /// meantime ended every session, and so moved the version (ADR 0006 §2):
+    /// such a sign-in writes nothing and fails, and the new password is never
+    /// overwritten with the old one's rehash.
+    fn into_active_model(self) -> ActiveModel {
+        let mut active = self.user.into_active_model();
+        if let Some(rehashed) = self.rehashed_password {
+            active.password_hash = ActiveValue::Set(Some(rehashed));
+        }
+        active
     }
 }
 
@@ -391,8 +503,9 @@ pub async fn record_failed_sign_in(
 }
 
 impl ActiveModel {
-    /// Records a completed sign-in on `txn`: sets `last_login_at` and writes
-    /// the `login` entry, and returns the account as stored afterwards, or
+    /// Records a completed sign-in on `txn`: sets `last_login_at`, stores the
+    /// rehash of a legacy password, and writes the `login` entry, and returns
+    /// the account as stored afterwards, or
     /// `None` when the account no longer may start the session that the
     /// sign-in issues (ADR 0006 §1, §2, §4, §7; ADR 0011 §5).
     ///
@@ -402,9 +515,10 @@ impl ActiveModel {
     /// - `request`: the request id and the client address of the sign-in.
     ///
     /// Call it only when the full `admin`-scope session is issued
-    /// (ADR 0006 §4, "`last_login_at`"): a session of another scope is not a
-    /// completed sign-in. Build the active model from the row that the
-    /// sign-in checked (`into_active_model`), whose `token_version` is the
+    /// (ADR 0006 §4, "`last_login_at`"), by the browser's sign-in or by a
+    /// script's (`/auth/token`, ADR 0006 §3): a session of another scope is
+    /// not a completed sign-in. Build the active model from the
+    /// [`AcceptedSignIn`] (`into_active_model`), whose `token_version` is the
     /// `tv` of the token the sign-in issues.
     ///
     /// **The account must still be the one that was checked.** The `UPDATE`
@@ -436,11 +550,14 @@ impl ActiveModel {
     /// belépés".
     ///
     /// The changes that this active model holds, if any, are written in the
-    /// same `UPDATE`, as [`ActiveModel::revoke_sessions`] does. It writes
-    /// nothing else: no revision, and neither `updated_at` nor `updated_by`
-    /// unless the caller set them, because a sign-in is an account event,
-    /// not a content update (ADR 0011 §4). The `UPDATE` goes past the
-    /// model's save hooks.
+    /// same `UPDATE`, as [`ActiveModel::revoke_sessions`] does: the Argon2id
+    /// hash that replaces a legacy bcrypt hash (ADR 0006 §4), which the
+    /// active model of an [`AcceptedSignIn`] holds, so the rehash is stored
+    /// exactly when the sign-in is, and only for the account version that was
+    /// checked. It writes nothing else: no revision, and neither `updated_at`
+    /// nor `updated_by` unless the caller set them, because a sign-in and its
+    /// rehash are account events, not a content update (ADR 0011 §4). The
+    /// `UPDATE` goes past the model's save hooks.
     ///
     /// The entry's actor is the account itself, which has just signed in,
     /// and its record is the account (`users/<id>`).
@@ -697,52 +814,76 @@ impl Model {
             .ok_or(ModelError::EntityNotFound)
     }
 
-    /// Whether `password` matches this account's stored password, with the
-    /// equal-cost failure paths of [`verify_stored_password`].
+    /// Whether `password` matches this account's stored password, an
+    /// Argon2id hash or a legacy bcrypt one, with the equal-cost failure
+    /// paths of [`check_stored_password`].
     ///
     /// - `password`: the plain-text password to check.
     ///
     /// The account's state (active, trashed) is not checked here; sign-in
     /// checks it after the password, so a disabled account costs the same.
+    /// Nothing is rehashed: only a sign-in replaces a legacy hash.
     #[must_use]
     pub fn verify_password(&self, password: &str) -> bool {
         verify_stored_password(self.password_hash.as_deref(), password)
     }
 
-    /// Checks a browser sign-in and returns its [`SignInOutcome`]: the
-    /// account that may start an admin session, or why the sign-in failed
-    /// (ADR 0006 §4).
+    /// Checks a password sign-in, the browser's or a script's, and returns
+    /// its [`SignInOutcome`]: the account that may start a full `admin`
+    /// session, or why the sign-in failed (ADR 0006 §3, §4).
     ///
     /// - `db`: the connection or transaction to query.
     /// - `email`: the address as the user typed it, matched without regard
     ///   to case ([`Model::find_live_by_email`]).
     /// - `password`: the password as typed.
+    /// - `force_change_short_legacy_password`:
+    ///   `settings.admin_auth.force_change_short_legacy_password`
+    ///   (ADR 0006 §6, §8), passed in by the caller (ADR 0008 rule 2).
     ///
-    /// Every failure costs one Argon2id verification, so the time does not
-    /// tell them apart ("Same answer for every failure"): an unknown, trashed
-    /// or anonymised address, or one that no account can hold, verifies
-    /// [`DUMMY_PASSWORD_HASH`] ([`SignInOutcome::UnknownAccount`]), and the
-    /// account's state is checked only after its own password. A sign-in of
-    /// a live account fails ([`SignInOutcome::Refused`]) when the password is
-    /// wrong, when the account has none, when it is inactive, and, until the
-    /// two-factor step and the forced password change of ADR 0006 §4 exist,
-    /// when it has two-factor turned on or must change its password: those
-    /// accounts must never get a full `admin` session from the password
-    /// alone, and they get the same failure as a wrong password until then
-    /// (the maintainer's answer of 2026-10-25, research: DECISIONS R15
-    /// (D74)).
+    /// Every failure costs one password verification ("Same answer for every
+    /// failure"): an unknown, trashed or anonymised address, or one that no
+    /// account can hold, verifies [`DUMMY_PASSWORD_HASH`]
+    /// ([`SignInOutcome::UnknownAccount`]), and the account's state is
+    /// checked only after its own password ([`check_stored_password`]), so a
+    /// refused account costs what a wrong password for its stored hash
+    /// costs. A sign-in of a live account fails
+    /// ([`SignInOutcome::Refused`]) when the password is wrong, when the
+    /// account has none, when it is inactive, and, until the two-factor step
+    /// and the forced password change of ADR 0006 §4 exist, when it has
+    /// two-factor turned on, must change its password, or signed in with a
+    /// legacy password that [`legacy_password_must_change`] sends to the
+    /// password change (ADR 0006 §6: shorter than 12 characters while the
+    /// setting is on). Those accounts must never get a full `admin` session
+    /// from the password alone, and they get the same failure as a wrong
+    /// password until then (the maintainer's answer of 2026-10-25, research:
+    /// DECISIONS R15 (D74), which this reading extends to the short legacy
+    /// password); such an account keeps its bcrypt hash, so the rule still
+    /// applies at its next sign-in.
+    ///
+    /// An accepted sign-in of an account that still has its legacy bcrypt
+    /// hash carries the Argon2id hash of the password
+    /// ([`AcceptedSignIn::rehashed_password`]), made here, where the
+    /// password is at hand; [`ActiveModel::record_sign_in`] stores it with
+    /// the sign-in (ADR 0006 §4: verified once, "then immediately" replaced).
     ///
     /// It writes nothing: the caller records the outcome
     /// ([`ActiveModel::record_sign_in`], [`record_failed_sign_in`]).
     ///
-    /// The Argon2 work runs on the request's task, as in Loco's own sign-in
-    /// handler.
+    /// The Argon2 and bcrypt work runs on the request's task, as in Loco's
+    /// own sign-in handler.
     ///
     /// # Errors
     ///
-    /// [`ModelError::DbErr`] when the query fails. A failed sign-in is an
-    /// `Ok` outcome, never an error.
-    pub async fn authenticate<C>(db: &C, email: &str, password: &str) -> ModelResult<SignInOutcome>
+    /// [`ModelError::DbErr`] when the query fails, and [`ModelError::Any`]
+    /// when the rehash of a legacy password cannot be made, which with the
+    /// hasher's default parameters only happens if the system random number
+    /// generator fails. A failed sign-in is an `Ok` outcome, never an error.
+    pub async fn authenticate<C>(
+        db: &C,
+        email: &str,
+        password: &str,
+        force_change_short_legacy_password: bool,
+    ) -> ModelResult<SignInOutcome>
     where
         C: ConnectionTrait,
     {
@@ -757,16 +898,28 @@ impl Model {
         // The password first, before any state check could end the
         // evaluation, so an account that may not sign in costs what a wrong
         // password costs.
-        let password_matches = user.verify_password(password);
-        let may_sign_in =
-            user.active && user.totp_enabled_at.is_none() && !user.must_change_password;
-        Ok(if password_matches && may_sign_in {
-            SignInOutcome::Accepted(Box::new(user))
-        } else {
-            SignInOutcome::Refused {
+        let check = check_stored_password(user.password_hash.as_deref(), password);
+        let legacy = check == PasswordCheck::MatchesLegacy;
+        let short_legacy =
+            legacy && legacy_password_must_change(password, force_change_short_legacy_password);
+        let may_sign_in = user.active
+            && user.totp_enabled_at.is_none()
+            && !user.must_change_password
+            && !short_legacy;
+        if !(check.matched() && may_sign_in) {
+            return Ok(SignInOutcome::Refused {
                 account_id: user.id,
-            }
-        })
+            });
+        }
+        let rehashed_password = if legacy {
+            Some(hash_password(password)?)
+        } else {
+            None
+        };
+        Ok(SignInOutcome::Accepted(Box::new(AcceptedSignIn {
+            user,
+            rehashed_password,
+        })))
     }
 
     /// Creates the seed account `account`, with its roles, unless an account

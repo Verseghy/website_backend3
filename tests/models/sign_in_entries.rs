@@ -18,7 +18,7 @@ use backend3::{
     domain::activity::{Action, Actor, EntryError},
     models::{
         activity_log::{self, RequestContext},
-        users::{self, ActiveModel, Model, RecordSignInError, SignInOutcome},
+        users::{self, AcceptedSignIn, ActiveModel, Model, RecordSignInError, SignInOutcome},
     },
 };
 use loco_rs::model::ModelError;
@@ -174,14 +174,17 @@ async fn authenticate_tells_a_known_account_from_an_unknown_address() {
         let outcome = |email: &'static str, password: &'static str| {
             let db = db.clone();
             async move {
-                Model::authenticate(&db, email, password)
+                Model::authenticate(&db, email, password, true)
                     .await
                     .expect("query")
             }
         };
         assert_eq!(
             outcome("ELO@example.test", PASSWORD).await,
-            SignInOutcome::Accepted(Box::new(live.clone()))
+            SignInOutcome::Accepted(Box::new(AcceptedSignIn {
+                user: live.clone(),
+                rehashed_password: None,
+            }))
         );
         for (case, email, password, user) in [
             ("wrong password", "elo@example.test", "rossz", &live),
@@ -216,7 +219,11 @@ async fn authenticate_tells_a_known_account_from_an_unknown_address() {
         }
         // Only `Accepted` hands out the account.
         assert_eq!(
-            SignInOutcome::Accepted(Box::new(live.clone())).accepted(),
+            SignInOutcome::Accepted(Box::new(AcceptedSignIn {
+                user: live.clone(),
+                rehashed_password: None,
+            }))
+            .accepted(),
             Some(live.clone())
         );
         assert_eq!(

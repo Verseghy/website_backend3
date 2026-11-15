@@ -1139,7 +1139,11 @@ outside the table; its documentation lists what a text check cannot see.
    gives them), and its answers for one that meets it. A test request that
    writes with the session cookie also sends `Origin: ADMIN_ORIGIN`
    (`tests/support`, the test configuration's admin origin), as the admin
-   UI does; without it the guard answers `403 origin_mismatch` first. The
+   UI does; without it the guard answers `403 origin_mismatch` first. A
+   test of what a script may do signs in at `POST /api/admin/auth/token`
+   instead and sends the token it answers as a Bearer header, without
+   `Origin` and without a cookie, as a script does (ADR 0044 §2;
+   `tests/requests/auth_token.rs`). The
    table's own test (`tests/requests/admin_routes.rs`) then sees the route,
    and so does every other check that walks the table.
 5. **The admin** gets the refusal as an envelope: a data-provider handler

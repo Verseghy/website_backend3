@@ -1,4 +1,5 @@
 //! The browser sign-in, `POST /api/admin/auth/login` (ADR 0006 §4), the
+//! scripts' sign-in, `POST /api/admin/auth/token` (ADR 0006 §3), the
 //! signed-in account, `GET /api/admin/auth/me` (ADR 0007 §7), and logout,
 //! `POST /api/admin/auth/logout` (ADR 0006 §2).
 //!
@@ -9,6 +10,35 @@
 //! `401 invalid_credentials` envelope, sets no cookie and costs one password
 //! verification ([`users::Model::authenticate`]): a wrong password, an
 //! unknown address, an account that may not sign in.
+//!
+//! A script signs in at `/auth/token` with the same `{email, password}` and
+//! gets `200 {token, expires_at}`: a full `admin` session token for its
+//! `Authorization: Bearer` header, which it never gets from the browser
+//! sign-in, and when that token expires. No cookie is set. The token is the
+//! session token of the browser sign-in in every other respect: the same
+//! two-hour lifetime, the same `tv` check, the same permission checks, and
+//! never a `password_change` or `mfa` token. It is never refreshed, so the
+//! script signs in again (ADR 0006 §3; the explicit refresh answers it `204`
+//! without a cookie, research: DECISIONS R35 (D154)). Its refusals are the
+//! browser sign-in's, byte for byte: the one `401` for every credential
+//! failure, the `422` and the `413`. Requests with the Bearer token are
+//! exempt from the `Origin` check of cookie writes, as long as they carry no
+//! credential cookie (ADR 0044 §2 and its reading 1, research: DECISIONS R35
+//! (D151)), so a script needs no `Origin` header. An account
+//! that has two-factor on or must change its password is refused like a wrong
+//! password until the token's TOTP code and the `password_change_required`
+//! answer of ADR 0006 §3 exist (research: DECISIONS R15 (D74)).
+//!
+//! Both sign-ins check the password the same way. A legacy bcrypt hash
+//! (`$2y$`, `$2a$`, `$2b$`), which the importer copies unchanged, is
+//! verified with the bcrypt crate and, when the sign-in succeeds, replaced
+//! by an Argon2id hash of the same password in the sign-in's own `UPDATE`:
+//! an account event, so no revision and no change of `updated_at`
+//! (ADR 0006 §4, ADR 0011 §4). The next sign-in verifies the Argon2id hash.
+//! A legacy password shorter than 12 characters opens no session while
+//! `admin_auth.force_change_short_legacy_password` is on, and keeps its
+//! hash (ADR 0006 §6; [`users::Model::authenticate`] says why). The setting
+//! comes from [`SignInRules`], which `App::after_context` stores.
 //!
 //! A body that is not a JSON `{email, password}` is not a credential
 //! failure: it answers `422 invalid_body`, or `413 body_too_large` above the
@@ -48,12 +78,16 @@
 //! ([`ClientContext`]), about the account, and without touching `updated_at`
 //! or writing a revision (ADR 0011 §4):
 //!
-//! - a sign-in that issues the full `admin` session sets `last_login_at` and
-//!   writes `login`, on one transaction with nothing else in it
-//!   ([`users::ActiveModel::record_sign_in`]); if either write fails, both
-//!   roll back and the answer is a `500` without the cookie. An account that
-//!   was deactivated, trashed or had its sessions ended while its password
-//!   was being verified gets no session: the sign-in fails like any other;
+//! - a sign-in that issues the full `admin` session, the browser's or a
+//!   script's, sets `last_login_at`, stores the rehash of a legacy password
+//!   and writes `login`, on one transaction with nothing else in it
+//!   ([`users::ActiveModel::record_sign_in`]); if a write fails, all roll
+//!   back and the answer is a `500` without the cookie or the token. A
+//!   script's sign-in is a sign-in like the browser's: it shows in
+//!   `last_login_at`, by which stale accounts are found (ADR 0006 §7). An
+//!   account that was deactivated, trashed or had its sessions ended while
+//!   its password was being verified gets no session and no rehash: the
+//!   sign-in fails like any other;
 //! - a failed sign-in of an account that the sign-in finds writes
 //!   `login_failed` ([`users::record_failed_sign_in`]) on a connection of its
 //!   own, never on a transaction of the request, so that no rollback of the
@@ -95,7 +129,8 @@ use axum::{
     extract::rejection::JsonRejection,
     http::{StatusCode, header::SET_COOKIE},
 };
-use loco_rs::prelude::*;
+use chrono::{DateTime, Utc};
+use loco_rs::{auth::jwt::JWT, config::JWT as JwtConfig, prelude::*};
 
 use super::{
     client_context::ClientContext,
@@ -112,20 +147,66 @@ use crate::{
         session_cookie::{cleared_session_cookie, session_cookie},
     },
     dtos::admin::{
-        auth::{LoginRequest, LoginResponse, LoginStep, MeResponse},
+        auth::{LoginRequest, LoginResponse, LoginStep, MeResponse, TokenRequest, TokenResponse},
         error::ErrorCode,
     },
     models::{
         activity_log::RequestContext,
         users::{self, SignInOutcome},
     },
+    settings::Settings,
 };
+
+/// What the password sign-ins take from the settings: the legacy password
+/// rule of ADR 0006 §6, §8.
+///
+/// `App::after_context` builds it once from the validated settings and puts
+/// it into the shared store; the sign-ins read it with [`sign_in_rules`] and
+/// pass the value to [`users::Model::authenticate`] (ADR 0008 rules 2 and
+/// 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignInRules {
+    /// `settings.admin_auth.force_change_short_legacy_password`: a legacy
+    /// password shorter than 12 characters opens no full session.
+    pub force_change_short_legacy_password: bool,
+}
+
+impl SignInRules {
+    /// The rules of `settings`.
+    ///
+    /// - `settings`: the validated settings of the process.
+    #[must_use]
+    pub fn new(settings: &Settings) -> Self {
+        Self {
+            force_change_short_legacy_password: settings
+                .admin_auth
+                .force_change_short_legacy_password,
+        }
+    }
+}
+
+/// The sign-in rules of this app context.
+///
+/// - `ctx`: the request's app context.
+///
+/// # Errors
+///
+/// [`Error::Message`] when the context carries none: every context Loco
+/// builds has them (`App::after_context`), one built by hand does not.
+pub fn sign_in_rules(ctx: &AppContext) -> Result<SignInRules> {
+    ctx.shared_store.get::<SignInRules>().ok_or_else(|| {
+        Error::string(
+            "the sign-in rules are missing from the shared store; App::after_context registers \
+             them, so this context was not built by App::boot",
+        )
+    })
+}
 
 /// `POST /api/admin/auth/login`: signs in with an e-mail address and a
 /// password.
 ///
 /// - `ctx`: the application context; the handler takes the database, the app
-///   clock and the `auth.jwt` configuration from it.
+///   clock, the sign-in rules and the `auth.jwt` configuration from it.
 /// - `client`: the request id and the client address, for the activity
 ///   entry.
 /// - `body`: the JSON body, or why it could not be read.
@@ -134,14 +215,17 @@ use crate::{
 /// and one above the request body limit `413 body_too_large`, before any
 /// lookup (the module documentation says why). A credential failure answers
 /// `401 invalid_credentials`, after the `login_failed` entry of a known
-/// account ([`refuse_known_account`]). A success sets `last_login_at` and
-/// writes the `login` entry before it answers.
+/// account ([`refuse_known_account`]). A success sets `last_login_at`,
+/// replaces a legacy password hash and writes the `login` entry before it
+/// answers `{"step": "done"}` with the session cookie
+/// ([`sign_in_with_password`]).
 ///
 /// # Errors
 ///
 /// An internal error (`500`) when the sign-in succeeds but its writes fail
 /// (a refused `login` entry included), when the account lookup fails, when
-/// the context has no app clock or no `auth.jwt` section, or when the token
+/// the context has no app clock, no sign-in rules or no `auth.jwt` section,
+/// when the rehash of a legacy password cannot be made, or when the token
 /// or its cookie cannot be built (a secret that is not base64). A failed
 /// sign-in never answers `500` for its own entry: it answers the one `401`
 /// (the module documentation says why).
@@ -155,45 +239,191 @@ pub async fn login(
         Ok(Json(request)) => request,
         Err(rejection) => return Ok(json_rejection_response(&rejection)),
     };
-    let user = match users::Model::authenticate(&ctx.db, &request.email, &request.password).await? {
-        SignInOutcome::Accepted(user) => *user,
+    sign_in_with_password(
+        &ctx,
+        client,
+        &request.email,
+        &request.password,
+        |token, jwt| {
+            // The token travels only in the `HttpOnly` cookie, never in the
+            // body (ADR 0006 §3).
+            let cookie = session_cookie(token, jwt.expiration).map_err(Error::wrap)?;
+            format::render()
+                .header(SET_COOKIE, cookie)
+                .json(LoginResponse {
+                    step: LoginStep::Done,
+                })
+        },
+    )
+    .await
+}
+
+/// `POST /api/admin/auth/token`: signs a script in with an e-mail address
+/// and a password, and answers a Bearer token of a full `admin` session in
+/// the body (ADR 0006 §3).
+///
+/// - `ctx`: the application context; the handler takes the database, the app
+///   clock, the sign-in rules and the `auth.jwt` configuration from it.
+/// - `client`: the request id and the client address, for the activity
+///   entry.
+/// - `body`: the JSON body, or why it could not be read.
+///
+/// It checks and records the sign-in exactly as [`login`] does
+/// ([`sign_in_with_password`]), so every refusal is the browser sign-in's,
+/// byte for byte, and a success sets `last_login_at`, replaces a legacy
+/// password hash and writes the `login` entry. The answer is
+/// `200 {token, expires_at}` ([`TokenResponse`]) and sets no cookie: the
+/// token is for the script's `Authorization: Bearer` header, which the
+/// route table's guard never refreshes (ADR 0006 §3). `expires_at` is the
+/// token's own `exp`, read back from the token that Loco signed, because
+/// Loco counts the lifetime from the system time (recipe 7 step 4 of the
+/// project skill). The route is `Public`: a script holds no session yet,
+/// and without a credential cookie the `Origin` check does not apply to it
+/// (ADR 0044 §2).
+///
+/// # Errors
+///
+/// The errors of [`login`], and an internal error when the signed token
+/// cannot be read back for its `exp`, which only a defect can cause.
+#[debug_handler]
+pub async fn token(
+    State(ctx): State<AppContext>,
+    ClientContext(client): ClientContext,
+    body: Result<Json<TokenRequest>, JsonRejection>,
+) -> Result<Response> {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(rejection) => return Ok(json_rejection_response(&rejection)),
+    };
+    sign_in_with_password(
+        &ctx,
+        client,
+        &request.email,
+        &request.password,
+        |token, jwt| {
+            let expires_at = token_expiry(&jwt.secret, token)?;
+            format::json(TokenResponse {
+                token: token.to_owned(),
+                expires_at,
+            })
+        },
+    )
+    .await
+}
+
+/// Checks a password sign-in, signs a full `admin` session token, builds the
+/// answer with `answer` and records the sign-in; the one path of [`login`]
+/// and [`token`] (ADR 0006 §3, §4).
+///
+/// - `ctx`: the application context: the database, the app clock, the
+///   sign-in rules and the `auth.jwt` configuration.
+/// - `client`: the request id and the client address, for the activity
+///   entry.
+/// - `email`: the address as typed.
+/// - `password`: the password as typed.
+/// - `answer`: builds the success answer from the signed token and the
+///   `auth.jwt` configuration it was signed with: the session cookie of the
+///   browser, or the token in the body for a script.
+///
+/// A credential failure answers the one `401 invalid_credentials`, after the
+/// `login_failed` entry of a known account ([`refuse_known_account`]). The
+/// token and the answer are built before anything is written, so that a
+/// sign-in is recorded only when its answer can be sent. Then
+/// `last_login_at`, the rehash of a legacy password and the `login` entry
+/// are written on one transaction ([`users::ActiveModel::record_sign_in`]):
+/// a failed write drops it, which rolls every write back, and the `500`
+/// carries neither the cookie nor the token. An account that changed
+/// between the password check and the write gets the failure's `401` and
+/// its `login_failed` entry, and no rehash.
+///
+/// # Errors
+///
+/// The internal errors that [`login`] lists, and those of `answer`.
+async fn sign_in_with_password<F>(
+    ctx: &AppContext,
+    client: RequestContext,
+    email: &str,
+    password: &str,
+    answer: F,
+) -> Result<Response>
+where
+    F: FnOnce(&str, &JwtConfig) -> Result<Response>,
+{
+    let rules = sign_in_rules(ctx)?;
+    let outcome = users::Model::authenticate(
+        &ctx.db,
+        email,
+        password,
+        rules.force_change_short_legacy_password,
+    )
+    .await?;
+    let sign_in = match outcome {
+        SignInOutcome::Accepted(sign_in) => *sign_in,
         SignInOutcome::Refused { account_id } => {
             return Ok(refuse_known_account(&ctx.db, account_id, client).await);
         }
         SignInOutcome::UnknownAccount => return Ok(error_response(ErrorCode::InvalidCredentials)),
     };
-    let account_id = user.id;
+    let account_id = sign_in.user.id;
     // `auth_time` is the app clock's "now" (ADR 0010 point 7). Loco's `exp`
     // still reads the system time (recipe 7 step 4 of the project skill); in
     // production the app clock is the system clock, so the two agree.
-    let now = clock(&ctx)?.now();
+    let now = clock(ctx)?.now();
     let jwt = ctx.config.get_jwt_config()?;
-    let token = user.generate_session_token(&jwt.secret, jwt.expiration, now)?;
-    let cookie = session_cookie(&token, jwt.expiration).map_err(Error::wrap)?;
-    // The token and the cookie are built first, so that a sign-in is
-    // recorded only when its answer can be sent. Every session that this
-    // handler issues is a full `admin` one, the only kind that sets
-    // `last_login_at` (ADR 0006 §4). A failed write drops `txn`, which rolls
-    // both writes back, and the `500` carries no cookie.
+    let token = sign_in
+        .user
+        .generate_session_token(&jwt.secret, jwt.expiration, now)?;
+    let response = answer(&token, jwt)?;
+    // Every token that a password sign-in issues is a full `admin` one, the
+    // only kind that sets `last_login_at` (ADR 0006 §4); the active model
+    // carries the rehash of a legacy password, if any.
     let txn = ctx.db.begin().await?;
-    let recorded = user
+    let recorded = sign_in
         .into_active_model()
         .record_sign_in(&txn, client.clone())
         .await?;
     if recorded.is_none() {
         // The account was deactivated, trashed or had its sessions ended
-        // between the password check and this write, so the token above is
-        // already void: the sign-in failed, and is answered and recorded as
-        // a failure. Nothing was written on `txn`.
+        // (a new password included) between the password check and this
+        // write, so the token above is already void: the sign-in failed,
+        // and is answered and recorded as a failure. Nothing was written on
+        // `txn`, the rehash included.
         txn.rollback().await?;
         return Ok(refuse_known_account(&ctx.db, account_id, client).await);
     }
     txn.commit().await?;
-    format::render()
-        .header(SET_COOKIE, cookie)
-        .json(LoginResponse {
-            step: LoginStep::Done,
-        })
+    Ok(response)
+}
+
+/// When `token` expires: its `exp` claim, read back from the token.
+///
+/// - `secret`: the `auth.jwt` secret that signed the token.
+/// - `token`: a session token that [`users::Model::generate_session_token`]
+///   has just signed.
+///
+/// Loco's `JWT::generate_token` adds the lifetime to the system time, which
+/// it reads itself, and returns only the token (recipe 7 step 4 of the
+/// project skill), so the token is the one place that holds the instant the
+/// script's token stops working. Validating it again is cheap, and the
+/// claims come out as the session check reads them ([`session_times`]).
+///
+/// # Errors
+///
+/// An internal error when the token does not validate with `secret`, has no
+/// integer `exp` or `auth_time`, or has an `exp` outside chrono's range.
+/// None of them can happen to a token that was signed a moment ago with the
+/// same secret.
+fn token_expiry(secret: &str, token: &str) -> Result<DateTime<Utc>> {
+    let claims = JWT::new(secret)
+        .validate(token)
+        .map_err(Error::wrap)?
+        .claims;
+    let expires_at = session_times(&claims)?.expires_at;
+    DateTime::from_timestamp(expires_at, 0).ok_or_else(|| {
+        Error::string(&format!(
+            "the signed token's exp {expires_at} is outside chrono's range"
+        ))
+    })
 }
 
 /// Answers a failed sign-in of the known account `account_id`: writes its

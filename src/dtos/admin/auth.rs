@@ -1,16 +1,20 @@
 //! Wire types of the browser sign-in, `POST /api/admin/auth/login`
-//! (ADR 0006 §4), and of the signed-in account, `GET /api/admin/auth/me`
+//! (ADR 0006 §4), of the scripts' sign-in, `POST /api/admin/auth/token`
+//! (ADR 0006 §3), and of the signed-in account, `GET /api/admin/auth/me`
 //! (ADR 0007 §7).
 //!
 //! The sign-in response names the next step of the sign-in and never carries
 //! the session token: the token travels only in the `HttpOnly` session cookie
 //! (ADR 0006 §3, "The browser login endpoint never returns the token in the
-//! response body"). [`MeResponse`] tells the admin UI who is signed in and
-//! what the session may do; it never carries a secret column of the account
-//! (ADR 0005, ADR 0011 §4).
+//! response body"). A script's sign-in is the one answer that carries a
+//! token, [`TokenResponse`], for its `Authorization: Bearer` header; the
+//! admin UI never calls it. [`MeResponse`] tells the admin UI who is signed
+//! in and what the session may do; it never carries a secret column of the
+//! account (ADR 0005, ADR 0011 §4).
 
 use std::{collections::BTreeMap, fmt};
 
+use chrono::{DateTime, Utc};
 use loco_rs::prelude::Uuid;
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -96,6 +100,54 @@ impl<'de> Deserialize<'de> for LoginRequest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_map(LoginRequestVisitor)
     }
+}
+
+/// The body of a script's sign-in: the account's e-mail address and
+/// password.
+///
+/// Read only from a JSON object with exactly these two string members, as
+/// the browser sign-in's body is.
+// No `Debug` on purpose, as on `LoginRequest`: it would print the password.
+// ADR 0006 §3 also gives the endpoint the TOTP code of an account with
+// two-factor on; that member comes with the two-factor step's slice.
+#[derive(Clone, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../admin/src/bindings/")]
+pub struct TokenRequest {
+    /// The e-mail address, compared without regard to case.
+    pub email: String,
+    /// The password as typed.
+    pub password: String,
+}
+
+impl<'de> Deserialize<'de> for TokenRequest {
+    /// Reads the request exactly as a [`LoginRequest`] is read: from a JSON
+    /// object with the members `email` and `password` and nothing else,
+    /// streamed, so the two sign-ins refuse the same bodies with the same
+    /// `422` (its `Deserialize` says why it reads the body that way).
+    ///
+    /// - `deserializer`: the JSON body.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let LoginRequest { email, password } = LoginRequest::deserialize(deserializer)?;
+        Ok(Self { email, password })
+    }
+}
+
+/// The answer to a script's sign-in: a Bearer token of a full `admin`
+/// session, and when it expires.
+///
+/// The script sends the token in the `Authorization: Bearer` header of its
+/// requests. The token has the browser session's two-hour lifetime and is
+/// never refreshed: after `expires_at` the script signs in again.
+// No `Debug` on purpose: a derived one would print the token, and without
+// it a `tracing` call that tries to log the answer does not compile.
+#[derive(Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "../admin/src/bindings/")]
+pub struct TokenResponse {
+    /// The session token, a JWT.
+    pub token: String,
+    /// When the token expires, as an RFC 3339 instant in UTC.
+    #[ts(type = "string")]
+    pub expires_at: DateTime<Utc>,
 }
 
 /// The step the sign-in continues with after a correct password.
@@ -397,6 +449,50 @@ mod tests {
                 "{body}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_token_request_reads_exactly_what_a_login_request_reads() {
+        let request: TokenRequest =
+            serde_json::from_value(json!({ "email": "szkript@example.test", "password": "pw" }))
+                .expect("valid");
+        assert_eq!(
+            (request.email.as_str(), request.password.as_str()),
+            ("szkript@example.test", "pw")
+        );
+        // Every body the browser sign-in refuses, the token refuses too,
+        // with the same message.
+        for body in [
+            r#"{"email":"a@example.test"}"#,
+            r#"{"password":"pw"}"#,
+            r#"{"email":"a@example.test","password":5}"#,
+            r#"{"email":"a@example.test","password":"pw","code":"123456"}"#,
+            r#"{"email":"a@example.test","password":"pw","email":"b@example.test"}"#,
+            r#"{"x": this is not JSON"#,
+            r#"["a@example.test","pw"]"#,
+            "null",
+        ] {
+            let Err(token) = serde_json::from_str::<TokenRequest>(body) else {
+                panic!("accepted: {body}");
+            };
+            assert_eq!(token.to_string(), refusal(body).to_string(), "{body}");
+            assert_eq!(token.classify(), refusal(body).classify(), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_token_response_holds_the_token_and_its_expiry_only() {
+        let expires_at = DateTime::parse_from_rfc3339("2026-11-02T11:00:00Z")
+            .expect("RFC 3339")
+            .with_timezone(&Utc);
+        assert_eq!(
+            serde_json::to_string(&TokenResponse {
+                token: "a.b.c".to_owned(),
+                expires_at,
+            })
+            .expect("serializes"),
+            r#"{"token":"a.b.c","expires_at":"2026-11-02T11:00:00Z"}"#
+        );
     }
 
     #[test]
@@ -731,6 +827,17 @@ mod tests {
         assert!(
             request.contains("email: string") && request.contains("password: string"),
             "{request}"
+        );
+        let token_request = TokenRequest::decl(&config);
+        assert!(
+            token_request.contains("email: string") && token_request.contains("password: string"),
+            "{token_request}"
+        );
+        // The instant is a string on the wire (ADR 0005 §3).
+        let token = TokenResponse::decl(&config);
+        assert!(
+            token.contains("token: string") && token.contains("expires_at: string"),
+            "{token}"
         );
     }
 }

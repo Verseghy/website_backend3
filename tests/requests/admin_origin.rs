@@ -29,7 +29,7 @@
 //! - what it does not check: reads, and requests without a credential
 //!   cookie, a first sign-in from a foreign `Origin` included (ADR 0044 §2;
 //!   research: DECISIONS R35 (D152)). That a Bearer request is exempt is
-//!   tested with the token endpoint that issues one (`auth-bearer-bcrypt`);
+//!   tested with the token endpoint that issues one (`auth_token.rs`);
 //! - that the check runs only on the table's routes: a path or a method the
 //!   table does not declare keeps its `404` or `405`;
 //! - that a context without an admin origin lets no checked write through.
@@ -400,8 +400,8 @@ async fn every_write_route_of_the_table_refuses_a_foreign_origin() {
         let walked =
             assert_every_write_route_refuses(&server, &table(), &token, &FOREIGN_TO_PRODUCTION)
                 .await;
-        // Today: the sign-in and the logout.
-        assert!(walked >= 2, "{walked} write routes");
+        // Today: the two sign-ins, the logout and the refresh.
+        assert!(walked >= 4, "{walked} write routes");
         // Nothing reached a handler: the session holds, no logout ran.
         assert_eq!(token_version(&ctx, &user).await, 0);
         assert!(session_holds(&server, &token).await);
