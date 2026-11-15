@@ -20,7 +20,7 @@
 //!
 //! `auth/me` answers the account of the request's admin session
 //! ([`super::session::AdminSession`]) as a [`MeResponse`], with the roles,
-//! effective permissions and admin flag that the extractor read for the
+//! effective permissions and admin flag that the session read for the
 //! request (ADR 0007 §7). It is one of the
 //! three routes that a `password_change` session may reach (ADR 0006 §4), so
 //! the admin UI can tell such a session to set a new password. Without a
@@ -36,7 +36,7 @@
 //! `POST` only: a `GET` would let a link or an image sign the user out, so
 //! every other method answers axum's `405` with `Allow: POST`. It is the
 //! third route that a `password_change` session may reach (ADR 0006 §4).
-//! Without a valid session it answers the extractor's `401 unauthorized`
+//! Without a valid session it answers the route table's `401 unauthorized`
 //! (ADR 0006 §1 refuses every such session with 401, and ADR 0007 §5 gives
 //! "No valid session: 401" for every admin route), sets no cookie and
 //! touches no account; the admin UI treats that answer as already signed
@@ -206,23 +206,23 @@ async fn refuse_known_account(
 /// flag (ADR 0007 §7).
 ///
 /// - `session`: the checked admin session; an `admin` or a `password_change`
-///   one (ADR 0006 §4). Without one the extractor has already answered
-///   `401 unauthorized`.
+///   one (ADR 0006 §4). Without one the route table's guard has already
+///   answered `401 unauthorized`.
 ///
 /// # Errors
 ///
 /// An internal error (`500`) when the response cannot be built: an account
 /// without an e-mail address or an `mfa` scope, both of which the session
 /// check rules out ([`MeResponse::new`]). A failed lookup of the account or
-/// of its roles and grants is the extractor's `500`.
+/// of its roles and grants is the guard's `500`.
 // `state` is named because the handler takes no `State`, from which the
-// macro would otherwise infer it; the extractor reads the `AppContext`.
+// macro would otherwise infer it; the guard reads the `AppContext`.
 #[debug_handler(state = AppContext)]
 pub async fn me(session: AdminSession<AdminOrPasswordChange>) -> Result<Response> {
     // The model-to-DTO conversion happens here, at the controller boundary
     // (ADR 0005, ADR 0008 rule 6): only the allow-listed columns leave the
     // row, so the DTO never sees the password hash or the TOTP secret.
-    // The roles and grants are the ones the extractor read for this
+    // The roles and grants are the ones the guard read for this
     // request, so the answer shows a role change at once (ADR 0007 §5).
     let user = session.user;
     let me = MeResponse::new(
@@ -242,8 +242,8 @@ pub async fn me(session: AdminSession<AdminOrPasswordChange>) -> Result<Response
 /// - `ctx`: the application context; the handler takes the database from
 ///   it.
 /// - `session`: the checked admin session; an `admin` or a
-///   `password_change` one (ADR 0006 §4). Without one the extractor has
-///   already answered `401 unauthorized`.
+///   `password_change` one (ADR 0006 §4). Without one the route table's
+///   guard has already answered `401 unauthorized`.
 /// - `client`: the request id and the client address, for the activity
 ///   entry.
 ///
@@ -263,7 +263,7 @@ pub async fn me(session: AdminSession<AdminOrPasswordChange>) -> Result<Response
 /// An internal error (`500`) when the database fails, including a refused
 /// activity entry, never a `401`, which would sign the admin UI out while
 /// the sessions still hold (ADR 0006, follow-up work). A failed account
-/// lookup is the extractor's `500`.
+/// lookup is the guard's `500`.
 #[debug_handler]
 pub async fn logout(
     State(ctx): State<AppContext>,

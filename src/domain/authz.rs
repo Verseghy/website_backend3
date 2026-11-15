@@ -7,8 +7,9 @@
 //! database holds only what an account was given: its roles (`user_roles`,
 //! referencing the four `roles` rows that a migration seeds) and its extra
 //! grants („Egyéni jogosultságok”, `user_permissions`, whose CHECK lists the
-//! sixteen names of [`Permission`]). The admin session extractor reads both
-//! on every request and turns them into [`AccountGrants`] with
+//! sixteen names of [`Permission`]). The admin route table's guard reads
+//! both on every request (`open_session` in `controllers::admin::session`),
+//! before the handler runs, and turns them into [`AccountGrants`] with
 //! [`AccountGrants::from_stored`]; the permission checks and `/auth/me` work
 //! from that value.
 //!
@@ -34,6 +35,11 @@
 //!   in the order of ADR 0007's tables and derive `Ord`, so a
 //!   [`BTreeSet`] of them, and every list built from one (the `/auth/me`
 //!   answer), comes out in that order.
+//!
+//! [`Requirement`] is what an admin API route asks of the account that calls
+//! it (ADR 0007 §5, "Deny by default"): the admin route table
+//! (`controllers::admin::routes`) declares one for every route, and its
+//! guard answers `403 forbidden` when [`Requirement::is_met_by`] says no.
 //!
 //! The record-level rules of ADR 0007 §5 (published posts, the user guards
 //! of §6) and the per-resource access map of §7 join this module with the
@@ -320,7 +326,7 @@ pub fn is_admin(roles: impl IntoIterator<Item = Role>) -> bool {
 }
 
 /// What an account was given: its roles and its extra grants (ADR 0007 §3),
-/// as the admin session extractor reads them for a request.
+/// as the admin route table's guard reads them for a request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccountGrants {
     /// The roles the account holds (`user_roles`).
@@ -400,6 +406,85 @@ impl AccountGrants {
     #[must_use]
     pub fn is_admin(&self) -> bool {
         is_admin(self.roles.iter().copied())
+    }
+}
+
+/// What an admin API route asks of the account that calls it (ADR 0007 §4,
+/// §5).
+///
+/// Every `/api/admin` route is declared with one in the admin route table;
+/// there is no default, so a route cannot be added without saying who may
+/// call it. Only [`Requirement::Public`] lets a request in without a
+/// session, and the route table's test lists the routes allowed to use it.
+/// The other three need a valid session first: a request without one is
+/// answered `401` before any requirement is looked at (ADR 0007 §5, the
+/// flowchart), so `403` always means "signed in, but not allowed".
+///
+/// The ADR's "any of" rows (the labels and authors pickers that `edit posts`
+/// may read, the page picker of `edit menu`) are not variants yet: the first
+/// slice that mounts such a route adds one, with its tests here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Requirement {
+    /// No session at all: the sign-in steps that issue one (ADR 0006 §3,
+    /// §4), such as `POST /auth/login`.
+    Public,
+    /// Any account with a valid session, whatever it holds: the account's
+    /// own screens („Fiókom”, ADR 0007 §4). The session check already
+    /// refuses an inactive, trashed or anonymised account (ADR 0006 §1).
+    AnyActiveUser,
+    /// The `admin` role itself, which no extra grant gives: permanent
+    /// delete and figures about individual people (ADR 0007 §2).
+    AdminRole,
+    /// One permission among the account's effective permissions
+    /// (ADR 0007 §3, §4).
+    Permission(Permission),
+}
+
+impl Requirement {
+    /// Whether a request must carry a valid session before this requirement
+    /// is checked: every requirement but [`Requirement::Public`].
+    #[must_use]
+    pub const fn needs_session(self) -> bool {
+        !matches!(self, Self::Public)
+    }
+
+    /// Whether an account with `grants` may call a route that asks for this
+    /// requirement.
+    ///
+    /// - `grants`: the roles and extra grants that the session's account
+    ///   holds, as the admin route table's guard read them for the request
+    ///   (`open_session` in `controllers::admin::session`).
+    ///
+    /// [`Requirement::Public`] and [`Requirement::AnyActiveUser`] hold for
+    /// every account; [`Requirement::AdminRole`] reads the role only, never
+    /// the permissions ([`AccountGrants::is_admin`]); and
+    /// [`Requirement::Permission`] reads the effective permissions, the
+    /// union of the roles' sets and the extra grants.
+    #[must_use]
+    pub fn is_met_by(self, grants: &AccountGrants) -> bool {
+        match self {
+            Self::Public | Self::AnyActiveUser => true,
+            Self::AdminRole => grants.is_admin(),
+            Self::Permission(permission) => grants.effective().contains(&permission),
+        }
+    }
+}
+
+impl fmt::Display for Requirement {
+    /// Writes the requirement in words, for log lines and test messages:
+    /// `public`, `any active user`, `the admin role` or
+    /// `the permission "edit posts"`.
+    ///
+    /// - `formatter`: where to write.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Public => formatter.write_str("public"),
+            Self::AnyActiveUser => formatter.write_str("any active user"),
+            Self::AdminRole => formatter.write_str("the admin role"),
+            Self::Permission(permission) => {
+                write!(formatter, "the permission {:?}", permission.name())
+            }
+        }
     }
 }
 
@@ -647,6 +732,88 @@ mod tests {
         );
     }
 
+    /// The grants of an account with `roles` and the extra grants `extra`.
+    fn account(roles: &[Role], extra: &[Permission]) -> AccountGrants {
+        AccountGrants {
+            roles: roles.iter().copied().collect(),
+            extra: extra.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn only_public_lets_a_request_in_without_a_session() {
+        assert!(!Requirement::Public.needs_session());
+        for requirement in [
+            Requirement::AnyActiveUser,
+            Requirement::AdminRole,
+            Requirement::Permission(Permission::EditPosts),
+        ] {
+            assert!(requirement.needs_session(), "{requirement}");
+        }
+    }
+
+    #[test]
+    fn an_account_with_nothing_meets_only_public_and_any_active_user() {
+        // ADR 0007 §3: no role and no grant, so only the own account.
+        let nothing = AccountGrants::default();
+        assert!(Requirement::Public.is_met_by(&nothing));
+        assert!(Requirement::AnyActiveUser.is_met_by(&nothing));
+        assert!(!Requirement::AdminRole.is_met_by(&nothing));
+        for permission in Permission::ALL {
+            assert!(
+                !Requirement::Permission(permission).is_met_by(&nothing),
+                "{permission}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_role_meets_the_permissions_of_its_row_only() {
+        // ADR 0007 §2: a writer edits posts but does not publish them.
+        let writer = account(&[Role::Writer], &[]);
+        assert!(Requirement::Permission(Permission::EditPosts).is_met_by(&writer));
+        assert!(!Requirement::Permission(Permission::PublishPosts).is_met_by(&writer));
+        assert!(!Requirement::AdminRole.is_met_by(&writer));
+        // An extra grant counts like a role's permission (ADR 0007 §3).
+        let secretary_with_menu = account(&[Role::Secretary], &[Permission::EditMenu]);
+        assert!(Requirement::Permission(Permission::EditMenu).is_met_by(&secretary_with_menu));
+        assert!(Requirement::Permission(Permission::EditEvents).is_met_by(&secretary_with_menu));
+        assert!(!Requirement::Permission(Permission::EditPages).is_met_by(&secretary_with_menu));
+    }
+
+    #[test]
+    fn every_extra_grant_still_does_not_make_an_admin() {
+        // ADR 0007 §2: the three things the admin role unlocks are not
+        // permissions, so no extra grant gives them.
+        let every_grant = account(&[], &Permission::ALL);
+        assert!(!Requirement::AdminRole.is_met_by(&every_grant));
+        for permission in Permission::ALL {
+            assert!(Requirement::Permission(permission).is_met_by(&every_grant));
+        }
+        assert!(Requirement::AdminRole.is_met_by(&account(&[Role::Admin], &[])));
+    }
+
+    #[test]
+    fn requirements_read_in_words() {
+        assert_eq!(Requirement::Public.to_string(), "public");
+        assert_eq!(Requirement::AnyActiveUser.to_string(), "any active user");
+        assert_eq!(Requirement::AdminRole.to_string(), "the admin role");
+        assert_eq!(
+            Requirement::Permission(Permission::EditSiteSettings).to_string(),
+            r#"the permission "edit site settings""#
+        );
+    }
+
+    /// Any requirement.
+    fn requirement() -> impl Strategy<Value = Requirement> {
+        prop_oneof![
+            Just(Requirement::Public),
+            Just(Requirement::AnyActiveUser),
+            Just(Requirement::AdminRole),
+            permission().prop_map(Requirement::Permission),
+        ]
+    }
+
     /// Any set of roles.
     fn roles() -> impl Strategy<Value = Vec<Role>> {
         subsequence(Role::ALL.to_vec(), 0..=Role::ALL.len())
@@ -729,6 +896,56 @@ mod tests {
                 account.effective(),
                 effective_permissions(account.roles.iter().copied(), account.extra.iter().copied())
             );
+        }
+
+        #[test]
+        fn a_requirement_is_met_exactly_as_adr_0007_reads_it(
+            roles in roles(),
+            grants in grants(),
+            requirement in requirement(),
+        ) {
+            let account = account(&roles, &grants);
+            let expected = match requirement {
+                Requirement::Public | Requirement::AnyActiveUser => true,
+                Requirement::AdminRole => roles.contains(&Role::Admin),
+                Requirement::Permission(permission) => {
+                    grants.contains(&permission)
+                        || roles.iter().any(|role| role.permissions().contains(&permission))
+                }
+            };
+            prop_assert_eq!(requirement.is_met_by(&account), expected, "{}", requirement);
+            // The admin role meets every requirement (it holds every
+            // permission, ADR 0007 §2).
+            let mut with_admin = account.clone();
+            with_admin.roles.insert(Role::Admin);
+            prop_assert!(requirement.is_met_by(&with_admin), "{}", requirement);
+        }
+
+        #[test]
+        fn adding_a_role_or_a_grant_never_takes_a_route_away(
+            roles in roles(),
+            grants in grants(),
+            added_role in role(),
+            added_grant in permission(),
+            requirement in requirement(),
+        ) {
+            // A role change applies on the next request (ADR 0007 §5); giving
+            // more never refuses what was allowed.
+            let before = account(&roles, &grants);
+            let mut with_role = before.clone();
+            with_role.roles.insert(added_role);
+            let mut with_grant = before.clone();
+            with_grant.extra.insert(added_grant);
+            if requirement.is_met_by(&before) {
+                prop_assert!(requirement.is_met_by(&with_role), "{}", requirement);
+                prop_assert!(requirement.is_met_by(&with_grant), "{}", requirement);
+            }
+            // And a grant of the asked permission always lets the account in.
+            if let Requirement::Permission(permission) = requirement {
+                let mut granted = before;
+                granted.extra.insert(permission);
+                prop_assert!(requirement.is_met_by(&granted));
+            }
         }
 
         #[test]

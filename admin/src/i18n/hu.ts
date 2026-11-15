@@ -434,6 +434,10 @@ export const hu = {
     // A request without a valid admin session (ADR 0006 §1), one message for
     // every reason: sign in again.
     unauthorized: "A munkamenet lejárt vagy érvénytelen. Jelentkezz be újra!",
+    // A signed-in account that the route's requirement refuses (ADR 0007
+    // §5): the session stays valid, so the message does not ask the user to
+    // sign in again.
+    forbidden: "Nincs jogosultságod ehhez a művelethez.",
     // Upload refusals (ADR 0015 §6 and §7, ADR 0033 §4): each says what
     // makes the file acceptable.
     image_not_allowed: "Csak JPEG, PNG, GIF vagy WebP kép tölthető fel.",

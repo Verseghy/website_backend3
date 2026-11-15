@@ -8,9 +8,10 @@
 //! (ADR 0006 §2); and a restricted token (`password_change`, `mfa`) may reach
 //! only the few routes ADR 0006 §4 names. [`check_session`] decides those
 //! rules from plain values: the account's state, the token's custom claims
-//! and the scopes the route accepts. The admin extractor in
-//! `controllers::admin::session` reads the account from the database on
-//! every request, never from a cache (ADR 0016), and calls it.
+//! and the scopes the route accepts. `open_session` in
+//! `controllers::admin::session`, which the admin route table's guard calls
+//! before every handler that needs a session, reads the account from the
+//! database on every request, never from a cache (ADR 0016), and calls it.
 //!
 //! The rules need no clock: Loco has already refused an expired token. The
 //! expiry arithmetic of the sliding refresh (ADR 0006 §1) joins this module
@@ -43,8 +44,8 @@ pub enum SessionScope {
     PasswordChange,
     /// `mfa`: the password step passed and the two-factor step is due. Only
     /// `POST /api/admin/auth/totp` accepts it. That route reads its own
-    /// cookie without the admin extractor (ADR 0006 §4), so no scope set of
-    /// the admin extractor holds `mfa`. Its rules (`scope = mfa`, the current
+    /// cookie without the admin route table's session guard (ADR 0006 §4),
+    /// so no scope set of an admin route holds `mfa`. Its rules (`scope = mfa`, the current
     /// `tv`, a live and active account) are [`check_session`] with
     /// `&[SessionScope::Mfa]` as the accepted scopes.
     Mfa,
@@ -81,8 +82,10 @@ impl SessionScope {
     /// - `scopes`: a set of accepted scopes, such as a route's.
     ///
     /// A `const fn`, unlike `<[_]>::contains`, whose `PartialEq` is not
-    /// `const`: the admin extractor evaluates it at compile time to refuse a
-    /// scope set that holds [`SessionScope::Mfa`].
+    /// `const`: `accepted_scopes` in `controllers::admin::session`, through
+    /// which the route table and the session extractor read a route's
+    /// scopes, evaluates it at compile time to refuse a scope set that holds
+    /// [`SessionScope::Mfa`].
     #[must_use]
     pub const fn is_in(self, scopes: &[Self]) -> bool {
         let mut index = 0;
@@ -295,7 +298,7 @@ mod tests {
         for scope in SessionScope::ALL {
             assert!(!scope.is_in(&[]), "{scope}");
         }
-        // It is evaluated at compile time, as the extractor evaluates it.
+        // It is evaluated at compile time, as `accepted_scopes` evaluates it.
         const { assert!(!SessionScope::Mfa.is_in(ADMIN_ONLY)) };
         const { assert!(SessionScope::Admin.is_in(ADMIN_OR_PASSWORD_CHANGE)) };
     }

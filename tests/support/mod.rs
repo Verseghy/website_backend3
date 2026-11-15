@@ -13,7 +13,11 @@
 //! - [`owned_file_probes`]: a test-only entity that owns files in every
 //!   column shape, with its file-owner registrations, for the owned-files
 //!   model and the `DeleteOwnedFiles` worker (ADR 0011 §6, ADR 0016 §3).
+//! - [`admin_probe`]: probe tables for the admin route table's guard
+//!   (ADR 0007 §5), with invented accounts, their grants and their session
+//!   tokens.
 
+pub mod admin_probe;
 pub mod fixtures;
 pub mod openapi_schema;
 pub mod owned_file_probes;

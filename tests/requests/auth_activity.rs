@@ -557,7 +557,7 @@ async fn a_logout_writes_logout() {
 
 #[tokio::test]
 async fn a_refused_logout_writes_nothing() {
-    // Without a valid session the extractor answers 401 before the
+    // Without a valid session the route table's guard answers 401 before the
     // handler runs, and a method other than POST answers 405: no account
     // event happened, so no entry is written.
     with_server(|server, ctx| async move {

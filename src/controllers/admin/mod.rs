@@ -1,24 +1,19 @@
 //! The admin API under `/api/admin` (ADR 0005, ADR 0021 §4).
 //!
-//! [`routes`] mounts every admin handler as one Loco route group and ends it
-//! with a layer that sets `Cache-Control: no-store` on every response of the
-//! group (ADR 0023 §6): successes, the error envelopes, extractor refusals and
-//! the `405` that axum answers for a method a path does not take. Admin
-//! responses carry account data and session cookies, so no browser or proxy
-//! may keep them. Unknown `/api/admin` paths get the same header from the
-//! router fallback ([`crate::controllers::not_found`]).
-//!
-//! A new admin handler goes into [`routes`], above the last layer: loco-rs
-//! 1.2.0's `Routes::layer` wraps only the handlers that the group already
-//! holds. A handler that reads a JSON body goes above the JSON body-limit
-//! layer too, so its body may be at most [`JSON_BODY_LIMIT`] (4 MiB, ADR 0023
-//! §5); an upload handler goes between the two layers, so it keeps the
-//! 128 MiB of `server.middlewares.limit_payload` (ADR 0015 §6) and reads its
-//! file through [`media`]. The route table of ADR 0007 §4 later replaces
-//! this list.
+//! [`routes`] is the admin route table (ADR 0007 §4, §5): every admin route
+//! with the requirement an account must meet to call it, and the one
+//! builder of the admin API's router, which `App::routes` adds once. Its
+//! guard answers `401 unauthorized` to a request without a valid session
+//! and `403 forbidden` to an account that does not meet the requirement,
+//! before the handler runs, and every admin response carries
+//! `Cache-Control: no-store` (ADR 0023 §6). A new admin route is one more
+//! entry of [`routes::table`]; a route mounted any other way fails
+//! `tests/requests/admin_routes.rs` (in `App::routes`) or
+//! `tests/architecture/admin_mounts.rs` (in another hook, within the limits
+//! of a text check that its documentation lists).
 //!
 //! A handler that needs a signed-in account takes [`session::AdminSession`],
-//! which answers `401 unauthorized` itself when the session does not hold
+//! which hands it the session that the guard opened and checked
 //! (ADR 0006 §1), and never Loco's `JWT` or `JWTWithUser`, which skip those
 //! checks.
 //!
@@ -33,22 +28,15 @@
 //! or account entry, the client address, and passes them down to the model
 //! (ADR 0011 §5, recipe 8 of the project skill).
 
-use axum::{
-    Json,
-    extract::{DefaultBodyLimit, rejection::JsonRejection},
-    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
-};
+use axum::{Json, extract::rejection::JsonRejection, http::StatusCode};
 use loco_rs::prelude::*;
-use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::{
-    domain::api_path::ADMIN_API_PREFIX,
-    dtos::admin::error::{ErrorCode, ErrorEnvelope},
-};
+use crate::dtos::admin::error::{ErrorCode, ErrorEnvelope};
 
 pub mod auth;
 pub mod client_context;
 pub mod media;
+pub mod routes;
 pub mod session;
 
 /// The largest JSON request body an admin endpoint reads: 4 MiB (4,194,304
@@ -56,32 +44,10 @@ pub mod session;
 /// 892,455 bytes (research: SYNTHESIS §4.3.1), so a whole page or post fits
 /// with room to spare, while a JSON body never gets the 128 MiB that
 /// `server.middlewares.limit_payload` allows the uploads. A larger body is
-/// answered `413 body_too_large` ([`json_rejection_response`]).
+/// answered `413 body_too_large` ([`json_rejection_response`]). The route
+/// table puts it on every route that is not an upload route
+/// ([`routes::RequestBody`]).
 pub const JSON_BODY_LIMIT: usize = 4 * 1024 * 1024;
-
-/// Every route of the admin API, each answering with `Cache-Control:
-/// no-store`.
-#[must_use]
-pub fn routes() -> Routes {
-    Routes::new()
-        .prefix(ADMIN_API_PREFIX)
-        .add("/auth/login", post(auth::login))
-        .add("/auth/me", get(auth::me))
-        // POST only (ADR 0006 §2): axum answers every other method with 405.
-        .add("/auth/logout", post(auth::logout))
-        // Every JSON handler is above this line. axum's `Json` extractor
-        // reads the limit from the request, and this route-level layer sets
-        // it after Loco's global `limit_payload` layer did, so it wins.
-        .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
-        // Upload handlers go here, below the JSON limit and above the next
-        // layer.
-        // Last, so that it wraps every handler above. `overriding`: no
-        // handler may make an admin response cacheable.
-        .layer(SetResponseHeaderLayer::overriding(
-            CACHE_CONTROL,
-            HeaderValue::from_static("no-store"),
-        ))
-}
 
 /// The admin error envelope for `code`, with the status that goes with it
 /// (ADR 0021 §4).
@@ -241,6 +207,7 @@ mod tests {
             ErrorCode::InvalidBody,
             ErrorCode::BodyTooLarge,
             ErrorCode::Unauthorized,
+            ErrorCode::Forbidden,
         ] {
             let response = error_response(code);
             assert_eq!(response.status().as_u16(), code.status(), "{code:?}");

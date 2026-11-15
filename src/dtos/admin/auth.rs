@@ -231,8 +231,8 @@ impl MeResponse {
     /// # Errors
     ///
     /// [`MeResponseError::NoEmail`] when `email` is `None`, and
-    /// [`MeResponseError::MfaScope`] for an `mfa` scope. The admin extractor
-    /// of `auth/me` lets neither through.
+    /// [`MeResponseError::MfaScope`] for an `mfa` scope. The route table's
+    /// guard of `auth/me` lets neither through.
     pub fn new(
         pid: Uuid,
         name: String,

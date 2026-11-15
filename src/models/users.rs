@@ -46,10 +46,12 @@
 //! transaction; a failed sign-in changes no data, and its entry is written
 //! on a connection of its own (ADR 0011 §5). The [`Authenticable`]
 //! impl lets Loco's `JWTWithUser` extractor load the account a token names,
-//! and [`Model::session_state`] hands the admin extractor the columns that
-//! decide whether the session still holds (ADR 0006 §1). [`Model::grants`]
-//! reads the roles and extra grants that the account holds, which the admin
-//! extractor loads on every request (ADR 0007 §5, "Fresh data").
+//! and [`Model::session_state`] hands the admin session check
+//! (`open_session` in `controllers::admin::session`, which the admin route
+//! table's guard calls) the columns that decide whether the session still
+//! holds (ADR 0006 §1). [`Model::grants`] reads the roles and extra grants
+//! that the account holds, which that check loads on every request
+//! (ADR 0007 §5, "Fresh data").
 //! [`Model::seed_account`] creates the invented account of the development,
 //! test and E2E seed (`crate::domain::seed`) with its roles.
 //!
@@ -408,13 +410,15 @@ impl ActiveModel {
     /// **The account must still be the one that was checked.** The `UPDATE`
     /// matches the row only while it is live (neither in the trash nor
     /// anonymised), active, and still at that `token_version`, the checks
-    /// that the admin session extractor makes on every request (ADR 0006
-    /// §1). Every event that ends sessions increments `token_version`
-    /// (ADR 0006 §2), so an account that an `edit users` holder deactivated,
-    /// trashed or gave a new password while its password was being verified
-    /// matches nothing: the method then writes nothing and returns `None`,
-    /// and the sign-in fails like any other. Without the check it would
-    /// record a sign-in, for good, whose cookie the next request refuses.
+    /// that the admin session check (`open_session` in
+    /// `controllers::admin::session`, which the admin route table's guard
+    /// calls) makes on every request (ADR 0006 §1). Every event that ends
+    /// sessions increments `token_version` (ADR 0006 §2), so an account that
+    /// an `edit users` holder deactivated, trashed or gave a new password
+    /// while its password was being verified matches nothing: the method
+    /// then writes nothing and returns `None`, and the sign-in fails like any
+    /// other. Without the check it would record a sign-in, for good, whose
+    /// cookie the next request refuses.
     ///
     /// `last_login_at` comes from PostgreSQL's clock: `GREATEST(last_login_at,
     /// CURRENT_TIMESTAMP)`. `CURRENT_TIMESTAMP` is the start of `txn`, the
@@ -535,7 +539,7 @@ impl ActiveModel {
     /// - `db`: the connection or transaction to write to.
     ///
     /// Every token carries the version it was issued at (`tv`), and the
-    /// admin session extractor refuses one that differs from the stored
+    /// admin session check refuses one that differs from the stored
     /// value, so after this call every token issued before it fails on its
     /// next request: cookies and Bearer tokens alike, on every device. A
     /// token issued from the returned row's `token_version` holds.
@@ -839,8 +843,10 @@ impl Model {
     ///
     /// - `db`: the connection or transaction to query.
     ///
-    /// The admin session extractor calls it on every request, after the
-    /// session check, so a role or grant change applies on the account's
+    /// The admin session check (`open_session` in
+    /// `controllers::admin::session`, which the admin route table's guard
+    /// calls before the handler) calls it on every request, after the
+    /// session rules, so a role or grant change applies on the account's
     /// next request (ADR 0007 §5, "Fresh data"; ADR 0006 §2); nothing is
     /// cached (ADR 0016). Both lists come from one statement, and so from one
     /// committed state ([`GRANTS_QUERY`] says why that matters). The account's
@@ -906,8 +912,9 @@ impl Model {
     /// The columns of this row that decide whether its sessions still hold,
     /// for [`crate::domain::session::check_session`] (ADR 0006 §1).
     ///
-    /// The admin extractor calls it on the row it has just read for the
-    /// request, so the check always sees the stored state: a deactivation, a
+    /// The admin session check (`open_session` in
+    /// `controllers::admin::session`) calls it on the row it has just read
+    /// for the request, so the check always sees the stored state: a deactivation, a
     /// trash or a `token_version` increment applies on the next request
     /// (ADR 0006 §2, ADR 0016).
     #[must_use]

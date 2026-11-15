@@ -2,9 +2,11 @@
 //! §4): the per-process upload handles, the reading of the one file part of
 //! a multipart request, and the answer to every upload error.
 //!
-//! An upload endpoint is a handler of `controllers::admin::routes()`, mounted
-//! after the JSON body-limit layer so that the 128 MiB request limit of
-//! `server.middlewares.limit_payload` applies to it. It takes
+//! An upload endpoint is a route of the admin route table
+//! (`controllers::admin::routes`) marked with `AdminRoute::upload`, so that
+//! the 128 MiB request limit of `server.middlewares.limit_payload` applies to
+//! it instead of the JSON routes' 4 MiB, and declared with the permission of
+//! the entity it uploads for (ADR 0007 §4). It takes
 //! `Result<Multipart, MultipartRejection>` last among its arguments and runs:
 //!
 //! ```text
