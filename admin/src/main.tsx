@@ -8,10 +8,12 @@
 import { lazy, StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { Route, RouterProvider } from "react-router-dom"
+import { QueryClient } from "@tanstack/react-query"
 import { I18nContextProvider } from "ra-core"
 
 import "./index.css"
 import { AdminApp } from "@/App"
+import { invalidateAccessChecks } from "@/auth/access-checks"
 import { createAuthProvider } from "@/auth/auth-provider"
 import { createDataProvider } from "@/data-provider/data-provider"
 import { createI18nProvider } from "@/i18n/provider"
@@ -39,11 +41,19 @@ const dataProvider = createDataProvider({
   apiBaseUrl: "/api/admin",
   resources: {},
 })
+// ra-core's react-query client, made here so the auth provider can ask it to
+// re-ask its cached access questions when the account's access changed
+// (ADR 0007 §7, `src/auth/access-checks.ts`). The defaults are the ones
+// ra-core would choose itself.
+const queryClient = new QueryClient()
 // The browser's fetch, bound to window: called unbound, it throws
 // "Illegal invocation" in Chromium.
 const authProvider = createAuthProvider({
   apiBaseUrl: "/api/admin",
   fetch: window.fetch.bind(window),
+  onAccessChange: () => {
+    void invalidateAccessChecks(queryClient)
+  },
 })
 
 /**
@@ -88,6 +98,7 @@ const router = createAdminRouter(
     dataProvider={dataProvider}
     authProvider={authProvider}
     i18nProvider={i18nProvider}
+    queryClient={queryClient}
     sourceCommit={import.meta.env.VITE_SOURCE_COMMIT}
     developmentRoutes={developmentRoutes}
     // The session's activity tracker (ADR 0006 §1) listens on the window and

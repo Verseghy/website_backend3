@@ -3,6 +3,7 @@
  * API, and what it makes of every kind of answer (ADR 0006, ADR 0021 §4).
  */
 import fc from "fast-check"
+import type { AuthProvider } from "ra-core"
 import { describe, expect, it, vi } from "vitest"
 
 import { parseErrorEnvelope } from "@/api/error-envelope"
@@ -20,6 +21,7 @@ import {
   REFRESH_PATH,
   REFRESH_TIMEOUT_MS,
   refreshOutcome,
+  sameAccess,
   SessionCheckError,
   SIGN_OUT_PARAMS,
   SignInError,
@@ -36,6 +38,7 @@ const ME: MeResponse = {
   roles: ["writer"],
   permissions: ["edit posts", "edit labels", "edit authors", "manage media"],
   is_admin: false,
+  access: {},
 }
 
 /**
@@ -153,6 +156,218 @@ describe("createAuthProvider", () => {
         })
       ).not.toThrow()
     }
+  })
+
+  it("refuses an onAccessChange that is not a function", () => {
+    expect(() =>
+      createAuthProvider({
+        apiBaseUrl: "/api/admin",
+        fetch: vi.fn(),
+        onAccessChange: "invalidate" as unknown as () => void,
+      })
+    ).toThrow(/onAccessChange must be a function or left out/)
+  })
+})
+
+/** An account that may list and edit the probe resource `probes`. */
+const EDITOR: MeResponse = {
+  ...ME,
+  access: { probes: ["list", "show", "edit"] },
+}
+
+/**
+ * The admin API's `/auth/me` playing a sequence of answers: each call takes
+ * the next one, and the last one repeats.
+ *
+ * @param answers - the answers, in order.
+ * @returns the provider, the stub and the `onAccessChange` spy.
+ */
+function providerAnsweringInTurn(...answers: Response[]) {
+  let next = 0
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+    const answer = answers[Math.min(next, answers.length - 1)]
+    next += 1
+    return answer.clone()
+  })
+  const onAccessChange = vi.fn<() => void>()
+  return {
+    provider: createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      onAccessChange,
+    }),
+    fetch,
+    onAccessChange,
+  }
+}
+
+/**
+ * The number of `/auth/me` requests a stub received.
+ *
+ * @param fetch - the stub.
+ * @returns how many calls asked `/auth/me`.
+ */
+function meReads(fetch: ReturnType<typeof vi.fn<typeof globalThis.fetch>>) {
+  return fetch.mock.calls.filter(([url]) => url === "/api/admin/auth/me").length
+}
+
+describe("canAccess", () => {
+  it("answers from the access map that checkAuth read, without a request of its own", async () => {
+    const { provider, fetch } = providerAnsweringInTurn(json(200, EDITOR))
+    await provider.checkAuth({})
+    expect(meReads(fetch)).toBe(1)
+    for (const [action, expected] of [
+      ["list", true],
+      ["show", true],
+      ["edit", true],
+      ["create", false],
+      ["delete", false],
+      ["purge", false],
+      ["export", false],
+    ] as const) {
+      await expect(
+        provider.canAccess?.({ action, resource: "probes" } as never)
+      ).resolves.toBe(expected)
+    }
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "others" } as never)
+    ).resolves.toBe(false)
+    // A record changes nothing while no resource has a record-level rule.
+    await expect(
+      provider.canAccess?.({
+        action: "edit",
+        resource: "probes",
+        record: { id: 1 },
+      } as never)
+    ).resolves.toBe(true)
+    expect(meReads(fetch)).toBe(1)
+  })
+
+  it("reads /auth/me once for every question asked before the first answer", async () => {
+    const { provider, fetch } = providerAnsweringInTurn(json(200, EDITOR))
+    const answers = await Promise.all([
+      provider.canAccess?.({ action: "list", resource: "probes" } as never),
+      provider.canAccess?.({ action: "create", resource: "probes" } as never),
+      provider.checkAuth({}),
+    ])
+    expect(answers.slice(0, 2)).toEqual([true, false])
+    expect(meReads(fetch)).toBe(1)
+  })
+
+  it("rejects when it cannot read /auth/me, and never allows what it could not check", async () => {
+    const { provider } = providerAnsweringInTurn(
+      json(500, envelope("internal"))
+    )
+    const error = await rejection(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never) ??
+        Promise.resolve()
+    )
+    expect(error).toBeInstanceOf(SessionCheckError)
+  })
+
+  it("follows a changed account at the next read, and says so once", async () => {
+    // The account loses the probe resource, for example after a role change
+    // in another session (ADR 0007 §7).
+    const { provider, onAccessChange } = providerAnsweringInTurn(
+      json(200, EDITOR),
+      json(200, ME)
+    )
+    await provider.checkAuth({})
+    expect(onAccessChange).not.toHaveBeenCalled()
+    await provider.checkError({ status: 403, message: "errors.forbidden" })
+    expect(onAccessChange).toHaveBeenCalledTimes(1)
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).resolves.toBe(false)
+    // The same answer again changes nothing.
+    await provider.checkAuth({})
+    expect(onAccessChange).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not call onAccessChange for the first answer, or for one that changes nothing", async () => {
+    const { provider, onAccessChange } = providerAnsweringInTurn(
+      json(200, EDITOR),
+      json(200, { ...EDITOR, name: "Új Név" })
+    )
+    await provider.checkAuth({})
+    await provider.checkError({ status: 403, message: "errors.forbidden" })
+    expect(onAccessChange).not.toHaveBeenCalled()
+  })
+
+  it("forgets the kept answer at a sign-in, a sign-out and a 401", async () => {
+    for (const end of [
+      (provider: AuthProvider) =>
+        provider.login({ email: "a@example.test", password: "pw" }),
+      (provider: AuthProvider) => provider.logout({}),
+      (provider: AuthProvider) => provider.logout(SIGN_OUT_PARAMS),
+      (provider: AuthProvider) => provider.checkAuth({}).catch(() => undefined),
+    ]) {
+      let reads = 0
+      const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+        const url = String(input)
+        if (url.endsWith("/auth/login")) {
+          return json(200, { step: "done" })
+        }
+        if (url.endsWith("/auth/logout") && init?.method === "POST") {
+          return new Response(null, { status: 204 })
+        }
+        // The first /auth/me answers the editor, every later one 401.
+        reads += 1
+        return reads === 1
+          ? json(200, EDITOR)
+          : json(401, envelope("unauthorized"))
+      })
+      const provider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+      await provider.checkAuth({})
+      await end(provider)
+      // With nothing kept, the question reads /auth/me, which has no
+      // session: no answer from the previous one.
+      await expect(
+        provider.canAccess?.({ action: "list", resource: "probes" } as never)
+      ).rejects.toBeInstanceOf(SessionCheckError)
+    }
+  })
+
+  it("keeps the answer when a sign-out was not confirmed", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) =>
+      String(input).endsWith("/auth/logout")
+        ? json(500, envelope("internal"))
+        : json(200, EDITOR)
+    )
+    const provider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+    await provider.checkAuth({})
+    await expect(provider.logout(SIGN_OUT_PARAMS)).rejects.toBeInstanceOf(
+      SignOutError
+    )
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).resolves.toBe(true)
+    expect(meReads(fetch)).toBe(1)
+  })
+
+  it("never stores an answer that was sent before a sign-out", async () => {
+    let release: (answer: Response) => void = () => undefined
+    let reads = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      () =>
+        new Promise<Response>((resolve) => {
+          reads += 1
+          // Only /auth/me is asked here; the first read waits.
+          if (reads === 1) {
+            release = resolve
+          } else {
+            resolve(json(401, envelope("unauthorized")))
+          }
+        })
+    )
+    const provider = createAuthProvider({ apiBaseUrl: "/api/admin", fetch })
+    const slow = provider.checkAuth({})
+    await provider.logout({})
+    release(json(200, EDITOR))
+    await slow
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).rejects.toBeInstanceOf(SessionCheckError)
   })
 })
 
@@ -372,10 +587,164 @@ describe("checkError", () => {
     expect(error.message).toBe("errors.unauthorized")
   })
 
-  it("never signs out on a 403, or on any other error", async () => {
+  it("never signs out on a 403, and asks /auth/me again for it alone", async () => {
+    const { provider, fetch } = providerAnswering(json(200, ME))
+    await expect(
+      provider.checkError({ status: 403, message: "errors.forbidden" })
+    ).resolves.toBeUndefined()
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["/api/admin/auth/me"])
+    expect(fetch.mock.calls[0][1]?.method).toBe("GET")
+  })
+
+  it.each([
+    ["a server failure", json(500, envelope("internal"))],
+    ["an answer that is no account", json(200, { pid: "" })],
+    ["no answer at all", new TypeError("Failed to fetch")],
+  ])(
+    "keeps the session after a 403 when the refetch of /auth/me meets %s",
+    async (_case, answer) => {
+      const { provider } = providerAnswering(answer)
+      await expect(
+        provider.checkError({ status: 403, message: "errors.forbidden" })
+      ).resolves.toBeUndefined()
+    }
+  )
+
+  /**
+   * A provider whose `/auth/me` answers are released by hand, in order.
+   *
+   * @returns the provider, the `onAccessChange` spy, the number of reads
+   *   sent so far, and `answer`, which releases the oldest waiting read.
+   */
+  function providerAnsweringByHand() {
+    const waiting: ((answer: Response) => void)[] = []
+    let sent = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      () =>
+        new Promise<Response>((resolve) => {
+          sent += 1
+          waiting.push(resolve)
+        })
+    )
+    const onAccessChange = vi.fn<() => void>()
+    const provider = createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      onAccessChange,
+    })
+    /** Lets queued promise callbacks run, so a chained read is sent. */
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+    return {
+      provider,
+      onAccessChange,
+      settle,
+      sent: () => sent,
+      answer: async (body: Response) => {
+        const release = waiting.shift()
+        expect(release, "a read is waiting").toBeDefined()
+        release?.(body)
+        await settle()
+      },
+    }
+  }
+
+  it("refetches with a read sent after the 403, not one already in flight", async () => {
+    // The account loses the probe resource between a read that is in
+    // flight and the refused call: only a read sent after the refusal can
+    // say so.
+    const { provider, onAccessChange, settle, sent, answer } =
+      providerAnsweringByHand()
+    const first = provider.checkAuth({})
+    await answer(json(200, EDITOR))
+    await first
+    const inFlight = provider.checkAuth({})
+    await settle()
+    expect(sent()).toBe(2)
+    const refused = provider.checkError({
+      status: 403,
+      message: "errors.forbidden",
+    })
+    await settle()
+    // The refetch waits for the read in flight instead of joining it.
+    expect(sent()).toBe(2)
+    await answer(json(200, EDITOR))
+    await inFlight
+    expect(sent()).toBe(3)
+    await answer(json(200, ME))
+    await expect(refused).resolves.toBeUndefined()
+    expect(onAccessChange).toHaveBeenCalledTimes(1)
+    await expect(
+      provider.canAccess?.({ action: "list", resource: "probes" } as never)
+    ).resolves.toBe(false)
+  })
+
+  it("sends one read for a burst of 403s that arrive while a read is in flight", async () => {
+    const { provider, settle, sent, answer } = providerAnsweringByHand()
+    const inFlight = provider.checkAuth({})
+    await settle()
+    const refusals = [1, 2, 3].map(() =>
+      provider.checkError({ status: 403, message: "errors.forbidden" })
+    )
+    await settle()
+    expect(sent()).toBe(1)
+    await answer(json(200, EDITOR))
+    await inFlight
+    // One more read for all three, sent after the first settled.
+    expect(sent()).toBe(2)
+    await answer(json(200, ME))
+    await expect(Promise.all(refusals)).resolves.toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ])
+    expect(sent()).toBe(2)
+  })
+
+  it("sends no waiting refetch once the user signed out", async () => {
+    const { provider, settle, sent, answer } = providerAnsweringByHand()
+    const inFlight = provider.checkAuth({}).catch(() => undefined)
+    await settle()
+    const refused = provider.checkError({
+      status: 403,
+      message: "errors.forbidden",
+    })
+    await provider.logout({})
+    await answer(json(200, EDITOR))
+    await inFlight
+    await expect(refused).resolves.toBeUndefined()
+    // The read in flight, and nothing for the session that ended.
+    expect(sent()).toBe(1)
+  })
+
+  it("signs out after a waiting refetch says the session has ended", async () => {
+    const { provider, settle, answer } = providerAnsweringByHand()
+    const inFlight = provider.checkAuth({})
+    await settle()
+    const refused = rejection(
+      provider.checkError({ status: 403, message: "errors.forbidden" })
+    )
+    await answer(json(200, EDITOR))
+    await inFlight
+    await answer(json(401, envelope("unauthorized")))
+    const error = (await refused) as SessionCheckError
+    expect(error).toBeInstanceOf(SessionCheckError)
+    expect(error.status).toBe(401)
+    expect(error.message).toBe("errors.unauthorized")
+  })
+
+  it("signs out after a 403 when the refetch says the session has ended", async () => {
+    const { provider } = providerAnswering(json(401, envelope("unauthorized")))
+    const error = (await rejection(
+      provider.checkError({ status: 403, message: "errors.forbidden" })
+    )) as SessionCheckError
+    expect(error).toBeInstanceOf(SessionCheckError)
+    expect(error.status).toBe(401)
+    expect(error.message).toBe("errors.unauthorized")
+  })
+
+  it("never signs out on any other error, and asks nothing for it", async () => {
     const { provider, fetch } = providerAnswering(json(200, ME))
     for (const error of [
-      { status: 403, message: "Forbidden" },
       { status: 404 },
       { status: 409 },
       { status: 422 },
@@ -744,6 +1113,11 @@ describe("parseMeResponse", () => {
     ["permissions that are not a list", { ...ME, permissions: {} }],
     ["no admin flag", { ...ME, is_admin: undefined }],
     ["an admin flag that is not a boolean", { ...ME, is_admin: "true" }],
+    ["no access map", { ...ME, access: undefined }],
+    ["an access map that is a list", { ...ME, access: [] }],
+    ["an unknown action", { ...ME, access: { probes: ["export"] } }],
+    ["an action twice", { ...ME, access: { probes: ["list", "list"] } }],
+    ["actions that are not a list", { ...ME, access: { probes: "list" } }],
   ])("refuses %s", (_case, body) => {
     expect(parseMeResponse(body)).toBeUndefined()
   })
@@ -762,8 +1136,56 @@ describe("parseMeResponse", () => {
     ).toEqual({ ...ME, roles: [], permissions: [], is_admin: false })
   })
 
+  it("reads the access map as sent", () => {
+    expect(parseMeResponse(EDITOR)).toEqual(EDITOR)
+    // A member named __proto__, as JSON.parse reads it from the network,
+    // stays an own member and sets no prototype.
+    const text = JSON.stringify({
+      ...ME,
+      access: { placeholder: ["list"] },
+    }).replace('"placeholder"', '"__proto__"')
+    const access = parseMeResponse(JSON.parse(text))?.access ?? {}
+    expect(Object.getPrototypeOf(access)).toBe(Object.prototype)
+    expect(Object.hasOwn(access, "__proto__")).toBe(true)
+  })
+
+  it("never throws on any access map, and accepts exactly lists of known actions", () => {
+    const actions = [
+      "list",
+      "show",
+      "create",
+      "edit",
+      "delete",
+      "publish",
+      "restore",
+      "purge",
+      "history",
+    ]
+    fc.assert(
+      fc.property(
+        fc.dictionary(
+          fc.string(),
+          fc.oneof(
+            fc.uniqueArray(fc.constantFrom(...actions)),
+            fc.array(fc.string()),
+            fc.jsonValue()
+          )
+        ),
+        (access) => {
+          const known = Object.values(access).every(
+            (value) =>
+              Array.isArray(value) &&
+              value.every((action) => actions.includes(action as string)) &&
+              new Set(value).size === value.length
+          )
+          expect(parseMeResponse({ ...ME, access }) !== undefined).toBe(known)
+        }
+      )
+    )
+  })
+
   it("keeps no member beyond the MeResponse ones", () => {
-    expect(parseMeResponse({ ...ME, token: "x", access: {} })).toEqual(ME)
+    expect(parseMeResponse({ ...ME, token: "x" })).toEqual(ME)
   })
 
   it("never throws on any JSON value", () => {
@@ -775,6 +1197,30 @@ describe("parseMeResponse", () => {
         }
       })
     )
+  })
+})
+
+describe("sameAccess", () => {
+  it("compares what the account may do, not its name or address", () => {
+    expect(sameAccess(ME, { ...ME })).toBe(true)
+    expect(
+      sameAccess(ME, { ...ME, name: "Más", email: "mas@example.test" })
+    ).toBe(true)
+    // The roles reach an access question only through the permissions and
+    // the admin flag, which the server sends with them.
+    expect(sameAccess(ME, { ...ME, roles: ["writer", "secretary"] })).toBe(true)
+    const changes: MeResponse[] = [
+      { ...ME, pid: "1d5e3f2a-0000-4000-8000-000000000000" },
+      { ...ME, scope: "password_change" },
+      { ...ME, is_admin: true },
+      { ...ME, permissions: [] },
+      EDITOR,
+      { ...EDITOR, access: { probes: ["list"] } },
+    ]
+    for (const changed of changes) {
+      expect(sameAccess(ME, changed)).toBe(false)
+      expect(sameAccess(changed, ME)).toBe(false)
+    }
   })
 })
 

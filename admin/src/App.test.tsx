@@ -6,6 +6,7 @@
 import type { ReactNode } from "react"
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { QueryClient } from "@tanstack/react-query"
 import { Route, RouterProvider, createMemoryRouter } from "react-router-dom"
 import { describe, expect, it, vi } from "vitest"
 
@@ -34,6 +35,7 @@ const ME: MeResponse = {
   roles: ["writer"],
   permissions: ["edit posts", "edit labels", "edit authors", "manage media"],
   is_admin: false,
+  access: {},
 }
 
 /**
@@ -160,6 +162,7 @@ function mountAdmin(
           fetch: api.fetch,
         })}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
+        queryClient={new QueryClient()}
         sourceCommit={SHA}
         developmentRoutes={developmentRoutes}
         activityTarget={activity.target}
@@ -201,6 +204,34 @@ describe("AdminApp", () => {
       screen.getByRole("link", { name: "Verseghy-admin" })
     ).toHaveAttribute("href", "/admin/")
   })
+
+  it.each([
+    ["/admin/access-denied", "access-denied-page", "Hozzáférés megtagadva"],
+    [
+      "/admin/authentication-error",
+      "authentication-error-page",
+      "Hitelesítési hiba",
+    ],
+  ])(
+    "shows backend3's Hungarian page at %s, inside the layout",
+    async (entry, testId, heading) => {
+      // ra-core sends a refused resource page here (useRequireAccess);
+      // without backend3's page it would render nothing at all.
+      mountAdmin(entry)
+      const page = await screen.findByTestId(testId)
+      expect(within(page).getByRole("heading", { level: 1 })).toHaveTextContent(
+        heading
+      )
+      // The sidebar stays, so the user can go on to what they may open.
+      const sidebar = document.querySelector('[data-sidebar="content"]')
+      expect(sidebar).not.toBeNull()
+      expect(
+        within(sidebar as HTMLElement).getByRole("link", {
+          name: "Irányítópult",
+        })
+      ).toHaveAttribute("href", "/admin/")
+    }
+  )
 
   it("marks the dashboard menu item active on the dashboard only", async () => {
     mountAdmin("/admin")

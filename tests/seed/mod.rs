@@ -18,7 +18,7 @@ use axum::http::{StatusCode, header::COOKIE};
 use backend3::{
     app::App,
     domain::{
-        authz::{AccountGrants, Permission, Role},
+        authz::{AccessAction, AccountGrants, Permission, RESOURCE_ACCESS, Role},
         password_hash::{self, PasswordHashKind},
         seed::SEED_ACCOUNT,
         session_cookie::SESSION_COOKIE_NAME,
@@ -30,7 +30,7 @@ use loco_rs::{
     environment::Environment,
 };
 use sea_orm::{EntityTrait, PaginatorTrait};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::support::{repository_root, with_app, with_server};
 
@@ -205,6 +205,9 @@ async fn the_seed_account_signs_in_through_the_admin_api() {
                 "roles": ["admin"],
                 "permissions": Permission::ALL.map(Permission::name),
                 "is_admin": true,
+                // And so every action of every row of the access table
+                // (ADR 0007 §7), in the ADR's order.
+                "access": every_action_of_every_resource(),
             })
         );
     })
@@ -232,4 +235,20 @@ fn the_e2e_suite_holds_the_seed_account() {
             path.display()
         );
     }
+}
+
+/// Every action of every row of the access table, as `/auth/me` sends it to
+/// an account with the `admin` role: read from the table itself, not
+/// through the access map, so the seed test checks the map independently.
+fn every_action_of_every_resource() -> Value {
+    RESOURCE_ACCESS
+        .iter()
+        .map(|row| {
+            let mut actions: Vec<_> = row.rules.iter().map(|rule| rule.action).collect();
+            actions.sort();
+            let names: Vec<&str> = actions.into_iter().map(AccessAction::name).collect();
+            (row.resource.to_owned(), json!(names))
+        })
+        .collect::<Map<String, Value>>()
+        .into()
 }

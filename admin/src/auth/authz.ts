@@ -1,23 +1,27 @@
 /**
- * The roles and permissions that `/auth/me` reports (ADR 0007 §1, §2, §7),
- * as values the admin can check at run time.
+ * The roles, permissions and access map that `/auth/me` reports (ADR 0007
+ * §1, §2, §7), as values the admin can check at run time.
  *
- * Why this module exists: the generated bindings `Role` and `Permission`
- * are types only, and a type says nothing about a body that arrives over
- * the network. `parseMeResponse` (`./auth-provider.ts`) uses the readers
- * here to accept only the roles and permissions that this build knows.
+ * Why this module exists: the generated bindings `Role`, `Permission` and
+ * `AccessAction` are types only, and a type says nothing about a body that
+ * arrives over the network. `parseMeResponse` (`./auth-provider.ts`) uses
+ * the readers here to accept only the roles, permissions and actions that
+ * this build knows.
  *
- * The convention: the two records below are typed `Record<Role, true>` and
- * `Record<Permission, true>` over the generated unions. The Rust enums are
- * the contract (ADR 0005); when one of them gains or loses a value, the
- * regenerated binding makes its record incomplete or adds an unknown key,
- * and `npm run typecheck` fails here until the record follows. The
- * identifiers stay in English exactly as the server stores them (ADR 0021
- * §6); their Hungarian labels belong to the screens that show them.
+ * The convention: the records below are typed `Record<Role, true>`,
+ * `Record<Permission, true>` and `Record<AccessAction, true>` over the
+ * generated unions. The Rust enums are the contract (ADR 0005); when one of
+ * them gains or loses a value, the regenerated binding makes its record
+ * incomplete or adds an unknown key, and `npm run typecheck` fails here
+ * until the record follows. The identifiers stay in English exactly as the
+ * server sends them (ADR 0021 §6); their Hungarian labels belong to the
+ * screens that show them.
  *
  * The admin UI only hides what an account may not use; the server decides
  * every access itself (ADR 0007 §7).
  */
+import type { AccessAction } from "@/bindings/AccessAction"
+import type { MeResponse } from "@/bindings/MeResponse"
 import type { Permission } from "@/bindings/Permission"
 import type { Role } from "@/bindings/Role"
 
@@ -47,6 +51,35 @@ export const KNOWN_PERMISSIONS: Readonly<Record<Permission, true>> = {
   "edit banners": true,
   "edit site settings": true,
   "edit diaktoll": true,
+}
+
+/**
+ * Every action of the access map, in the server's order (ADR 0007 §7):
+ * ra-core's five, then backend3's four.
+ */
+export const KNOWN_ACCESS_ACTIONS: Readonly<Record<AccessAction, true>> = {
+  list: true,
+  show: true,
+  create: true,
+  edit: true,
+  delete: true,
+  publish: true,
+  restore: true,
+  purge: true,
+  history: true,
+}
+
+/**
+ * Whether `value` is the name of an access action this build knows.
+ *
+ * @param value - any value, such as the `action` that ra-core passes to
+ *   `canAccess`.
+ * @returns `true` for one of {@link KNOWN_ACCESS_ACTIONS}'s keys.
+ */
+export function isAccessAction(value: unknown): value is AccessAction {
+  // `Object.hasOwn`, not `in`: an action such as "toString" must not be
+  // found on the prototype.
+  return typeof value === "string" && Object.hasOwn(KNOWN_ACCESS_ACTIONS, value)
 }
 
 /**
@@ -101,4 +134,53 @@ export function readRoles(value: unknown): Role[] | undefined {
  */
 export function readPermissions(value: unknown): Permission[] | undefined {
   return readKnownList(value, KNOWN_PERMISSIONS)
+}
+
+/**
+ * Reads the `access` member of a `/auth/me` answer: the account's actions
+ * per ra-core resource (ADR 0007 §7).
+ *
+ * @param value - the member's parsed JSON value.
+ * @returns the map itself, or `undefined` when the value is not a plain
+ *   object whose every member is a list of known actions, each once. The
+ *   server lists the actions in its own order and leaves out a resource
+ *   with none.
+ *
+ * The parsed object is returned, not a copy: `JSON.parse` keeps a member
+ * named `__proto__` as an own property, whereas assigning it to a fresh
+ * object would set that object's prototype instead. Readers look a resource
+ * up with {@link accessActionsOf}, never with `in` or a bare index.
+ */
+export function readAccess(value: unknown): MeResponse["access"] | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined
+  }
+  // A plain object only (what JSON.parse makes, or one without a
+  // prototype): a class instance or a boxed value is no access map.
+  const prototype: unknown = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) {
+    return undefined
+  }
+  for (const actions of Object.values(value)) {
+    if (readKnownList(actions, KNOWN_ACCESS_ACTIONS) === undefined) {
+      return undefined
+    }
+  }
+  return value as MeResponse["access"]
+}
+
+/**
+ * The actions an access map lists for `resource`.
+ *
+ * @param access - an access map that {@link readAccess} accepted.
+ * @param resource - an ra-core resource name, of any spelling.
+ * @returns the resource's actions, or an empty list when the map has no own
+ *   member of that name: a name such as `constructor` or `__proto__` is
+ *   never found on the object's prototype.
+ */
+export function accessActionsOf(
+  access: MeResponse["access"],
+  resource: string
+): readonly AccessAction[] {
+  return Object.hasOwn(access, resource) ? (access[resource] ?? []) : []
 }

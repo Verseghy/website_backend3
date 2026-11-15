@@ -1,11 +1,13 @@
-//! Wire types of roles and permissions (ADR 0007 §1, §2, §7).
+//! Wire types of roles, permissions and access actions (ADR 0007 §1, §2,
+//! §7).
 //!
-//! The admin UI receives an account's roles and effective permissions in
-//! `/auth/me` ([`super::auth::MeResponse`]), and later the roles and
-//! permissions lists and the user editor. The values are the identifiers of
-//! `crate::domain::authz`, in English exactly as stored (`edit posts`,
-//! `writer`), because identifiers stay in English and the admin shows
-//! Hungarian labels for them (ADR 0021 §6).
+//! The admin UI receives an account's roles, effective permissions and
+//! access map in `/auth/me` ([`super::auth::MeResponse`]), and later the
+//! roles and permissions lists and the user editor. The values are the
+//! identifiers of `crate::domain::authz`, in English exactly as stored
+//! (`edit posts`, `writer`) or as ra-core names them (`list`), because
+//! identifiers stay in English and the admin shows Hungarian labels for them
+//! (ADR 0021 §6).
 //!
 //! Domain types never derive ts-rs (ADR 0008 rule 6), so these enums mirror
 //! the domain's and convert from them with an exhaustive `match`: a new
@@ -130,6 +132,54 @@ impl From<authz::Role> for Role {
     }
 }
 
+/// An action the admin UI checks on an ra-core resource (ADR 0007 §7):
+/// ra-core's `list`, `show`, `create`, `edit` and `delete`, and backend3's
+/// `publish`, `restore`, `purge` and `history`.
+// Exported doc comments here and on the variants. The name keeps the
+// binding apart from the activity log's actions (ADR 0011 §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../admin/src/bindings/")]
+pub enum AccessAction {
+    /// The list screen and the sidebar entry.
+    List,
+    /// One record, read only.
+    Show,
+    /// A new record.
+    Create,
+    /// An update of a record.
+    Edit,
+    /// The soft delete into the trash.
+    Delete,
+    /// Publishing and unpublishing.
+    Publish,
+    /// Restoring from the trash.
+    Restore,
+    /// Permanent delete from the trash (the admin role only).
+    Purge,
+    /// One record's history.
+    History,
+}
+
+impl From<authz::AccessAction> for AccessAction {
+    /// The wire spelling of a domain action.
+    ///
+    /// - `action`: the domain value.
+    fn from(action: authz::AccessAction) -> Self {
+        match action {
+            authz::AccessAction::List => Self::List,
+            authz::AccessAction::Show => Self::Show,
+            authz::AccessAction::Create => Self::Create,
+            authz::AccessAction::Edit => Self::Edit,
+            authz::AccessAction::Delete => Self::Delete,
+            authz::AccessAction::Publish => Self::Publish,
+            authz::AccessAction::Restore => Self::Restore,
+            authz::AccessAction::Purge => Self::Purge,
+            authz::AccessAction::History => Self::History,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -159,8 +209,34 @@ mod tests {
     }
 
     #[test]
+    fn every_access_action_is_sent_as_its_domain_name() {
+        for action in authz::AccessAction::ALL {
+            assert_eq!(
+                serde_json::to_value(AccessAction::from(action)).expect("serializes"),
+                json!(action.name()),
+                "{action}"
+            );
+        }
+        // The wire enum keeps the domain's order, which the access map's
+        // lists follow.
+        let wire: Vec<AccessAction> = authz::AccessAction::ALL
+            .into_iter()
+            .map(AccessAction::from)
+            .collect();
+        assert!(wire.is_sorted());
+    }
+
+    #[test]
     fn typescript_declarations() {
         let config = ts_rs::Config::default();
+        let actions: Vec<String> = authz::AccessAction::ALL
+            .iter()
+            .map(|action| format!("\"{}\"", action.name()))
+            .collect();
+        assert_eq!(
+            AccessAction::decl(&config),
+            format!("type AccessAction = {};", actions.join(" | "))
+        );
         let names: Vec<String> = authz::Permission::ALL
             .iter()
             .map(|permission| format!("\"{}\"", permission.name()))

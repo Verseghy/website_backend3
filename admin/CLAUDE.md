@@ -110,6 +110,29 @@ ADR 0005 (bindings) before changing anything here.
   starts no call while one is open, so `refreshSession` gives up after
   `REFRESH_TIMEOUT_MS` (30 seconds): a stalled request must never stop the
   refresh for good (`src/test/hanging-fetch.ts` stands in for one).
+- **Access (ADR 0007 §7).** `authProvider.canAccess` answers from the
+  access map of the last `/auth/me` answer, which the provider keeps, and
+  never asks the server per question: `decideAccess` in
+  `src/auth/access.ts`, the map plus `RECORD_RULES`, the TypeScript mirror
+  of the server's record-level rules. The kit's sidebar and ra-core's
+  page components ask it, so the sidebar lists only the resources the
+  account may list; never hide or show a screen from `permissions` or
+  `is_admin` yourself. A resource page that the map refuses goes to
+  `/admin/access-denied`, and one whose question could not be answered to
+  `/admin/authentication-error`: ra-core's redirects, which render
+  backend3's Hungarian pages of `src/auth/AccessPages.tsx` (`<Admin>`
+  would otherwise render nothing there). A `403` makes `checkError` read
+  `/auth/me` again, with a read sent after the refusal, and keep the user
+  signed in; when the answer changed, the provider's `onAccessChange`
+  (`invalidateAccessChecks` of `src/auth/access-checks.ts`, wired in
+  `src/main.tsx` over the `queryClient` that `<Admin>` gets) makes ra-core
+  re-ask its cached questions. A slice that adds a record-level rule adds
+  it to `RECORD_RULES`, the same rule in Rust (`src/domain/authz.rs`), and
+  cases with a record to `../tests/fixtures/authz_cases.json`, which
+  `src/auth/authz-cases.test.ts` and the Rust test
+  `tests/domain/authz_cases.rs` both run; a rule that reads a field that
+  can change also invalidates the cached answers after a save, since
+  ra-core keys them by the record's id only.
 - **Clean room (ADR 0011 §8, ADR 0018 §3.4).** Never install an
   `@react-admin/` package (react-admin's Enterprise Edition), and never read
   or copy Enterprise source, types, styles or examples. `npm run clean-room`
