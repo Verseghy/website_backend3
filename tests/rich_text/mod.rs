@@ -4,13 +4,16 @@
 //! `src/domain/rich_text/`. These tests treat the sanitiser as a black box,
 //! as every write path will: the properties P1 (idempotence) and P5
 //! (determinism across instances) over generated HTML, the runner of the
-//! permanent regression fixtures under `tests/fixtures/regressions/`, the
-//! snapshot of `css-vectors.jsonl`, and the admin-write validator and the
-//! search text over the generated HTML and the fixtures (`validate`). The
-//! fixture runner, the snapshot and the validator's fixture tests read files
-//! and therefore cannot live in the pure `src/domain/` (ADR 0008).
+//! permanent regression fixtures under `tests/fixtures/regressions/`, P2
+//! and P3 over the editor's golden files under `tests/fixtures/e1/`
+//! (`golden`), the snapshot of `css-vectors.jsonl`, and the admin-write
+//! validator and the search text over the generated HTML and the fixtures
+//! (`validate`). The fixture runners, the snapshot and the validator's
+//! fixture tests read files and therefore cannot live in the pure
+//! `src/domain/` (ADR 0008).
 
 mod css_vectors;
+mod golden;
 mod manifest;
 mod oracle;
 mod properties;

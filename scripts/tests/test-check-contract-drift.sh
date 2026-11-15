@@ -4,8 +4,9 @@
 # Uses a throwaway git repository with committed bindings and snapshots, then
 # changes them the ways a stale PR would: an edited binding, a new untracked
 # binding, an edited snapshot, an untracked pending snapshot, an edited or
-# deleted rich-text manifest file. Changes outside the contract paths, the
-# admin's own rich-text code included, must pass. Run from the repository
+# deleted rich-text manifest file, an edited, new or deleted golden file of
+# the editor. Changes outside the contract paths, the admin's own rich-text
+# code and the other test fixtures included, must pass. Run from the repository
 # root:
 #   bash scripts/tests/test-check-contract-drift.sh
 # No network access is needed.
@@ -58,13 +59,16 @@ git_fixture() {
 # reset_fixture: recreate the repository with a clean committed contract.
 reset_fixture() {
   rm -rf "$REPO"
-  mkdir -p "$REPO/admin/src/bindings" "$REPO/admin/src/rich-text" "$REPO/tests/requests/snapshots" "$REPO/src/domain/snapshots" "$REPO/src"
+  mkdir -p "$REPO/admin/src/bindings" "$REPO/admin/src/rich-text" "$REPO/tests/requests/snapshots" "$REPO/src/domain/snapshots" "$REPO/src" "$REPO/tests/fixtures/e1" "$REPO/tests/fixtures/regressions"
   printf 'export type Label = { id: number };\n' >"$REPO/admin/src/bindings/Label.ts"
   printf -- '---\nsource: tests/requests/openapi.rs\n---\n{"openapi":"3.1.0"}\n' >"$REPO/tests/requests/snapshots/openapi__document.snap"
   printf -- '---\nsource: src/domain/slug.rs\n---\nalma\n' >"$REPO/src/domain/snapshots/slug__basic.snap"
   printf '{"policy_version": "content-v1"}\n' >"$REPO/admin/src/rich-text/policy.json"
   printf '{"element":"p","input":"","output":null}\n' >"$REPO/admin/src/rich-text/css-vectors.jsonl"
   printf 'export {};\n' >"$REPO/admin/src/rich-text/paste-filter.ts"
+  printf '<p>a</p>' >"$REPO/tests/fixtures/e1/canonical-a.html"
+  printf '# e1\n' >"$REPO/tests/fixtures/e1/README.md"
+  printf '<p>x</p>' >"$REPO/tests/fixtures/regressions/x.html"
   printf 'pub fn f() {}\n' >"$REPO/src/lib.rs"
   git_fixture init -q
   git_fixture add -A
@@ -117,6 +121,24 @@ reset_fixture
 printf 'export const x = 1;\n' >"$REPO/admin/src/rich-text/paste-filter.ts"
 printf 'export {};\n' >"$REPO/admin/src/rich-text/serialize.ts"
 run_case "the admin's own rich-text code is not generated" 0 -- bash "$SCRIPT" --repo "$REPO"
+
+reset_fixture
+printf '<p>b</p>' >"$REPO/tests/fixtures/e1/canonical-a.html"
+run_case "an edited golden file fails" 1 --contains "tests/fixtures/e1/canonical-a.html" -- bash "$SCRIPT" --repo "$REPO"
+run_case "the failure names the golden-file writer" 1 --contains "npm run test:e1" -- bash "$SCRIPT" --repo "$REPO"
+
+reset_fixture
+printf '<p>t</p>' >"$REPO/tests/fixtures/e1/table-t.html"
+run_case "a new untracked golden file fails" 1 --contains "?? tests/fixtures/e1/table-t.html" -- bash "$SCRIPT" --repo "$REPO"
+
+reset_fixture
+rm "$REPO/tests/fixtures/e1/canonical-a.html"
+run_case "a deleted golden file fails" 1 --contains "tests/fixtures/e1/canonical-a.html" -- bash "$SCRIPT" --repo "$REPO"
+
+reset_fixture
+printf '<p>y</p>' >"$REPO/tests/fixtures/regressions/x.html"
+printf '<p>z</p>' >"$REPO/tests/fixtures/regressions/z.html"
+run_case "the other test fixtures are not generated" 0 -- bash "$SCRIPT" --repo "$REPO"
 
 reset_fixture
 run_case "it works from a subdirectory of the repository" 0 -- bash "$SCRIPT" --repo "$REPO/src"

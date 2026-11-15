@@ -29,6 +29,16 @@ function styleOf(json: JsonObject, tag: string): JsonObject[] {
     .style as JsonObject[]
 }
 
+/** The grammar of one property of one element in a mutable policy copy. */
+function grammarOf(
+  json: JsonObject,
+  tag: string,
+  property: string
+): JsonObject {
+  const rule = styleOf(json, tag).find((entry) => entry.property === property)
+  return rule!.grammar as JsonObject
+}
+
 describe("the site schema", () => {
   const schema = siteSchema()
 
@@ -44,6 +54,10 @@ describe("the site schema", () => {
         "listItem",
         "orderedList",
         "paragraph",
+        "table",
+        "tableCell",
+        "tableHeader",
+        "tableRow",
         "text",
       ].sort()
     )
@@ -208,6 +222,13 @@ describe("siteExtensions options", () => {
       "h2 text-align allows left, center, but p allows left, center, right, justify",
     ],
     [
+      "cells aligned differently from paragraphs",
+      (json) => {
+        grammarOf(json, "th", "text-align").values = ["left", "right"]
+      },
+      "th text-align allows left, right, but p allows left, center, right, justify",
+    ],
+    [
       "a span font size in another unit",
       (json) => {
         styleOf(json, "span")[3].grammar = { kind: "px", min: 1, max: 100 }
@@ -230,8 +251,8 @@ describe("siteExtensions options", () => {
   it("follows the policy rather than restating it", () => {
     const policy = policyWith((json) => {
       ;(styleOf(json, "ul")[0].grammar as JsonObject).values = ["square"]
-      for (const tag of ["p", "h1", "h2", "h3", "h4"]) {
-        ;(styleOf(json, tag)[0].grammar as JsonObject).values = ["center"]
+      for (const tag of ["p", "h1", "h2", "h3", "h4", "td", "th"]) {
+        grammarOf(json, tag, "text-align").values = ["center"]
       }
     })
     const schema = siteSchema({ policy })

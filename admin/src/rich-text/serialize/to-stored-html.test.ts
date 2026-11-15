@@ -11,6 +11,7 @@ import {
   reparse,
   storedHtmlHarness,
 } from "@/test/stored-html"
+import { CANONICAL_BODIES, TABLE_SHAPES } from "@/test/editor-fixtures"
 import { pasteEvent, siteSchema } from "@/test/site-schema"
 
 /**
@@ -20,12 +21,10 @@ import { pasteEvent, siteSchema } from "@/test/site-schema"
 const harness = storedHtmlHarness()
 afterAll(() => harness.destroy())
 const { J, load, save } = harness
-const NBSP = "\u00a0"
-
 const FIXTURES = regressionFixtures()
 
-/** The nodes the site schema has no node for yet (editor.md §4.3 rows 5-10). */
-const PENDING = /<(?:table|img|iframe)\b/
+/** The nodes the site schema has no node for yet (editor.md §4.3 rows 8-10). */
+const PENDING = /<(?:img|iframe)\b/
 
 /**
  * The top-level blocks of the canonical shapes of editor.md §3.7 that the
@@ -37,44 +36,20 @@ const SHAPES = reparse(
   .map((node) => writeHtml([node]))
   .filter((block) => !PENDING.test(block))
 
-/** Canonical bodies beyond the shapes: what the editor writes. */
+/**
+ * Canonical bodies beyond the shapes, what the editor writes, and the
+ * canonical tables (`src/test/editor-fixtures.ts`, shared with the golden
+ * files of tests/fixtures/e1).
+ */
 const CANONICAL = [
-  "<p></p>",
-  "<hr>",
-  `<p>két${NBSP} szóköz és${NBSP}${NBSP} három</p>`.replace(
-    /\u00a0/g,
-    "&nbsp;"
-  ),
-  "<p>sor<br>új sor<br><br>üres sor előtte</p>",
-  "<p>szóköz a sortörés előtt <br>után</p>",
-  '<h1>Régi cím</h1><h3>Alcím</h3><h4 style="text-align: justify">Sorkizárt</h4>',
-  '<p style="text-align: right">jobbra</p>',
-  '<ol type="I"><li>a<ol start="3"><li>b</li></ol></li><li></li></ol>',
-  '<ul style="list-style-type: square"><li>a<ul><li>b</li></ul><ol><li>c</li></ol></li></ul>',
-  '<ul><li><p style="text-align: center">középre</p></li></ul>',
-  "<blockquote><p>két</p><p>bekezdés</p></blockquote>",
-  "<blockquote><ul><li>lista</li></ul></blockquote>",
-  "<blockquote></blockquote>",
-  "<p><s>áthúzott</s> <u>aláhúzott</u> x<sub>2</sub> x<sup>3</sup></p>",
-  '<p><span style="background-color: transparent">átlátszó</span> <span style="background-color: #000000b3">áttetsző</span></p>',
-  '<p><span style="background-color: #ffff00; color: #c00000; font-size: 1.82em">minden</span></p>',
-  '<p><a href="mailto:titkarsag@example.org" target="_blank" rel="noopener noreferrer">levél</a>, <a href="tel:+3612345678" target="_blank" rel="noopener noreferrer">telefon</a>, <a href="/hirek/12" target="_blank" rel="noopener noreferrer">hír</a>, <a href="#top" target="_blank" rel="noopener noreferrer">fel</a></p>',
-  '<p><a target="_blank" rel="noopener noreferrer">cél nélkül</a> <a href="" target="_blank" rel="noopener noreferrer">üres cél</a></p>',
-  "<p>Lásd example.org</p><p>Vége</p>",
-  "<p>&lt;script&gt; &amp; &quot;idézet&quot; „Videó”</p>".replace(
-    /&quot;/g,
-    '"'
-  ),
-  // editor.md §3.7 (item D148, answered on 2026-11-15): an empty first
-  // list-item paragraph is kept in front of the item's lists, because
-  // `<li><ul>` reloads with the nested list moved out of the item.
-  "<ul><li><p></p><ul><li>b</li></ul></li><li></li></ul><p></p>",
-  "<ol><li><p></p><ol><li>b</li></ol><ul><li></li></ul></li></ol>",
+  ...Object.values(CANONICAL_BODIES),
+  ...Object.values(TABLE_SHAPES),
 ]
 
 describe("toStoredHtml(load(z)) == z (P-fix)", () => {
   it("has the schema's shapes of editor.md §3.7 to check", () => {
-    expect(SHAPES.length).toBeGreaterThanOrEqual(6)
+    expect(SHAPES.length).toBeGreaterThanOrEqual(7)
+    expect(SHAPES.some((shape) => shape.startsWith("<table"))).toBe(true)
   })
 
   it.each([...SHAPES, ...CANONICAL])("keeps %s", (body) => {

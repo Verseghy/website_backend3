@@ -644,6 +644,23 @@ class Parser {
   }
 
   /**
+   * The next token that is neither whitespace nor a comment, or `null` at
+   * the end: the token a browser's declaration parser sees, which drops
+   * comments. Only {@link declaredProperties} reads tokens this way.
+   */
+  nextIgnoringComments(): Token | null {
+    for (;;) {
+      const token = this.nextToken()
+      if (
+        token === null ||
+        (token.type !== "whitespace" && token.type !== "comment")
+      ) {
+        return token
+      }
+    }
+  }
+
+  /**
    * Runs `parse` on the input up to the next top-level `;`, then skips what
    * it left and the `;` itself (`parse_until_after`).
    *
@@ -855,6 +872,47 @@ export function readDeclarations(style: string): Declarations {
     }
   }
   return { read, unreadable }
+}
+
+/**
+ * The name of every declaration in a `style` attribute, whether or not its
+ * value can be read: the properties that the attribute declares in a
+ * browser. One reader needs them, that of the table cells' presentational
+ * hints (`extensions/site-table.ts`, editor.md §4.3 row 7): a hint gives
+ * way to a declaration of its property even when the server cannot store
+ * that declaration's value (`width: 50%`), because a browser shows the
+ * declaration, not the hint. The server reads no hint, so it has no
+ * counterpart of this function; the importer's normaliser, which reads
+ * the hints, needs one.
+ *
+ * Declarations are split off as {@link readDeclarations} splits them, at
+ * each top-level `;`, with two differences that follow CSS rather than the
+ * server's refusals: a comment before a name or its `:` does not hide the
+ * name (CSS reads `/* x *\/ width: 1px` as a width), and every declaration
+ * counts, not only the first {@link MAX_DECLARATIONS}. A name counts even
+ * when its value is one a browser would also refuse: telling such a value
+ * apart from one the server cannot store would need a CSS parser for every
+ * property, so the hint gives way in both cases.
+ *
+ * @param style - the attribute value as the DOM holds it, character
+ *   references already decoded.
+ * @returns the names, ASCII-lower-cased and with escapes decoded, each once.
+ */
+export function declaredProperties(style: string): ReadonlySet<string> {
+  const parser = new Parser(style)
+  const names = new Set<string>()
+  while (!parser.tokenizer.atEnd) {
+    parser.parseUntilAfterSemicolon(() => {
+      const name = parser.nextIgnoringComments()
+      if (
+        name?.type === "ident" &&
+        parser.nextIgnoringComments()?.type === "colon"
+      ) {
+        names.add(asciiLowerCase(name.value))
+      }
+    })
+  }
+  return names
 }
 
 /**
