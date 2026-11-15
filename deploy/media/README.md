@@ -10,8 +10,17 @@ This directory is the only source of its configuration:
 | `image.txt` | The image, `registry.access.redhat.com/ubi9/nginx-126`, by tag and digest. The maintainer chose nginx 1.26 over 1.24 on 2026-10-25 (research: DECISIONS R9, D35); the 1.26 stream retires in May 2028. |
 
 The maintainer decided that this repository holds the configuration and that
-website_k8s copies it byte for byte (research: DECISIONS R9, D15). The
-contract suite therefore tests exactly the bytes that are deployed.
+website_k8s copies it (research: DECISIONS R9, D15). Files in website_k8s do
+not cite this repository's design records, and the comments here cite ADRs
+and research decisions, so on 2026-11-15 the maintainer chose to copy the
+file without its comment lines (Verseghy/website_k8s#83, which adds the
+copy). The copy is `nginx.conf` with every comment line removed and runs of
+blank lines squeezed to one, under one line that names the source commit
+([below](#how-website_k8s-copies-the-configuration)). The comments stay here,
+next to the lines they explain. nginx reads the rest of a line after `#` as
+a comment and a blank line as white space, so the copy holds the same
+directives in the same order: the server that the contract suite tests
+against this file is the server that website_k8s deploys.
 
 The pinned image runs nginx 1.26.3 as user 1001 in group 0 and exposes port
 8080, as the sclorg nginx-container 1.26 README describes for the image
@@ -107,7 +116,7 @@ website_k8s owns the manifests. They must keep to what the suite tested:
 |---|---|
 | Image | The line of `image.txt`, by digest. |
 | Command | `nginx -e /dev/stdout`. Not the image's s2i run script, which writes to the root filesystem. `-e` moves the error log that nginx opens before it reads the configuration to stdout, where the configuration's `error_log` and `access_log` also write (ADR 0015 §1, Logs). |
-| Configuration | A ConfigMap whose key `nginx.conf` holds this file byte for byte, mounted read-only at `/etc/nginx/nginx.conf`. |
+| Configuration | A ConfigMap whose key `nginx.conf` holds the copy of this file without its comment lines ([below](#how-website_k8s-copies-the-configuration)), mounted read-only at `/etc/nginx/nginx.conf`. Its directives are this file's, unchanged and in the same order. |
 | Media | `backend-pv-claim`, `subPath: app/public`, read-only at `/srv/media/storage`. |
 | Writable paths | An `emptyDir` at `/tmp` for the pid file and nginx's temp directories. Nothing else is written. |
 | Security | restricted-v2, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, all capabilities dropped ([ADR 0023](../../docs/design/adr/0023-operations-hardening-rate-limits-monitoring-backups-secrets.md) §8). |
@@ -118,9 +127,9 @@ website_k8s owns the manifests. They must keep to what the suite tested:
 
 The media server has a metrics exporter (research: DECISIONS R9, D34), and
 the exporter reads nginx's `stub_status` page. website_k8s copies
-`nginx.conf` byte for byte, so it cannot add that page itself; the
-maintainer decided that this repository adds it, on a listener bound to the
-pod's loopback address (research: DECISIONS R15, D93).
+`nginx.conf` and changes only its comment and blank lines, so it cannot add
+that page itself; the maintainer decided that this repository adds it, on a
+listener bound to the pod's loopback address (research: DECISIONS R15, D93).
 
 - **Where.** `nginx.conf` ends with a second server that listens on
   `127.0.0.1:8081` and serves `stub_status` at `/stub_status`, and `404` for
@@ -157,15 +166,46 @@ pod's loopback address (research: DECISIONS R15, D93).
 
 ## How website_k8s copies the configuration
 
+The header of website_k8s's `verseghy-website/media/kustomization.yaml`,
+which Verseghy/website_k8s#83 adds, holds the copy command and the drift
+check. That header is the authority; the commands below quote it, and change
+when it does.
+
 1. Pick a commit of this repository's `master` whose `Test` job passed. That
    job ran the suite against the two files at that commit.
-2. Copy both files from that commit unchanged, for example
-   `git show <commit>:deploy/media/nginx.conf`. Do not reformat, re-indent
-   or edit the copy. The ConfigMap is generated from the copied file, so its
-   data is the same bytes.
-3. Record the commit next to the copy. A drift check compares the copy with
-   `git show <commit>:deploy/media/nginx.conf`, and the Deployment's image
-   with `image.txt` at that commit, and fails on any difference.
+2. Write the copy of `nginx.conf` from that commit: every line whose first
+   non-blank character is `#` is removed, runs of blank lines are squeezed
+   to one, and a first comment line names the commit. With the commit in
+   `$c` and a fetched clone of this repository in `$b3`, in the root of
+   website_k8s:
+
+   ```sh
+   { echo "# Copy of website_backend3 deploy/media/nginx.conf at $c with its comment lines removed; never edit it here, see kustomization.yaml."; git -C "$b3" show "$c:deploy/media/nginx.conf" | grep -v '^[[:space:]]*#' | cat -s; } > verseghy-website/media/nginx.conf
+   ```
+
+   Do not reformat, re-indent or edit the result. The ConfigMap is generated
+   from it, so its data is the same bytes. The media container's image is
+   the line of `image.txt` at that commit, unchanged.
+3. Record the commit in the ConfigMap's annotation
+   `verseghy.net/website-backend3-commit`. The drift check reads the commit
+   there, rebuilds the copy from it with the same command, and compares that
+   with the rendered ConfigMap's `nginx.conf`, so any difference fails: a
+   changed directive, an added comment or blank line, or a first line that
+   names another commit. It also compares the media container's image with
+   `image.txt` at that commit, and lists what `master` has changed in
+   `deploy/media/` since the copy, which a new copy PR would take over. A
+   change to comment lines only is listed there too, but needs no new copy
+   ([below](#why-the-copy-runs-the-tested-server)). With `$b3` as above, in
+   the root of website_k8s, the first two comparisons must print nothing and
+   exit 0:
+
+   ```sh
+   c=$(yq '.generatorOptions.annotations["verseghy.net/website-backend3-commit"]' verseghy-website/media/kustomization.yaml)
+   KUBECONFIG=/dev/null oc kustomize verseghy-website/media | yq -o json 'select(.kind == "ConfigMap") | .data["nginx.conf"]' | jq -j . | diff - <({ echo "# Copy of website_backend3 deploy/media/nginx.conf at $c with its comment lines removed; never edit it here, see kustomization.yaml."; git -C "$b3" show "$c:deploy/media/nginx.conf" | grep -v '^[[:space:]]*#' | cat -s; })
+   KUBECONFIG=/dev/null oc kustomize verseghy-website/media | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "media") | .image' | diff - <(git -C "$b3" show "$c:deploy/media/image.txt")
+   git -C "$b3" diff --stat "$c" origin/master -- deploy/media/
+   ```
+
 4. Open the copy PR for human review (ADR 0012 §2: agents never merge in
    website_k8s).
 
@@ -174,3 +214,29 @@ passes the suite, and reaches the cluster only through such a copy PR. To
 move the image to a newer build, read the digest of the new tag with
 `skopeo inspect --no-tags docker://registry.access.redhat.com/ubi9/nginx-126:<tag>`
 (`.Digest`), update `image.txt` and let the suite run.
+
+### Why the copy runs the tested server
+
+The suite tests this file with its comments, and the cluster runs the copy
+without them. nginx reads the rest of a line after a `#` as a comment and a
+blank line as white space, so removing those lines removes no directive and
+no argument. That holds while every quoted string in `nginx.conf` ends on
+the line it starts on and no line ends in a backslash, as is the case now;
+otherwise a `#` line or a blank line could belong to a string or an
+argument. Keep it that way.
+
+Put every comment on a line of its own. The copy removes only comment lines,
+those whose first non-blank character is `#`, so a comment after a directive
+on the same line would stay in website_k8s's copy, with any citation in it;
+the drift check would not catch it, because it rebuilds the copy with the
+same command. The file has no such comment now.
+
+A change to comment lines only gives the same copy apart from the commit its
+first line names, so it needs no new copy PR, although the drift check's
+third command lists it. To see what a change here does to the copy, compare
+the stripped files in the root of this repository; for a change to comment
+lines only, this prints nothing:
+
+```sh
+diff <(git show origin/master:deploy/media/nginx.conf | grep -v '^[[:space:]]*#' | cat -s) <(grep -v '^[[:space:]]*#' deploy/media/nginx.conf | cat -s)
+```
