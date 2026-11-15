@@ -33,6 +33,7 @@ use backend3::{
             options::{CanteenAuditLocalBefore, DEFAULT_RESOLUTIONS, ImportOptions, Mode},
             report::{NO_STEP_YET, Outcome, ReportParts, RunSummary, escape_cell},
             resolutions::{FileDigest, MAX_FILE_BYTES, ResolutionFile},
+            signoff,
             source_guard::COMPOSE_SOURCE_URL,
             source_session::{AutoIncrement, SourceFacts},
             source_tables::SOURCE_TABLES,
@@ -200,7 +201,7 @@ async fn a_run_writes_its_report_with_the_start_and_end_from_the_app_clock() {
 
             assert_eq!(
                 paths.report_files(),
-                ["report.md", "summary.json"],
+                ["report.md", "signoff.md", "summary.json"],
                 "{mode}"
             );
             let text = fs::read_to_string(paths.report().join("summary.json")).expect("summary");
@@ -237,6 +238,29 @@ async fn a_run_writes_its_report_with_the_start_and_end_from_the_app_clock() {
                 let cell = escape_cell(row.table);
                 assert!(markdown.contains(&cell), "{cell} in {markdown}");
             }
+            // The run reached its end with no detector in this build, so
+            // its Defects part is complete and empty, and so is the sheet.
+            assert_eq!(
+                summary["defects"],
+                json!({
+                    "complete": true, "checked": [], "uncovered": 0, "refused": 0, "records": [],
+                }),
+                "{mode}"
+            );
+            assert!(
+                markdown.contains("No defect detector ran: this build has none yet."),
+                "{markdown}"
+            );
+            let sheet = fs::read_to_string(paths.report().join("signoff.md")).expect("signoff.md");
+            assert!(sheet.starts_with(signoff::TITLE), "{sheet}");
+            assert!(
+                sheet.contains("in the source snapshot of 2026-10-23T17:01:02Z,"),
+                "{sheet}"
+            );
+            assert!(
+                sheet.ends_with(&format!("\n\n{}\n", signoff::NO_DETECTOR)),
+                "{sheet}"
+            );
         }
     })
     .await;
@@ -698,7 +722,10 @@ async fn a_local_source_passes_the_guard() {
                 "{message}"
             );
             assert!(message.contains(problem), "{problem}: {message}");
-            assert_eq!(paths.report_files(), ["report.md", "summary.json"]);
+            assert_eq!(
+                paths.report_files(),
+                ["report.md", "signoff.md", "summary.json"]
+            );
             let text = fs::read_to_string(paths.report().join("summary.json")).expect("summary");
             let summary: Value = serde_json::from_str(&text).expect("JSON");
             assert_eq!(summary["outcome"], "failed");
@@ -725,13 +752,20 @@ async fn the_report_never_holds_the_source_url() {
             assert!(!text.contains(PASSWORD), "{file}: {text}");
             assert!(!text.contains("backend3_import"), "{file}: {text}");
         }
+        // The sign-off sheet holds no error text at all: it says only that
+        // the run stopped before its detectors.
+        let sheet = fs::read_to_string(paths.report().join("signoff.md")).expect("signoff.md");
+        assert!(sheet.contains(signoff::STOPPED_FIRST), "{sheet}");
+        for leaked in ["1045", PASSWORD, "backend3_import", "127.0.0.1"] {
+            assert!(!sheet.contains(leaked), "{leaked} in {sheet}");
+        }
     })
     .await;
 }
 
 /// The number of rows of every table the import writes that the target
 /// has.
-async fn target_row_counts(db: &DatabaseConnection) -> Vec<(&'static str, i64)> {
+pub(crate) async fn target_row_counts(db: &DatabaseConnection) -> Vec<(&'static str, i64)> {
     let mut counts = Vec::new();
     for table in IMPORT_TARGET_TABLES {
         let exists: bool = scalar(db, &format!("SELECT to_regclass('{table}') IS NOT NULL")).await;
@@ -867,7 +901,10 @@ async fn the_task_exits_successfully_without_its_work_while_another_run_holds_th
         run(&ctx, paths.arguments())
             .await
             .expect("a free lock runs the task");
-        assert_eq!(paths.report_files(), ["report.md", "summary.json"]);
+        assert_eq!(
+            paths.report_files(),
+            ["report.md", "signoff.md", "summary.json"]
+        );
     })
     .await;
 }
@@ -920,7 +957,7 @@ async fn the_report_files_are_readable_by_the_task_user_only() {
         run(&with_source(&ctx, COMPOSE_SOURCE_URL), paths.arguments())
             .await
             .expect("the run");
-        for file in ["report.md", "summary.json"] {
+        for file in ["report.md", "signoff.md", "summary.json"] {
             assert_eq!(
                 mode_of(&paths.report().join(file)),
                 REPORT_FILE_MODE,
@@ -959,6 +996,22 @@ fn the_report_writer_never_overwrites_a_file() {
         fs::read_to_string(directory.path().join("report.md")).expect("report.md"),
         "an earlier report\n"
     );
+    assert!(!directory.path().join("summary.json").exists());
+    assert!(!directory.path().join("signoff.md").exists());
+
+    // An existing signoff.md: report.md is new, the sheet is kept, and no
+    // summary.json says the report is complete.
+    let directory = ScratchDir::new("import-signoff-exists");
+    fs::write(directory.path().join("signoff.md"), "an earlier sheet\n").expect("signoff.md");
+    let error = report::write(directory.path(), &summary(directory.path()))
+        .expect_err("signoff.md exists")
+        .to_string();
+    assert!(error.contains("signoff.md"), "{error}");
+    assert_eq!(
+        fs::read_to_string(directory.path().join("signoff.md")).expect("signoff.md"),
+        "an earlier sheet\n"
+    );
+    assert!(directory.path().join("report.md").exists());
     assert!(!directory.path().join("summary.json").exists());
 
     // An existing summary.json: report.md is new, summary.json is kept.
@@ -1005,6 +1058,7 @@ fn a_failed_run_writes_its_report_and_returns_its_own_error() {
             )
             .expect("an empty source bounds no snapshot_at"),
         ),
+        ..ReportParts::default()
     };
 
     let returned = report::finish(
@@ -1030,7 +1084,7 @@ fn a_failed_run_writes_its_report_and_returns_its_own_error() {
         markdown.contains(&format!("\n## Error\n\n```text\n{message}\n```\n")),
         "{markdown}"
     );
-    for file in ["report.md", "summary.json"] {
+    for file in ["report.md", "signoff.md", "summary.json"] {
         assert_eq!(
             mode_of(&directory.path().join(file)),
             REPORT_FILE_MODE,

@@ -1,6 +1,6 @@
 # 0017. Legacy data import: normalisation and defect resolution
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0047](0047-import-dry-runs-collect-every-defect-and-refusal.md) (2026-11-15)
 - Decision questions: Q15b, Q19, Q20, Q32b
 
 ## Context

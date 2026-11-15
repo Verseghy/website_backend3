@@ -515,12 +515,29 @@ is its specification; each slice adds the step for its own tables.
    compares with the source row; a defect that needs a new section or field
    adds it there, to `Section::fields` and to the schema table of section
    8.2 (`tests/image_data/` compares the two), with a test of every new
-   message. Rich-text bodies go through the shared normaliser,
-   `domain::normalise::normalise`, and its output through the N9 checks of
-   `check_fixed_point` (`data-migration.md` section 7, its readings in 7.4).
-   A new normaliser rule adds its step to the pass in
-   `src/domain/normalise/mod.rs`, its `Rule` variants, and a
-   before-and-after pair to `tests/fixtures/normalise/`. Unit tests cover every
+   message. Each defect of the table is a `DefectRule`
+   (`src/domain/import_mysql/defects.rs`, ADR 0017 §3, ADR 0047): `detect`
+   finds every instance in the source rows on every run, never from the
+   file, each with its row ids, its public paths (`/posts/<id>`,
+   `/information/<slug>`) and the defect's proposed default of section 8.1
+   where the rule can compute one; `found` reads the precondition of an
+   entry whose row the rule no longer finds (for D3 it decides whether the
+   entry holds); `resolution` turns a valid entry into what the step
+   applies. How the defect's entries work is the defect's own
+   `DefectId::entry_policy` (ADR 0047 §4: required, optional for D10, a
+   fix made in the source for D3, none for D4 and D7), never the rule's. A
+   value the report or the sheet shows is a `Value`; a new fixed word joins
+   the closed `Word` enum, never a string. The step runs it with
+   `DefectDetector::new(options.mode, &file).run(&rule, &rows, &mut
+   parts.defects)` and applies the returned `Decisions`: the entry's
+   resolution, the default, or the source value. Never compare a
+   precondition or stop on a defect in the step itself. Rich-text bodies
+   go through the shared normaliser, `domain::normalise::normalise`, and
+   its output through the N9 checks of `check_fixed_point`
+   (`data-migration.md` section 7, its readings in 7.4). A new normaliser
+   rule adds its step to the pass in `src/domain/normalise/mod.rs`, its
+   `Rule` variants, and a before-and-after pair to
+   `tests/fixtures/normalise/`. Unit tests cover every
    rule of sections 5-7 for the table, each defect including a precondition
    mismatch, and each exemption flag of section 4.3; proptests cover
    round trips and idempotence.
@@ -572,9 +589,17 @@ is its specification; each slice adds the step for its own tables.
    `resolutions::load` (`LoadedResolutions::digest`, the digest of the bytes
    it validated; data-migration.md section 5.4), never a second read of the
    path.
-4. **Refusals** (section 4.2): an uncovered defect instance, a precondition
-   mismatch or a constraint violation stops the import with a message that
-   names the defect id, the row id and the rule. A legacy calendar day
+4. **Refusals** (section 4.2): in `apply`, an uncovered defect instance
+   (where the defect needs an entry), a precondition mismatch (a changed
+   row, or an entry for a row that the rule no longer finds, except a D3
+   entry whose post has the pinned value) or a constraint violation stops
+   the import with a message that names the defect id, the row id and the
+   rule. A dry run
+   collects each of them and goes on (ADR 0047): the detector does it for
+   the defects, and a failing batch is retried row by row inside
+   savepoints, so each refused row is reported and left out. `run` ends by
+   concluding the defect check, which fails a dry run that collected a
+   problem, so it still exits non-zero. A legacy calendar day
    converts through `budapest::date_to_stored_midnight`, never
    `date_to_midnight`, and its `NoMidnight` or `AfterTzTable` (a day after
    `budapest::CHRONO_TZ_LAST_CHANGE_YEAR`) stops the import and reports the
@@ -584,8 +609,15 @@ is its specification; each slice adds the step for its own tables.
    `ReportParts` in `src/domain/import_mysql/report.rs`, as the source
    session's `source` does, and the step fills it through the `parts` that
    `run` receives as soon as the step ends, so the report of a run that
-   fails later still shows it; `RunSummary` renders `summary.json` and
-   `report.md` from it. A step that fills a Markdown section
+   fails later still shows it; `RunSummary` renders `summary.json`,
+   `report.md` and the editors' sign-off sheet `signoff.md` from it. The
+   detector fills the Defects part and the sheet (`parts.defects`); a
+   defect that needs another column on the sheet (D6's menus) adds it in
+   `src/domain/import_mysql/signoff.rs`, whose property test checks every
+   line against the allowed fields. Nothing but legacy ids, calendar days,
+   instants, SHA-256 digests, index image paths, the words of `Word` and
+   live-site paths may go there, and the D6 detector's two menus (dish
+   names, never a person's name; ADR 0047 §3). A step that fills a Markdown section
    replaces its "No import step of this build reports here yet." line. Add
    new `summary.json` fields without changing `REPORT_FORMAT`; rename or
    remove one only with a `REPORT_FORMAT` bump.
@@ -610,7 +642,7 @@ is its specification; each slice adds the step for its own tables.
    resolutions:data/import/resolutions.toml storage_root:<dir> report:<empty
    dir>` against the local databases (the default `resolutions` path is the
    image's copy, `/app/data/import/resolutions.toml`), then check
-   `report.md` and `summary.json` in the report directory. The task refuses
+   `report.md`, `signoff.md` and `summary.json` in the report directory. The task refuses
    an unset source (empty or `disabled`), an unknown argument, a
    `snapshot_at` that is not UTC or lies after the start of the run, a
    report directory that is not empty or lies inside `storage_root`, and a

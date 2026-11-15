@@ -3,17 +3,20 @@
 //! `domain::import_mysql::report`; this module writes the files and decides
 //! what a run returns once its report is written.
 //!
-//! `report.md` is written first and `summary.json` last, so a directory with
-//! a `summary.json` holds a complete report: the nightly rehearsal saves that
-//! file (cutover.md §5.2). Each file is created with `create_new`, so a run
-//! never overwrites a file, and synced to disk before the task reports
-//! success.
+//! `report.md` is written first, then the editors' sign-off sheet
+//! `signoff.md` (data-migration.md §8.2), and `summary.json` last, so a
+//! directory with a `summary.json` holds a complete report: the nightly
+//! rehearsal saves that file (cutover.md §5.2). Each file is created with
+//! `create_new`, so a run never overwrites a file, and synced to disk before
+//! the task reports success.
 //!
-//! Both files are created readable and writable by the task's own user only
-//! (mode `0600`; the umask can only take bits away): the report holds
-//! draft content and account counts and stays private (§11.3), so other
-//! users of the machine or the pod may not read it. The directory itself is
-//! the operator's, who made it empty for this run.
+//! All three files are created readable and writable by the task's own
+//! user only (mode `0600`; the umask can only take bits away): the report
+//! holds draft content and account counts and stays private (§11.3), so
+//! other users of the machine or the pod may not read it. The sign-off
+//! sheet holds no content, but it is the maintainer's to hand to the
+//! editors, so it gets the same mode. The directory itself is the
+//! operator's, who made it empty for this run.
 
 use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 
@@ -22,10 +25,12 @@ use loco_rs::{Error, Result};
 
 use crate::domain::import_mysql::{
     options::ImportOptions,
-    report::{MARKDOWN_FILE, Outcome, ReportParts, RunSummary, SUMMARY_FILE, TASK_NAME},
+    report::{
+        MARKDOWN_FILE, Outcome, ReportParts, RunSummary, SIGNOFF_FILE, SUMMARY_FILE, TASK_NAME,
+    },
 };
 
-/// The mode of both report files: read and write for the owner only.
+/// The mode of every report file: read and write for the owner only.
 pub const REPORT_FILE_MODE: u32 = 0o600;
 
 /// Ends a run: writes its report into `options.report`, logs how it ended
@@ -89,7 +94,8 @@ pub fn finish(
     result.and(written)
 }
 
-/// Writes `report.md` and `summary.json` for `summary` into `directory`.
+/// Writes `report.md`, `signoff.md` and `summary.json` for `summary` into
+/// `directory`, in that order.
 ///
 /// - `directory`: the run's `report` directory, which the path checks found
 ///   empty.
@@ -102,6 +108,7 @@ pub fn finish(
 /// already is left as it was.
 pub fn write(directory: &Path, summary: &RunSummary) -> Result<()> {
     write_new(&directory.join(MARKDOWN_FILE), &summary.to_markdown())?;
+    write_new(&directory.join(SIGNOFF_FILE), &summary.to_signoff())?;
     write_new(&directory.join(SUMMARY_FILE), &summary.to_json())
 }
 

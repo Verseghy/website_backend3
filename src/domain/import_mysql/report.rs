@@ -33,6 +33,15 @@
 //! that stopped before the session ended has none of them, and the report
 //! says so; its error says why.
 //!
+//! The second is the defect detectors' (data-migration.md §8, ADR 0047):
+//! every instance of a defect whose detector ran, with its entry, its
+//! precondition, the source value and the resolution the import proposes,
+//! which a dry run applies, and every entry whose subject the rule does not
+//! find ([`super::defects`]). The task also writes the editors' sign-off
+//! sheet, [`SIGNOFF_FILE`], from the same part ([`RunSummary::to_signoff`],
+//! [`super::signoff`]): the only extract of the report that leaves staging,
+//! which holds ids, paths and proposed resolutions only.
+//!
 //! The report is private: it holds draft content and account counts, and
 //! the Markdown starts by saying so (data-migration.md §11.3).
 
@@ -42,8 +51,10 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 
 use super::{
+    defects::{DefectOutcome, DefectRecord, DefectsPart, EntryRef, id_list},
     not_migrated::NOT_MIGRATED_TABLES,
     options::{ImportOptions, format_instant},
+    signoff,
     source_session::SourceFacts,
     source_tables::SOURCE_TABLES,
 };
@@ -63,13 +74,24 @@ pub const TASK_NAME: &str = "import_mysql";
 /// What the text of a section says while no import step reports there.
 pub const NO_STEP_YET: &str = "No import step of this build reports here yet.";
 
+/// The file name of the editors' sign-off sheet in the report directory
+/// (data-migration.md §8.2, [`super::signoff`]).
+pub const SIGNOFF_FILE: &str = "signoff.md";
+
+/// What the Defects section holds (data-migration.md §11.3), which the
+/// defect detector fills ([`super::defects`]).
+pub const DEFECTS_HOLDS: &str = "Every detected instance of D1-D10 and N7, with its entry, the \
+                                 entry's precondition, the source value and the resolution the \
+                                 import proposes (the entry's or the defect's default), which a \
+                                 dry run applies, and every entry whose row the rule no longer \
+                                 finds; ids, calendar days, instants, SHA-256 digests, index \
+                                 image paths and fixed words only. signoff.md beside this report \
+                                 is the editors' sign-off sheet (data-migration.md §8.2).";
+
 /// The sections that the import steps fill, each with what it will hold
-/// (data-migration.md §11.3), in the order the Markdown report shows them.
-pub const STEP_SECTIONS: [(&str, &str); 5] = [
-    (
-        "Defects",
-        "Every detected instance of D1-D10, with the resolution applied and its precondition.",
-    ),
+/// (data-migration.md §11.3), in the order the Markdown report shows them,
+/// after the Defects section.
+pub const STEP_SECTIONS: [(&str, &str); 4] = [
     (
         "Rule hits",
         "Per row, the hits of N1-N7 (N5b included), the images without alt, the rows exempted \
@@ -136,6 +158,10 @@ pub struct ReportParts {
     /// What the source session established, or `None` when the run stopped
     /// before the session ended.
     pub source: Option<SourceFacts>,
+    /// What the defect detectors found (data-migration.md §8, ADR 0047):
+    /// every instance and every entry whose subject the rule does not find,
+    /// which `report.md`, `summary.json` and the sign-off sheet show.
+    pub defects: DefectsPart,
 }
 
 /// `summary.json`'s layout. The field order is the order of the file.
@@ -150,7 +176,74 @@ struct SummaryJson<'a> {
     duration_ms: i64,
     arguments: BTreeMap<String, String>,
     source: Option<SourceJson>,
+    defects: DefectsJson,
     not_migrated: Vec<NotMigratedJson>,
+}
+
+/// `summary.json`'s `defects` object: the defect detectors' part.
+#[derive(Serialize)]
+struct DefectsJson {
+    /// Whether the run reached its end, so every detector of the build ran.
+    complete: bool,
+    /// The defects whose detector ran, in the order they first ran.
+    checked: Vec<&'static str>,
+    /// The instances that no entry covers where the defect needs one.
+    uncovered: usize,
+    /// The entries whose precondition does not hold.
+    refused: usize,
+    records: Vec<DefectRecordJson>,
+}
+
+/// One instance, or one entry whose subject the rule does not find.
+#[derive(Serialize)]
+struct DefectRecordJson {
+    defect: &'static str,
+    subject: String,
+    outcome: &'static str,
+    rows: Vec<u32>,
+    paths: Vec<String>,
+    /// The entry's name, `post_date_shift[2]`, or `null`.
+    entry: Option<String>,
+    /// The entry's precondition, or `null` without an entry.
+    expected: Option<String>,
+    /// The source value, or `null` when no row is the subject.
+    found: Option<String>,
+    /// The resolution the import proposes, which a dry run applies, or
+    /// `null` where the source value is kept.
+    proposed: Option<String>,
+}
+
+impl DefectsJson {
+    fn new(part: &DefectsPart) -> Self {
+        Self {
+            complete: part.is_complete(),
+            checked: part
+                .checked()
+                .iter()
+                .map(|defect| defect.as_str())
+                .collect(),
+            uncovered: part.uncovered(),
+            refused: part.refused(),
+            records: part
+                .records()
+                .iter()
+                .map(|record| DefectRecordJson {
+                    defect: record.defect.as_str(),
+                    subject: record.subject.to_string(),
+                    outcome: record.outcome.as_str(),
+                    rows: record.rows.iter().map(|row| row.get()).collect(),
+                    paths: record.paths.iter().map(ToString::to_string).collect(),
+                    entry: record.entry.as_ref().map(EntryRef::name),
+                    expected: record
+                        .entry
+                        .as_ref()
+                        .map(|entry| entry.expected.to_string()),
+                    found: record.found.as_ref().map(ToString::to_string),
+                    proposed: record.proposed.as_ref().map(ToString::to_string),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// `summary.json`'s `source` object: the source session's part.
@@ -213,7 +306,14 @@ impl RunSummary {
     /// `null` when the run stopped before the session ended: `fingerprint`
     /// (`matched`), `latest_timestamp` (`table`, `column` and `at`, or
     /// `null` for a source without one) and `auto_increment` by table.
-    /// Equal summaries give equal bytes.
+    /// `defects` is the defect detectors' part: `complete` (the run reached
+    /// its end), `checked` (the defects whose detector ran), the counts
+    /// `uncovered` and `refused`, and `records`, one per instance and per
+    /// entry whose subject the rule does not find (`defect`, `subject`,
+    /// `outcome`, `rows`, `paths`, and `entry`, `expected`, `found` and
+    /// `proposed`, each `null` where there is none, `found` when no row is
+    /// the subject and `proposed` where the source value is kept). Equal
+    /// summaries give equal bytes.
     ///
     /// # Panics
     ///
@@ -235,6 +335,7 @@ impl RunSummary {
             duration_ms: self.duration().num_milliseconds(),
             arguments: self.options.to_arguments(),
             source: self.parts.source.as_ref().map(SourceJson::new),
+            defects: DefectsJson::new(&self.parts.defects),
             not_migrated: NOT_MIGRATED_TABLES
                 .iter()
                 .map(|row| NotMigratedJson {
@@ -251,8 +352,9 @@ impl RunSummary {
 
     /// The contents of `report.md`: the privacy note, the summary table,
     /// the error of a failed run, the source session's part (`## Source`),
-    /// one section per entry of [`STEP_SECTIONS`] and the not-migrated
-    /// tables (data-migration.md §9.1). Values from the arguments and the error are escaped, so no
+    /// the defect detectors' part (`## Defects`), one section per entry of
+    /// [`STEP_SECTIONS`] and the not-migrated tables (data-migration.md
+    /// §9.1). Values from the arguments and the error are escaped, so no
     /// path or message can break the Markdown structure.
     #[must_use]
     pub fn to_markdown(&self) -> String {
@@ -283,6 +385,7 @@ impl RunSummary {
             markdown.push_str(&fenced(message));
         }
         markdown.push_str(&self.source_section());
+        markdown.push_str(&self.defects_section());
         for (title, holds) in STEP_SECTIONS {
             markdown.push_str(&["\n## ", title, "\n\n", holds, "\n\n", NO_STEP_YET, "\n"].concat());
         }
@@ -342,6 +445,104 @@ impl RunSummary {
         }
         section
     }
+
+    /// The `## Defects` section of `report.md`: which defects were checked,
+    /// the counts per outcome, and one table row per instance and per entry
+    /// whose subject the rule does not find, or a line that says no
+    /// detector ran and why.
+    fn defects_section(&self) -> String {
+        let defects = &self.parts.defects;
+        let mut section = ["\n## Defects\n\n", DEFECTS_HOLDS, "\n\n"].concat();
+        if defects.checked().is_empty() {
+            section.push_str(if defects.is_complete() {
+                "No defect detector ran: this build has none yet. They come with the import steps \
+                 of the tables they check.\n"
+            } else {
+                "No defect detector ran before the run stopped; the error above says why.\n"
+            });
+            return section;
+        }
+        let checked: Vec<&str> = defects
+            .checked()
+            .iter()
+            .map(|defect| defect.as_str())
+            .collect();
+        // Writing into a `String` cannot fail, so the result is ignored.
+        let _ = write!(
+            section,
+            "Checked: {}. Instances: {} (covered by a valid entry: {}, imported unchanged: {}, \
+             given the default without an optional entry: {}, not covered by the resolution file: \
+             {}, the entry's precondition does not hold: {}). Entries for rows that the rules no \
+             longer find: {} that hold for a row fixed in the source as signed, {} stale.",
+            checked.join(", "),
+            defects.instances(),
+            defects.count(DefectOutcome::Covered),
+            defects.count(DefectOutcome::Unchanged),
+            defects.count(DefectOutcome::Defaulted),
+            defects.uncovered(),
+            defects.count(DefectOutcome::Changed),
+            defects.count(DefectOutcome::FixedInSource),
+            defects.count(DefectOutcome::Stale),
+        );
+        if !defects.is_complete() {
+            section.push_str(" The run stopped before it had checked every defect.");
+        }
+        section.push('\n');
+        if defects.records().is_empty() {
+            return section;
+        }
+        section.push_str(
+            "\n| Defect | Subject | Outcome | Rows | Entry | Expected | Found | Proposed |\n\
+             |---|---|---|---|---|---|---|---|\n",
+        );
+        for record in defects.records() {
+            section.push_str(&defect_row(record));
+        }
+        section
+    }
+
+    /// The contents of `signoff.md`, the editors' sign-off sheet
+    /// ([`signoff::render`]): the run's `snapshot_at` and every instance of
+    /// its Defects part, with nothing else.
+    #[must_use]
+    pub fn to_signoff(&self) -> String {
+        signoff::render(self.options.snapshot_at, &self.parts.defects)
+    }
+}
+
+/// One row of the Defects table of `report.md`, every cell escaped. A
+/// missing entry shows as `-`, a found value without its row as `no such
+/// row`, and no proposed resolution as `source value kept`.
+fn defect_row(record: &DefectRecord) -> String {
+    let rows = if record.rows.is_empty() {
+        "-".to_owned()
+    } else {
+        id_list(&record.rows)
+    };
+    let cells = [
+        record.defect.as_str().to_owned(),
+        record.subject.to_string(),
+        record.outcome.as_str().to_owned(),
+        rows,
+        record
+            .entry
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), EntryRef::name),
+        record
+            .entry
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |entry| entry.expected.to_string()),
+        record
+            .found
+            .as_ref()
+            .map_or_else(|| "no such row".to_owned(), ToString::to_string),
+        record
+            .proposed
+            .as_ref()
+            .map_or_else(|| "source value kept".to_owned(), ToString::to_string),
+    ];
+    let cells: Vec<String> = cells.iter().map(|cell| escape_cell(cell)).collect();
+    format!("| {} |\n", cells.join(" | "))
 }
 
 /// One row of a two-column Markdown table, both cells escaped.
@@ -416,10 +617,16 @@ mod tests {
 
     use super::*;
     use crate::domain::import_mysql::{
+        defects::{
+            DefectDetector, IndexImage, Instance, NoEntry, Proposal, Subject, Value, Word,
+            testing::{Given, any_part},
+        },
         options::{CanteenAuditLocalBefore, Mode},
+        resolutions::{PageHidden, PostDateShift, PostIndexImage, parse},
         source_session::{AutoIncrement, SOURCE_TIMESTAMPS, SourceTimestamp},
     };
     use proptest::prelude::*;
+    use std::num::NonZeroU32;
 
     fn instant(rfc3339: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(rfc3339)
@@ -492,6 +699,7 @@ mod tests {
             "\"duration_ms\"",
             "\"arguments\"",
             "\"source\"",
+            "\"defects\"",
             "\"not_migrated\"",
         ]
         .iter()
@@ -669,6 +877,247 @@ mod tests {
         }
     }
 
+    fn id(number: u32) -> NonZeroU32 {
+        NonZeroU32::new(number).expect("a row id")
+    }
+
+    fn day(text: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a date")
+    }
+
+    /// The index image of the synthetic D3 post 70.
+    const IMAGE: &str = "index/0123456789abcdef0123456789abcdef.jpg";
+
+    /// A dry run's Defects part with one record of each outcome: post 12
+    /// covered, post 14 changed, post 16 stale (its row gone), post 30
+    /// uncovered (D1); post 70 fixed in the source as its entry pins (D3);
+    /// a D4 post imported unchanged; and a D10 page that no entry lists,
+    /// which takes the default.
+    fn dry_run_defects() -> DefectsPart {
+        let signed = parse(&format!(
+            "version = 1\n\n[[post_date_shift]]\npost_id = 12\nexpect_date = \
+             2019-05-02\n\n[[post_date_shift]]\npost_id = 14\nexpect_date = \
+             2020-02-29\n\n[[post_date_shift]]\npost_id = 16\nexpect_date = \
+             2020-03-01\n\n[[post_index_image]]\npost_id = 70\nexpect_index_image = \
+             \"{IMAGE}\"\n"
+        ))
+        .expect("a valid synthetic file");
+        let early = |post: u32, found: &str, next: &str| {
+            Instance::new(Subject::Post(id(post)), Value::Date(day(found))).with_proposed(
+                Proposal {
+                    resolution: Value::Date(day(next)),
+                    shown: Value::Date(day(next)),
+                },
+            )
+        };
+        let dates = Given::<PostDateShift>::new(
+            vec![
+                early(12, "2019-05-02", "2019-05-03"),
+                early(14, "2020-03-02", "2020-03-03"),
+                early(30, "2021-06-01", "2021-06-02"),
+            ],
+            None,
+        );
+        let images = Given::<PostIndexImage>::new(
+            Vec::new(),
+            Some(Value::IndexImage(IndexImage::new(IMAGE).expect("a path"))),
+        );
+        let listed = Given::<NoEntry>::new(
+            vec![Instance::new(Subject::Post(id(40)), Value::Null)],
+            None,
+        );
+        let published = Proposal {
+            resolution: Value::Choice(Word::Published),
+            shown: Value::Choice(Word::Published),
+        };
+        let pages = Given::<PageHidden>::new(
+            vec![
+                Instance::new(
+                    Subject::Page(id(5)),
+                    Value::Instant(instant("2023-11-14T22:13:20Z")),
+                )
+                .with_proposed(published),
+            ],
+            None,
+        );
+        let detector = DefectDetector::new(Mode::DryRun, &signed);
+        let mut part = DefectsPart::default();
+        detector
+            .run(&dates, &[], &mut part)
+            .expect("a dry run goes on");
+        detector
+            .run(&images, &[], &mut part)
+            .expect("post 70 was fixed as signed");
+        detector
+            .run(&listed, &[], &mut part)
+            .expect("nothing to refuse");
+        detector
+            .run(&pages, &[], &mut part)
+            .expect("D10's entries are optional");
+        part
+    }
+
+    #[test]
+    fn the_defects_part_lists_every_instance_and_every_entry_without_one() {
+        let run = concluded_dry_run();
+        let json: serde_json::Value = serde_json::from_str(&run.to_json()).expect("JSON");
+        let defects = &json["defects"];
+        assert_eq!(defects["complete"], true);
+        assert_eq!(
+            defects["checked"],
+            serde_json::json!(["D1", "D3", "D4", "D10"])
+        );
+        assert_eq!(
+            (defects["uncovered"].clone(), defects["refused"].clone()),
+            (1.into(), 2.into())
+        );
+        assert_eq!(
+            defects["records"],
+            serde_json::json!([
+                {
+                    "defect": "D1", "subject": "post 12", "outcome": "covered", "rows": [12],
+                    "paths": ["/posts/12"], "entry": "post_date_shift[1]",
+                    "expected": "2019-05-02", "found": "2019-05-02", "proposed": "2019-05-02",
+                },
+                {
+                    "defect": "D1", "subject": "post 14", "outcome": "changed", "rows": [14],
+                    "paths": ["/posts/14"], "entry": "post_date_shift[2]",
+                    "expected": "2020-02-29", "found": "2020-03-02", "proposed": "2020-03-03",
+                },
+                {
+                    "defect": "D1", "subject": "post 16", "outcome": "stale", "rows": [],
+                    "paths": [], "entry": "post_date_shift[3]", "expected": "2020-03-01",
+                    "found": null, "proposed": null,
+                },
+                {
+                    "defect": "D1", "subject": "post 30", "outcome": "uncovered", "rows": [30],
+                    "paths": ["/posts/30"], "entry": null, "expected": null,
+                    "found": "2021-06-01", "proposed": "2021-06-02",
+                },
+                {
+                    "defect": "D3", "subject": "post 70", "outcome": "fixed_in_source",
+                    "rows": [70], "paths": ["/posts/70"], "entry": "post_index_image[1]",
+                    "expected": IMAGE, "found": IMAGE, "proposed": null,
+                },
+                {
+                    "defect": "D4", "subject": "post 40", "outcome": "unchanged", "rows": [40],
+                    "paths": ["/posts/40"], "entry": null, "expected": null, "found": "none",
+                    "proposed": null,
+                },
+                {
+                    "defect": "D10", "subject": "page 5", "outcome": "defaulted", "rows": [5],
+                    "paths": [], "entry": null, "expected": null,
+                    "found": "2023-11-14T22:13:20Z", "proposed": "published",
+                },
+            ])
+        );
+    }
+
+    /// The run of [`dry_run_defects`], concluded: a failed dry run.
+    fn concluded_dry_run() -> RunSummary {
+        let mut run = summary(Outcome::Completed);
+        run.parts.defects = dry_run_defects();
+        let failure = run.parts.defects.conclude().expect_err("three problems");
+        run.outcome = Outcome::Failed {
+            message: failure.to_string(),
+        };
+        run
+    }
+
+    #[test]
+    fn the_defects_section_and_the_sheet_show_every_record() {
+        let run = concluded_dry_run();
+        let markdown = run.to_markdown();
+        let section = markdown
+            .split_once("\n## Defects\n\n")
+            .and_then(|(_, rest)| rest.split_once("\n## Rule hits\n"))
+            .expect("a Defects section before Rule hits")
+            .0;
+        assert_eq!(
+            section,
+            [
+                DEFECTS_HOLDS,
+                "\n\nChecked: D1, D3, D4, D10. Instances: 5 (covered by a valid entry: 1, imported \
+                 unchanged: 1, given the default without an optional entry: 1, not covered by the \
+                 resolution file: 1, the entry's precondition does not hold: 1). Entries for rows \
+                 that the rules no longer find: 1 that hold for a row fixed in the source as \
+                 signed, 1 stale.\n\n| Defect | Subject | Outcome | Rows | Entry | Expected | \
+                 Found | Proposed |\n\
+                 |---|---|---|---|---|---|---|---|\n\
+                 | D1 | post 12 | covered | 12 | post\\_date\\_shift\\[1\\] | 2019-05-02 | \
+                 2019-05-02 | 2019-05-02 |\n\
+                 | D1 | post 14 | changed | 14 | post\\_date\\_shift\\[2\\] | 2020-02-29 | \
+                 2020-03-02 | 2020-03-03 |\n\
+                 | D1 | post 16 | stale | - | post\\_date\\_shift\\[3\\] | 2020-03-01 | no such \
+                 row | source value kept |\n\
+                 | D1 | post 30 | uncovered | 30 | - | - | 2021-06-01 | 2021-06-02 |\n\
+                 | D3 | post 70 | fixed\\_in\\_source | 70 | post\\_index\\_image\\[1\\] | \
+                 index/0123456789abcdef0123456789abcdef.jpg | \
+                 index/0123456789abcdef0123456789abcdef.jpg | source value kept |\n\
+                 | D4 | post 40 | unchanged | 40 | - | - | none | source value kept |\n\
+                 | D10 | page 5 | defaulted | 5 | - | - | 2023-11-14T22:13:20Z | published |\n",
+            ]
+            .concat()
+        );
+        // The error names every problem.
+        assert!(
+            markdown.contains("- D1 post 30 is not covered"),
+            "{markdown}"
+        );
+
+        // The sign-off sheet lists the five instances and the row fixed in
+        // the source, not the stale entry.
+        let sheet = run.to_signoff();
+        assert!(
+            sheet.contains("snapshot of 2026-10-23T17:01:02Z"),
+            "{sheet}"
+        );
+        for row in [
+            "| 14 | /posts/14 | 2020-03-03 |\n",
+            "| 70 | /posts/70 | fixed in the source as signed |\n",
+            "| 40 | /posts/40 | imported unchanged |\n",
+            "| 5 | - | published |\n",
+        ] {
+            assert!(sheet.contains(row), "{row} in {sheet}");
+        }
+        assert!(!sheet.contains("| 16 |"), "{sheet}");
+    }
+
+    #[test]
+    fn a_run_without_a_detector_says_why() {
+        let mut run = summary(Outcome::Failed {
+            message: "refusing to import: the target table `users` already holds a row".to_owned(),
+        });
+        assert!(run.to_markdown().contains(&format!(
+            "\n## Defects\n\n{DEFECTS_HOLDS}\n\nNo defect detector ran before the run stopped; \
+             the error above says why.\n"
+        )));
+        let json: serde_json::Value = serde_json::from_str(&run.to_json()).expect("JSON");
+        assert_eq!(
+            json["defects"],
+            serde_json::json!({
+                "complete": false, "checked": [], "uncovered": 0, "refused": 0, "records": [],
+            })
+        );
+        run.outcome = Outcome::Completed;
+        run.parts.defects.conclude().expect("nothing found");
+        assert!(run.to_markdown().contains(
+            "\nNo defect detector ran: this build has none yet. They come with the import steps \
+             of the tables they check.\n"
+        ));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&run.to_json()).expect("JSON")["defects"]["complete"],
+            true
+        );
+        // A run that stopped after a detector says so after the counts.
+        let mut run = summary(Outcome::Completed);
+        run.parts.defects = dry_run_defects();
+        assert!(run.to_markdown().contains(
+            "fixed in the source as signed, 1 stale. The run stopped before it had checked every \
+             defect.\n"
+        ),);
+    }
+
     #[test]
     fn the_duration_is_the_difference_of_the_two_readings() {
         let mut run = summary(Outcome::Completed);
@@ -754,7 +1203,7 @@ mod tests {
             ],
             (any_instant(), any_instant()),
             proptest::option::of(any_text()),
-            proptest::option::of(any_source()),
+            (proptest::option::of(any_source()), any_part()),
         )
             .prop_map(
                 |(
@@ -764,7 +1213,7 @@ mod tests {
                     cutoff,
                     (started_at, finished_at),
                     message,
-                    source,
+                    (source, defects),
                 )| {
                     RunSummary {
                         options: ImportOptions {
@@ -779,7 +1228,7 @@ mod tests {
                         finished_at,
                         outcome: message
                             .map_or(Outcome::Completed, |message| Outcome::Failed { message }),
-                        parts: ReportParts { source },
+                        parts: ReportParts { source, defects },
                     }
                 },
             )
@@ -912,6 +1361,7 @@ mod tests {
                 expected.push("Error");
             }
             expected.push("Source");
+            expected.push("Defects");
             expected.extend(STEP_SECTIONS.iter().map(|(title, _)| *title));
             expected.push("Not migrated");
             prop_assert_eq!(headings, expected);
@@ -945,6 +1395,24 @@ mod tests {
                 prop_assert!(row.starts_with("| ") || *row == "|---|---|", "{}", row);
                 prop_assert!(row.ends_with(" |") || *row == "|---|---|", "{}", row);
                 prop_assert_eq!(unescaped_pipes(row), 3, "{}", row);
+            }
+
+            // The Defects table, when the detectors recorded anything:
+            // every row one line of exactly eight cells.
+            let separator = "|---|---|---|---|---|---|---|---|";
+            let defect_tables: Vec<&[&str]> = lines
+                .split(|line| line.is_empty())
+                .filter(|paragraph| paragraph.get(1) == Some(&separator))
+                .collect();
+            let records = run.parts.defects.records().len();
+            prop_assert_eq!(defect_tables.len(), usize::from(records > 0));
+            for table in defect_tables {
+                prop_assert_eq!(table.len(), 2 + records);
+                for row in table {
+                    prop_assert!(row.starts_with("| ") || *row == separator, "{}", row);
+                    prop_assert!(row.ends_with(" |") || *row == separator, "{}", row);
+                    prop_assert_eq!(unescaped_pipes(row), 9, "{}", row);
+                }
             }
         }
 
