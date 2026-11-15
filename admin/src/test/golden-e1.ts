@@ -28,6 +28,10 @@
  * - `embed-<name>`: what the editor stores for a YouTube input fixture of
  *   `admin/test/fixtures/youtube/` (ADR 0043): `J` of embed code, and the
  *   lone-URL paste rule's embed for a link, pasted into an empty body;
+ * - `paste-<name>`: what the editor stores when a paste fixture of
+ *   `src/test/paste-fixtures.ts` (the generic-path shapes and the roosterjs
+ *   web samples) is pasted as HTML into an empty body, through the paste
+ *   filter (editor.md §5, §13.5);
  * - `command-<name>`: the stored HTML of a document built with the editor's
  *   commands (the media commands included), which is `J` of itself (the
  *   tests check that).
@@ -43,6 +47,7 @@ import {
   TABLE_INPUTS,
   TABLE_SHAPES,
 } from "./editor-fixtures"
+import { pasteFixtures } from "./paste-fixtures"
 import { pasteEvent } from "./site-schema"
 import { youtubeFixtures } from "./youtube-fixtures"
 
@@ -143,6 +148,14 @@ export function editorGoldenFiles(
       editor.view.dom.dispatchEvent(pasteEvent({ "text/plain": text }))
       sources.push({ name: `embed-${name}`, html: save(editor.state.doc) })
     }
+  }
+  for (const { name, html } of pasteFixtures()) {
+    // An HTML paste, as a browser pastes a copied selection; the stand-in
+    // event of `site-schema.ts` carries the HTML under jsdom.
+    load("<p></p>")
+    editor.commands.setTextSelection(1)
+    editor.view.dom.dispatchEvent(pasteEvent({ "text/html": html }))
+    sources.push({ name: `paste-${name}`, html: save(editor.state.doc) })
   }
   return goldenFiles(sources)
 }

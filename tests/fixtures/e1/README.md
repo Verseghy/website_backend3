@@ -29,10 +29,11 @@ The files are named after their group and fixture:
 | `media-` | a canonical image, YouTube or Padlet body of `admin/src/test/editor-fixtures.ts` |
 | `media-input-` | image and embed HTML that the editor rewrites on its first load |
 | `embed-` | a YouTube input fixture of `admin/test/fixtures/youtube/` (ADR 0043): embed code loaded and saved, or a link pasted on its own into an empty body |
+| `paste-` | a paste fixture of `admin/test/fixtures/paste/` (`paste-generic-`) or `admin/test/fixtures/third_party/roosterjs/` (`paste-roosterjs-`) pasted as HTML into an empty body, through the paste filter (editor.md §5, §13.5) |
 | `command-` | a document built with the editor's commands, the ones the toolbar's buttons call, the media commands included |
 
-All of it is invented markup or, for `embed-`, what the editor stores for
-YouTube's own code and links (`THIRD_PARTY.md`), never production content
+All of it is invented markup or, for `embed-` and `paste-roosterjs-`, what the editor stores for
+YouTube's own code and links and for roosterjs' web samples (`THIRD_PARTY.md`), never production content
 (`CLAUDE.md`, public-safety rules). A file holds the stored HTML as is, with no trailing
 newline.
 

@@ -415,6 +415,12 @@ updates:
       tiptap:
         patterns: ["@tiptap/*"]
         update-types: ["minor", "patch"]
+      # vitest 5.0.5 names @vitest/browser-playwright "5.0.5" exactly as its
+      # peer, so the two move in one PR (the paste tests' browser mode,
+      # editor.md section 13.5).
+      vitest:
+        patterns: ["vitest", "@vitest/*"]
+        update-types: ["minor", "patch"]
 
   # Keeps the commit-SHA pins in .github/workflows/ current and rewrites their
   # version comments.

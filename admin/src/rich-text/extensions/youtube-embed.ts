@@ -14,7 +14,7 @@
  *
  * Every input goes through the one reader of `youtube-input.ts`: the parse
  * rules below, the lone-URL paste rule, the insert dialog, and the
- * plain-text route that `paste-generic` adds. The parse rules, highest
+ * plain-text route of `office-paste.ts`. The parse rules, highest
  * priority first:
  *
  * - 70: `p[data-youtube-video]`, the stored shape, and

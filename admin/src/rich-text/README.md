@@ -139,18 +139,65 @@ table cell or heading and `editor.can()` disables the toolbar buttons there.
 The YouTube fixtures of `../../test/fixtures/youtube/` (their README says
 where each comes from) feed the reader's tests and the golden files.
 
+## Paste
+
+`paste/` is the paste filter of editor.md §5 (ADR 0013 §3), and
+`extensions/office-paste.ts` the extension that runs it on every HTML paste
+and drop (§4.3 row 11). The filter is pure apart from the `DOMParser` it is
+given, and never throws: `paste-filter.ts` falls back to the text alone,
+with the `editor.paste.fallback` notice, should it ever fail (§5.5).
+
+| Module                           | What it is                                                                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `paste/normalize-pasted-html.ts` | `normalizePastedHtml(html, { policy, parser })`: the steps in order, the result `{ html, source, report }`                                                   |
+| `paste/paste-filter.ts`          | `filterPastedHtml`, the filter inside a `try`, and the plain-text fallback                                                                                   |
+| `paste/paste-source.ts`          | step 1: Word desktop, Excel desktop, the editor's own clipboard or generic                                                                                   |
+| `paste/inline-styles.ts`         | step 6: every `<style>` rule inlined by specificity and source order, then every `<style>` removed                                                           |
+| `paste/hidden-content.ts`        | step 7: hidden rows, columns and elements removed                                                                                                            |
+| `paste/paste-declarations.ts`    | step 8: the stored properties read from the CSSOM, the paste-time rounding, `white-space: normal`, the hints                                                 |
+| `paste/inline-marks.ts`          | the formatting elements to content-v1 marks, element by element (step 9 per run replaces it with the Word runs)                                              |
+| `paste/paste-structure.ts`       | step 10: what goes with its content, tables, attributes, containers, embed addresses                                                                         |
+| `paste/media-placement.ts`       | step 11a: every image and embed in a top-level paragraph of its own, with YouTube's title rule                                                               |
+| `paste/paste-context.ts`         | what the steps share, and the report                                                                                                                         |
+| `extensions/office-paste.ts`     | `OfficePaste`: `transformPastedHTML`, the notices in `handlePaste` and `handleDrop`, and the plain-text route for embed code (D128), only where media may go |
+
+The Word and Excel rules (lists, run marks relative to the base size,
+border weights, General alignment) and the picture rules of §5.3 join these
+modules in their own slices; until then, Word and Excel desktop HTML take
+the generic steps. editor.md §5.5, "As built for the generic path", says
+how the modules read the steps.
+
+Tests: each module has its own (`paste/*.test.ts`), with
+`src/test/paste-invariants.ts`, a P-paste check against `policy.json`
+separate from the filter's steps (it shares the editor's value readers; the
+server's P0 oracle re-checks the golden outputs independently).
+`paste/degrade-safely.test.ts` pastes the fixtures of
+`../../test/fixtures/paste/` (synthetic Google, LibreOffice, Safari and
+web-page shapes) and `../../test/fixtures/third_party/roosterjs/` (Excel and
+Word for the web, MIT), and random clipboard HTML
+(`src/test/paste-arbitrary.ts`), through the whole paste path, and asserts
+only invariants (editor.md §13.5). Every `paste/*.test.ts` and
+`extensions/office-paste.test.ts` run under jsdom with `npm test` and in
+Chromium, Firefox and WebKit with `npm run test:browser`
+(`vitest.browser.config.ts`; install the browsers first with
+`npx playwright install --with-deps chromium firefox webkit`).
+jsdom builds no style sheet for a `DOMParser` document, so there step 6
+reads each `<style>` through a constructed `CSSStyleSheet` of its text
+(`paste/inline-styles.ts`).
+
 ## The golden files (P2 and P3)
 
 `e1-golden.test.ts`, part of `npm test`, writes `J(x)` for every editor
 fixture to `tests/fixtures/e1/` at the repository root (editor.md §13.6):
 the server's regression fixtures, the canonical bodies and tables, the table
 inputs, the canonical images and embeds and their inputs, the command
-fixtures of `src/test/editor-fixtures.ts` and the YouTube fixtures of
-`../../test/fixtures/youtube/`, named as `src/test/golden-e1.ts` says. The
-server's `tests/rich_text/golden.rs` asserts that the sanitiser stores each
-file unchanged and removes nothing from it. The `Contract` CI job runs
-`npm run test:e1` and fails when a file differs from the committed one, so
-after a change here run `npm test` and commit what it wrote there. A slice
-that adds an editor feature or a paste fixture adds it to
-`editor-fixtures.ts` (or a group of its own in `golden-e1.ts`), so the
-server checks what it writes.
+fixtures of `src/test/editor-fixtures.ts`, the YouTube fixtures of
+`../../test/fixtures/youtube/` and the paste fixtures pasted as HTML, named
+as `src/test/golden-e1.ts` says. The server's `tests/rich_text/golden.rs`
+asserts that the sanitiser stores each file unchanged and removes nothing
+from it. The `Contract` CI job runs `npm run test:e1` and fails when a file
+differs from the committed one, so after a change here run `npm test` and
+commit what it wrote there. A slice that adds an editor feature adds it to
+`editor-fixtures.ts` (or a group of its own in `golden-e1.ts`), and a paste
+fixture goes to `../../test/fixtures/paste/`, which the `paste-` group
+reads, so the server checks what it writes.

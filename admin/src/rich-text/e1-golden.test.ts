@@ -15,7 +15,10 @@ import {
   goldenChanges,
   goldenFiles,
 } from "@/test/golden-e1"
+import { CONTENT_V1_POLICY } from "@/rich-text/policy"
 import { MEDIA_BODIES } from "@/test/editor-fixtures"
+import { pasteFixtures } from "@/test/paste-fixtures"
+import { pasteViolations } from "@/test/paste-invariants"
 import { storedHtmlHarness } from "@/test/stored-html"
 
 /**
@@ -45,6 +48,7 @@ describe("the golden files of tests/fixtures/e1", () => {
       "command",
       "embed",
       "media",
+      "paste",
       "regression",
       "table",
     ])
@@ -80,6 +84,17 @@ describe("the golden files of tests/fixtures/e1", () => {
         ),
         file
       ).toHaveLength(1)
+    }
+  })
+
+  it("hold every paste fixture, pasted through the filter into content-v1 (editor.md §13.5)", () => {
+    const pasted = [...FILES].filter(([file]) => file.startsWith("paste-"))
+    expect(pasted.map(([file]) => file)).toEqual(
+      pasteFixtures().map(({ name }) => `paste-${name}.html`)
+    )
+    for (const [file, html] of pasted) {
+      expect(html, file).not.toBe("<p></p>")
+      expect(pasteViolations(html, CONTENT_V1_POLICY), file).toEqual([])
     }
   })
 

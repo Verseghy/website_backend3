@@ -33,15 +33,19 @@
  *   cell declarations as cell attributes (rows 5-7).
  * - `site-image.ts`, `youtube-embed.ts`, `padlet-embed.ts`: the image and
  *   the two embeds, the `media` group, top level only (rows 8-10).
+ * - `office-paste.ts`: the paste filter on every HTML paste and drop, its
+ *   plain-text fallback, and the plain-text route for YouTube's embed code
+ *   (row 11, §5). It adds no node or mark.
  *
- * The paste extension and image uploads join this list as their own
- * modules (editor.md §4.3 rows 11-13).
+ * File drops and image uploads join this list as their own modules
+ * (editor.md §4.3 rows 12-13).
  */
 import type { AnyExtension } from "@tiptap/core"
 import { StarterKit } from "@tiptap/starter-kit"
 
 import type { NotifyEditor } from "./extensions/editor-notice"
 import { IGNORE_NOTICES } from "./extensions/editor-notice"
+import { createOfficePaste } from "./extensions/office-paste"
 import { createPadletEmbed } from "./extensions/padlet-embed"
 import { SiteDocument } from "./extensions/site-document"
 import { SiteHeading } from "./extensions/site-heading"
@@ -74,9 +78,15 @@ export interface SiteExtensionsOptions {
   /**
    * Shows a notice of the editor to the staff member, by its `editor.*` key:
    * the YouTube paste rule's dropped options and refused links (ADR 0043
-   * §4). Default: notices are not shown, as in a headless editor.
+   * §4), and the paste filter's fallback (editor.md §5.5). Default: notices
+   * are not shown, as in a headless editor.
    */
   readonly notify?: NotifyEditor
+  /**
+   * The parser of pasted HTML and of embed code (editor.md §5.1). Default: a
+   * `DOMParser` made at the first paste.
+   */
+  readonly parser?: DOMParser
 }
 
 /**
@@ -128,5 +138,6 @@ export function siteExtensions(options: SiteExtensionsOptions): AnyExtension[] {
     createSiteImage(policy),
     createYoutubeEmbed(policy, notify),
     createPadletEmbed(policy),
+    createOfficePaste({ policy, notify, parser: options.parser }),
   ]
 }

@@ -338,6 +338,7 @@ npm ci
 npm run lint        # ESLint, including local/no-ui-literals and local/no-ungated-buttons
 npm run typecheck   # tsc -b --noEmit over the app, the scripts and the E2E suite
 npm test            # Vitest: unit tests, i18n completeness checks, licence-policy tests
+npm run test:browser  # the paste tests in Chromium, Firefox and WebKit (below)
 npm run licenses    # the production-dependency licence check
 npm run clean-room  # no @react-admin/ (Enterprise) package in package.json or the lockfile
 npm run build       # writes dist/, which backend3 serves at /admin
@@ -366,3 +367,15 @@ three engines, so it needs
 `npx playwright install --with-deps chromium firefox webkit`, and it does not
 use that guard: the scripts a sandboxed file tries to run are reported as
 exactly those errors, which is what it tests.
+
+`npm run test:browser` runs the paste tests (`src/rich-text/paste/*.test.ts`,
+the degrade-safely suite among them, and
+`src/rich-text/extensions/office-paste.test.ts`) in Chromium, Firefox and
+WebKit through Vitest's browser mode (`vitest.browser.config.ts`,
+`@vitest/browser-playwright`), because the paste filter reads styles through
+each engine's CSSOM (editor.md §13.5). It needs the same browsers as the
+E2E suite (`npx playwright install --with-deps chromium firefox webkit`) but
+no running backend3; the `Admin test` CI job runs it after `npm test`. The
+same files also run under jsdom with `npm test`. `vitest` and
+`@vitest/browser-playwright` move together: vitest names the plugin's exact
+version as its peer (one Dependabot group).

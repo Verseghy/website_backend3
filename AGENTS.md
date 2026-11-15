@@ -213,6 +213,7 @@ npm run build          # writes admin/dist, which backend3 serves at /admin, wit
 npm run lint           # ESLint
 npm run typecheck      # tsc -b --noEmit, which also checks the generated bindings
 npm test               # Vitest unit tests (vitest run)
+npm run test:browser   # the paste tests in Chromium, Firefox and WebKit (Vitest browser mode; Playwright's browsers first)
 npm run licenses       # licence check of the production dependencies
 npm run clean-room     # no @react-admin/ (Enterprise) package in package.json or the lockfile
 npm run e2e            # Playwright against http://localhost:5150: the admin in Chromium, /storage in three engines
@@ -469,6 +470,7 @@ bash scripts/tests/run-all.sh             # the shell-script tests
 bash scripts/sync-loco-skill.sh --check   # the vendored Loco skill is unchanged
 rm -rf target/licenses && bash scripts/crate-notices.sh --out target/licenses  # the crates' licence notices (ADR 0042)
 (cd admin && npm run lint && npm run typecheck && npm test && npm run licenses && npm run clean-room)
+(cd admin && npx playwright install --with-deps chromium firefox webkit && npm run test:browser)  # the paste tests in three engines (editor.md §13.5)
 ```
 
 A change to `admin/` or to the user flows also runs `npm run e2e` as described

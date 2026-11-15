@@ -100,19 +100,25 @@ Test inputs whose text a third party wrote, or a third-party service
 generated, and which the project captured or copied (editor.md §13.1,
 [ADR 0043](docs/design/adr/0043-youtube-embed-input-playlists-ids-minimum-height-and-referer.md)
 §6). None of them is built into the admin or the binary.
-`admin/test/fixtures/youtube/README.md` describes each file.
+`admin/test/fixtures/youtube/README.md` and
+`admin/test/fixtures/third_party/roosterjs/README.md` describe each file.
 
 | Path | Source | Captured or copied | Licence | Licence file | Modified |
 |---|---|---|---|---|---|
 | `admin/test/fixtures/youtube/`: the 18 files `youtube-embed-dialog-*.html`, `youtube-embed-context-menu-*.html`, `youtube-share-link-*.txt`, `youtube-context-menu-url-*.txt`, `youtube-watch-url-playlist.txt` and `youtube-shorts-url.txt` | Output of YouTube (youtube.com): its Share > Embed code, share links, the player menu's copies and page links, the generator of the markup | 2026-10-25, desktop Chrome, signed out (research: youtube-embed §0) | Not under the repository licence; no licence is claimed for the generated markup (editor.md §13.1) | None | Yes, 12 files: each live `si` value replaced with an invented token (`invented_si-000N`); the others are verbatim |
 | `admin/test/fixtures/youtube/youtube-dev-sample-autoplay-origin.html` | Google's [YouTube Embedded Players and Player Parameters](https://developers.google.com/youtube/player_parameters), the code sample of "Embed a player using an `<iframe>` tag" | 2026-10-25 (the page showed "Last updated 2026-10-15 UTC") | `Apache-2.0`, as the page states for its code samples | `admin/test/fixtures/youtube/LICENSE.apache-2.0`, the text of <https://www.apache.org/licenses/LICENSE-2.0.txt> | No |
 | `admin/test/fixtures/youtube/youtube-documented-embed-listtype-playlist.txt` | the same page, "Loading a playlist": the `listType=playlist` embed address | 2026-10-25 | `Apache-2.0` | `admin/test/fixtures/youtube/LICENSE.apache-2.0` | No |
+| `admin/test/fixtures/third_party/roosterjs/`: the 4 files `roosterjs-excel-online-*.html` and `roosterjs-word-online-*.html` | [roosterjs](https://github.com/microsoft/roosterjs), `packages/roosterjs-content-model-plugins/test/paste/e2e/cmPasteFromExcelOnlineTest.ts` and `cmPasteFromWacTest.ts`: the `rawHtml` clipboard strings of Excel and Word for the web (editor.md §13.1) | commit `fc2d5c290d57001d73215d71109993522a2a8f64` (2026-10-23) | `MIT` (Copyright (c) Microsoft Corporation) | `admin/test/fixtures/third_party/roosterjs/LICENSE`, a byte copy of roosterjs' `LICENSE` at that commit | Yes: each file is one string literal of the test file with its JavaScript escapes decoded; the markup and text are otherwise unchanged |
 
 The other files of `admin/test/fixtures/youtube/` are the project's own,
 under the repository licence: three rebuilt after the shapes that YouTube
 Help prints (`youtube-help-*.html`), three constructed from the parameters
 that the developer documentation describes, one Mix link built after the
 shape of a link on a YouTube page, and one address typed by hand.
+The paste fixtures of `admin/test/fixtures/paste/` are the project's own
+too: synthetic documents shaped like Google Docs, Google Sheets,
+LibreOffice, Safari and web-page clipboards, with invented text (its
+README).
 
 ## Generated starting points
 
