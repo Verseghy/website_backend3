@@ -353,10 +353,14 @@ updates:
       # prosemirror-model and prosemirror-tables under them, because the
       # serialiser relies on a prosemirror-model internal and the paste filter
       # on prosemirror-view's paste order. Each minor or patch update must pass
-      # the private corpus job before it merges. Not dependencies yet: the
-      # editor slice adds them. If it pins prosemirror-* through npm overrides
-      # only, Dependabot's version updates (direct dependencies only) never
-      # propose them, and their rule stays idle.
+      # the private corpus job before it merges. The @tiptap/* packages are
+      # direct dependencies at one exact version (the tiptap group below);
+      # the three prosemirror-* packages are pinned through `overrides` in
+      # admin/package.json only, so Dependabot's version updates (direct
+      # dependencies only) never propose them and their rule stays idle. A
+      # TipTap update whose @tiptap/pm needs newer ones moves those overrides
+      # by hand in the same PR (admin/src/rich-text/pins.test.ts checks that
+      # the pins and the lockfile agree).
       - dependency-name: "@tiptap/*"
         update-types: ["version-update:semver-major"]
       - dependency-name: prosemirror-*

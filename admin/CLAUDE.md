@@ -122,6 +122,15 @@ ADR 0005 (bindings) before changing anything here.
   bundled package or `src/` brings a `NOTICE` file, which the file would
   leave out; when it fails for a new dependency or newly copied code, fix the
   cause it names rather than the test.
+- **Editor pins (editor.md §4.1).** Every `@tiptap/*` package is a direct
+  dependency at one exact version, and prosemirror-view, prosemirror-model
+  and prosemirror-tables are pinned exactly in `overrides`. Add or move them
+  together, in `package.json` first and then with one `npm install`: with
+  npm 11.19, adding an override to an already installed tree left a nested
+  copy of prosemirror-view under each of its dependents, and `npm dedupe`
+  removed them only together with unrelated version changes.
+  `src/rich-text/pins.test.ts` fails on a range, a second version or a second
+  copy.
 - **Pinned majors.** `../.github/dependabot.yml` keeps Dependabot's version
   updates off the majors the ADRs pin: `@types/node` on the `.node-version`
   major, react-router 7, ra-core 5 and its peers, React 19, Vite 8,
