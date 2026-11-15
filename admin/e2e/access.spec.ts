@@ -11,9 +11,10 @@
  * server, so the sidebar's questions add no request: the test counts the
  * admin API requests of a page load. The server's access table
  * (`RESOURCE_ACCESS` in `src/domain/authz.rs`) has the labels row, so the
- * seed account's map is `{labels: ["list", "show"]}` and the check of the
- * map's lists runs on it. The sidebar links every resource the admin
- * registers whose row offers `list`: so far the labels („Címkék”). The
+ * seed account's map is `{labels: ["list", "show", "create", "edit"]}` and
+ * the check of the map's lists runs on it. The sidebar links every resource
+ * the admin registers whose row offers `list`: so far the labels
+ * („Címkék”). The
  * redirect to the access-denied page needs a resource and an account that
  * may not list it, which the seed does not create, so the test opens the
  * pages directly; `src/auth/AccessPages.test.tsx` drives the redirects

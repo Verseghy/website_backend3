@@ -274,7 +274,7 @@
       "resource": "labels",
       "action": "list",
       "record": null,
-      "access": ["list", "show"],
+      "access": ["list", "show", "create", "edit"],
       "expected": true
     },
     {
@@ -284,7 +284,7 @@
       "resource": "labels",
       "action": "show",
       "record": { "id": 7 },
-      "access": ["list", "show"],
+      "access": ["list", "show", "create", "edit"],
       "expected": true
     },
     {
@@ -308,7 +308,7 @@
       "expected": false
     },
     {
-      "name": "the label writes are not offered before their routes exist",
+      "name": "a writer may edit a label",
       "permissions": [
         "edit posts",
         "edit labels",
@@ -319,7 +319,52 @@
       "resource": "labels",
       "action": "edit",
       "record": { "id": 7 },
-      "access": ["list", "show"],
+      "access": ["list", "show", "create", "edit"],
+      "expected": true
+    },
+    {
+      "name": "edit labels alone may create a label",
+      "permissions": ["edit labels"],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "create",
+      "record": null,
+      "access": ["list", "show", "create", "edit"],
+      "expected": true
+    },
+    {
+      "name": "edit posts alone, the picker's permission, may not create a label",
+      "permissions": ["edit posts"],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "create",
+      "record": null,
+      "access": [],
+      "expected": false
+    },
+    {
+      "name": "a secretary may not edit a label",
+      "permissions": ["edit events", "edit canteens", "edit colleagues"],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "edit",
+      "record": { "id": 7 },
+      "access": [],
+      "expected": false
+    },
+    {
+      "name": "the label delete is not offered before its route exists",
+      "permissions": [
+        "edit posts",
+        "edit labels",
+        "edit authors",
+        "manage media"
+      ],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "delete",
+      "record": { "id": 7 },
+      "access": ["list", "show", "create", "edit"],
       "expected": false
     }
   ]

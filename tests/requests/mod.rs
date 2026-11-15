@@ -2,6 +2,7 @@
 //! whole middleware stack exactly as in production.
 
 mod admin_labels;
+mod admin_labels_write;
 mod admin_origin;
 mod admin_routes;
 mod admin_ui;

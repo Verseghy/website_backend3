@@ -34,6 +34,15 @@
 //! `field` is the query parameter (`dtos::admin::list`). Every list has
 //! them, so they belong to no resource and are `snake_case`.
 //!
+//! The shared write contract (the first writes, labels, parity SHR-10 and
+//! SHR-13) adds the four refusals of a field that a create or an update
+//! cannot store: `field_required`, `field_too_long` (`params`: `max`),
+//! `field_invalid_character` and `field_invalid_color`, each a `422` whose
+//! `field` is the request member (`dtos::admin::write`). Every resource's
+//! fields are refused by the same rules, so they are `snake_case`. The label
+//! writes add the first resource rule, `label.name_taken`, the `409` of a
+//! name that a live label already has (ADR 0021 §4's 409 row).
+//!
 //! The upload model adds the image refusals of ADR 0015 §6 and §7 and the
 //! four CPU limits of ADR 0033 §4 (`image_*`), and the free-space refusal
 //! (`insufficient_storage`, 507 Insufficient Storage: the maintainer's
@@ -157,6 +166,24 @@ pub enum ErrorCode {
     /// `422`: a list filter's value is not what the filter takes, such as
     /// an id that is not a whole number. `field`: the filter's name.
     InvalidFilter,
+    /// `422`: a required field of a create or an update is empty, or only
+    /// white space once trimmed. `field`: the field.
+    FieldRequired,
+    /// `422`: a text field of a create or an update is longer than its
+    /// limit, counted in characters once trimmed. `field`: the field;
+    /// `params`: `max`, the limit.
+    FieldTooLong,
+    /// `422`: a text field of a create or an update holds the character
+    /// U+0000, which the database cannot store. `field`: the field.
+    FieldInvalidCharacter,
+    /// `422`: a colour field of a create or an update is not `#rrggbb`, a
+    /// `#` and six hexadecimal digits. `field`: the field.
+    FieldInvalidColor,
+    /// `409`: a live label already has the name, compared without regard to
+    /// case; a label in the trash does not count. `field`: `name`;
+    /// `params`: `name`, the name as sent, trimmed.
+    #[serde(rename = "label.name_taken")]
+    LabelNameTaken,
 }
 
 impl ErrorCode {
@@ -204,7 +231,16 @@ impl ErrorCode {
             | Self::InvalidSort
             | Self::InvalidOrder
             | Self::UnknownFilter
-            | Self::InvalidFilter => 422,
+            | Self::InvalidFilter
+            // The write contract: a submitted value that cannot be stored
+            // (SHR-13).
+            | Self::FieldRequired
+            | Self::FieldTooLong
+            | Self::FieldInvalidCharacter
+            | Self::FieldInvalidColor => 422,
+            // ADR 0021 §4's 409 row: a uniqueness rule that the stored
+            // labels decide, not the submitted value alone.
+            Self::LabelNameTaken => 409,
             // ADR 0021 §4 has no row for it, and ADR 0015 §6 asks only for
             // a clear message. 507 Insufficient Storage (RFC 4918 §11.5):
             // the server cannot store what the request needs, and nothing
@@ -261,6 +297,17 @@ impl ErrorCode {
             Self::InvalidOrder => "The sort direction is not valid",
             Self::UnknownFilter => "The list has no such filter",
             Self::InvalidFilter => "The filter value is not valid",
+            // A refused field sends its refusal's own text, which names the
+            // field and the rule (`dtos::admin::write`); these are the
+            // fallbacks.
+            Self::FieldRequired => "The field is required",
+            Self::FieldTooLong => "The field is longer than its limit",
+            Self::FieldInvalidCharacter => "The field holds a character that cannot be stored",
+            Self::FieldInvalidColor => "The colour is not of the form #rrggbb",
+            Self::LabelNameTaken => {
+                "A label that is not in the trash already has this name, compared without regard \
+                 to case"
+            }
         }
     }
 }
@@ -381,6 +428,15 @@ mod tests {
             (ErrorCode::InvalidOrder, 422, "invalid_order"),
             (ErrorCode::UnknownFilter, 422, "unknown_filter"),
             (ErrorCode::InvalidFilter, 422, "invalid_filter"),
+            (ErrorCode::FieldRequired, 422, "field_required"),
+            (ErrorCode::FieldTooLong, 422, "field_too_long"),
+            (
+                ErrorCode::FieldInvalidCharacter,
+                422,
+                "field_invalid_character",
+            ),
+            (ErrorCode::FieldInvalidColor, 422, "field_invalid_color"),
+            (ErrorCode::LabelNameTaken, 409, "label.name_taken"),
         ] {
             assert_eq!(code.status(), status, "{code:?}");
             assert_eq!(serde_json::to_value(code).expect("serializes"), json!(wire));
@@ -440,7 +496,7 @@ mod tests {
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "origin_mismatch" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage" | "invalid_page" | "invalid_per_page" | "invalid_sort" | "invalid_order" | "unknown_filter" | "invalid_filter";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "origin_mismatch" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage" | "invalid_page" | "invalid_per_page" | "invalid_sort" | "invalid_order" | "unknown_filter" | "invalid_filter" | "field_required" | "field_too_long" | "field_invalid_character" | "field_invalid_color" | "label.name_taken";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");

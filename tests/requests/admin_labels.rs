@@ -7,7 +7,8 @@
 //! descending, 25 to a page, as `{data, total}`, with each refusal of the
 //! list contract a `422` envelope naming its parameter. The record route
 //! answers a live label, and `404` for anything else. Every answer is
-//! `no-store`. Every account and label is invented.
+//! `no-store`. The writes have their own tests (`admin_labels_write.rs`).
+//! Every account and label is invented.
 
 use axum::http::{StatusCode, header::COOKIE};
 use axum_test::{TestResponse, TestServer};
@@ -196,7 +197,10 @@ async fn the_access_map_offers_the_label_screens_to_edit_labels_only() {
         let me = "/api/admin/auth/me";
         let writer = writer(&ctx).await;
         let body = get(&server, &ctx, me, Some(&writer)).await.json::<Value>();
-        assert_eq!(body["access"]["labels"], json!(["list", "show"]));
+        assert_eq!(
+            body["access"]["labels"],
+            json!(["list", "show", "create", "edit"])
+        );
         let picker_only = account_with(
             &ctx,
             "bejegyzesek@example.test",
@@ -480,18 +484,32 @@ async fn the_record_route_answers_a_live_label_and_404_for_anything_else() {
 }
 
 #[tokio::test]
-async fn the_label_routes_take_only_get() {
-    // The writes come with their own slice; until then axum answers 405 to
-    // every other method, with the admin's `no-store`.
+async fn the_label_routes_take_only_their_methods() {
+    // GET and POST on the list, GET and PUT on the record; delete comes
+    // with the trash. axum answers 405 to every other method, with the
+    // admin's `no-store`.
     with_server(|server, ctx| async move {
         let user = writer(&ctx).await;
         let token = session_token(&ctx, &user, SessionScope::Admin);
-        for path in [LIST.to_owned(), format!("{LIST}/1")] {
-            for method in [
-                axum::http::Method::POST,
-                axum::http::Method::PUT,
-                axum::http::Method::DELETE,
-            ] {
+        for (path, methods) in [
+            (
+                LIST.to_owned(),
+                [
+                    axum::http::Method::PUT,
+                    axum::http::Method::PATCH,
+                    axum::http::Method::DELETE,
+                ],
+            ),
+            (
+                format!("{LIST}/1"),
+                [
+                    axum::http::Method::POST,
+                    axum::http::Method::PATCH,
+                    axum::http::Method::DELETE,
+                ],
+            ),
+        ] {
+            for method in methods {
                 let response = server
                     .method(method.clone(), &path)
                     .add_header(COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))

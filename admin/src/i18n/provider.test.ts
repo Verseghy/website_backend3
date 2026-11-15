@@ -20,6 +20,25 @@ describe("createI18nProvider", () => {
     expect(provider.translate("app.title")).toBe(hu.app.title)
   })
 
+  it("translates a dotted error code and fills its params, without a report", () => {
+    // ADR 0021 §4: `errors["label.name_taken"]` is reached as
+    // `errors.label.name_taken`, and is no missing key.
+    const onMissingKey = vi.fn()
+    const provider = createI18nProvider({
+      reportMissingKeys: true,
+      onMissingKey,
+    })
+    expect(
+      provider.translate("errors.label.name_taken", { name: "Hírek" })
+    ).toBe(
+      "Már van „Hírek” nevű címke. A kis- és nagybetűk nem számítanak, ezért válassz másik nevet!"
+    )
+    expect(provider.translate("errors.field_too_long", { max: 64 })).toBe(
+      "Legfeljebb 64 karakter lehet."
+    )
+    expect(onMissingKey).not.toHaveBeenCalled()
+  })
+
   it("interpolates and picks the Hungarian plural form", () => {
     const provider = createI18nProvider({ reportMissingKeys: false })
     expect(

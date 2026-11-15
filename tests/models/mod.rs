@@ -4,6 +4,7 @@ mod activity_log;
 mod grants;
 mod job_queue;
 mod labels;
+mod labels_write;
 mod legacy_passwords;
 mod media;
 mod owned_files;

@@ -53,6 +53,21 @@ const UPLOAD_REFUSAL_PARAMS = {
   insufficient_storage: [],
 } satisfies Partial<Record<ErrorCode, string[]>>
 
+/**
+ * The `params` of each refusal of a create or an update (the write
+ * contract), as src/dtos/admin/error.rs documents them and
+ * src/dtos/admin/write.rs and src/dtos/admin/labels.rs send them; the Rust
+ * tests of those modules and tests/requests/admin_labels_write.rs pin the
+ * same names.
+ */
+const WRITE_REFUSAL_PARAMS = {
+  field_required: [],
+  field_too_long: ["max"],
+  field_invalid_character: [],
+  field_invalid_color: [],
+  "label.name_taken": ["name"],
+} satisfies Partial<Record<ErrorCode, string[]>>
+
 describe("hu.ts", () => {
   it("defines every key of the installed ra-language-english (key parity)", () => {
     const missing = englishKeys.filter(
@@ -212,6 +227,7 @@ describe("hu.ts", () => {
       invalid_order: [],
       unknown_filter: [],
       invalid_filter: [],
+      ...WRITE_REFUSAL_PARAMS,
     }
     const unknown = Object.entries(hu.errors).flatMap(([code, message]) =>
       placeholders(message)
@@ -226,6 +242,25 @@ describe("hu.ts", () => {
     // no placeholder uses is information the editor never sees.
     for (const [code, names] of Object.entries(UPLOAD_REFUSAL_PARAMS)) {
       expect(placeholders(hu.errors[code as ErrorCode]), code).toEqual(names)
+    }
+  })
+
+  it("fills exactly the params the server sends with each write refusal", () => {
+    for (const [code, names] of Object.entries(WRITE_REFUSAL_PARAMS)) {
+      expect(placeholders(hu.errors[code as ErrorCode]), code).toEqual(names)
+    }
+  })
+
+  it("finds the dotted error codes under their dotted keys", () => {
+    // ADR 0021 §4: a rule of one resource has a `<resource>.<reason>` code,
+    // stored as one leaf of `errors`, which the completeness checks and
+    // polyglot read as `errors.<resource>.<reason>`.
+    const dotted = Object.keys(hu.errors).filter((code) => code.includes("."))
+    expect(dotted).toContain("label.name_taken")
+    for (const code of dotted) {
+      expect(lookupMessage(hu, `errors.${code}`), code).toBe(
+        hu.errors[code as ErrorCode]
+      )
     }
   })
 

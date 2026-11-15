@@ -557,6 +557,22 @@ export const hu = {
       "A lista nem szűrhető így. Töröld a szűrőket, és próbáld újra!",
     invalid_filter:
       "A szűrő értéke érvénytelen. Töröld a szűrőt, és próbáld újra!",
+    // A field of a create or an update that the server cannot store (the
+    // write contract, SHR-13). `field` names the input, so the form shows
+    // these at it: they speak of „ez a mező” and never name the field.
+    // `field_too_long` gets `max`, the limit in characters.
+    field_required: "Ezt a mezőt ki kell tölteni.",
+    field_too_long: "Legfeljebb %{max} karakter lehet.",
+    field_invalid_character:
+      "A szöveg nem tárolható vezérlőkaraktert (U+0000) tartalmaz. Töröld, vagy írd be újra a szöveget!",
+    field_invalid_color:
+      "A színt #rrggbb formában kell megadni, például #1E88E5.",
+    // A label name that a live label already has (ADR 0021 §4's 409 row).
+    // The comparison ignores case, so the message says so; `name` is the
+    // name as sent. A dotted code: polyglot reaches it as
+    // `errors.label.name_taken`, and `lookupMessage` finds the dotted leaf.
+    "label.name_taken":
+      "Már van „%{name}” nevű címke. A kis- és nagybetűk nem számítanak, ezért válassz másik nevet!",
   } satisfies Record<ErrorCode, string>,
 } as const satisfies MessageTree
 

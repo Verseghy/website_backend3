@@ -698,7 +698,8 @@ pub struct ResourceAccess {
 ///   form's label picker (ADR 0007 §4), which is no screen of the resource,
 ///   so `edit posts` alone is not offered them, as the maintainer answered
 ///   (research: DECISIONS R35 (D153); [`ActionRule`] says why).
-///   The label writes, trash and history add their actions with their
+///   `create` and `edit`, the label writes, ask for `edit labels` as their
+///   routes do. The trash and the history add their actions with their
 ///   routes.
 ///
 /// The tests of this module hold every row to the shape of ADR 0007 §4:
@@ -723,6 +724,14 @@ pub const RESOURCE_ACCESS: &[ResourceAccess] = &[ResourceAccess {
         ),
         ActionRule::new(
             AccessAction::Show,
+            &[Requirement::Permission(Permission::EditLabels)],
+        ),
+        ActionRule::new(
+            AccessAction::Create,
+            &[Requirement::Permission(Permission::EditLabels)],
+        ),
+        ActionRule::new(
+            AccessAction::Edit,
             &[Requirement::Permission(Permission::EditLabels)],
         ),
     ],
@@ -1099,10 +1108,11 @@ mod tests {
     }
 
     #[test]
-    fn the_labels_row_offers_the_list_and_the_record_to_edit_labels_only() {
-        // ADR 0007 §4: `edit posts` reads labels for the post form's picker,
-        // which is no screen, so the access map does not offer it the
-        // labels' screens (the routes still let it in).
+    fn the_labels_row_offers_the_screens_and_the_writes_to_edit_labels_only() {
+        // ADR 0007 §4: `edit labels` lists, shows, creates and edits labels.
+        // `edit posts` reads them for the post form's picker, which is no
+        // screen, so the access map offers it none of the labels' actions
+        // (the read routes still let it in, the write routes do not).
         let labels = |grants: &AccountGrants| -> Vec<&'static str> {
             access_map(RESOURCE_ACCESS, grants)
                 .get("labels")
@@ -1110,11 +1120,15 @@ mod tests {
                 .unwrap_or_default()
         };
         for role in [Role::Writer, Role::Supervisor, Role::Admin] {
-            assert_eq!(labels(&account(&[role], &[])), ["list", "show"], "{role}");
+            assert_eq!(
+                labels(&account(&[role], &[])),
+                ["list", "show", "create", "edit"],
+                "{role}"
+            );
         }
         assert_eq!(
             labels(&account(&[], &[Permission::EditLabels])),
-            ["list", "show"]
+            ["list", "show", "create", "edit"]
         );
         for grants in [
             account(&[], &[Permission::EditPosts]),

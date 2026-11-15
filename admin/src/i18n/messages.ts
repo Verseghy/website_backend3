@@ -26,6 +26,13 @@ export function messageKeys(tree: MessageTree, prefix = ""): string[] {
 /**
  * Looks up the phrase stored under a dotted key.
  *
+ * A leaf's own name may hold dots: the dotted error codes of ADR 0021 §4
+ * (`errors["label.name_taken"]`), which `satisfies Record<ErrorCode, string>`
+ * keeps as one leaf of `errors`. Polyglot joins nested names with a dot, so
+ * it reaches that leaf as `errors.label.name_taken`, and so does this
+ * function: at each level it takes the rest of the key as one name first,
+ * then each split of it at a dot.
+ *
  * @param tree - the message tree to search.
  * @param key - a dotted key such as `ra.action.save`.
  * @returns the phrase, or `undefined` when the key is absent or names an
@@ -35,18 +42,32 @@ export function lookupMessage(
   tree: MessageTree,
   key: string
 ): string | undefined {
-  let node: string | MessageTree | undefined = tree
-  for (const part of key.split(".")) {
-    if (
-      node === undefined ||
-      typeof node === "string" ||
-      !Object.hasOwn(node, part)
-    ) {
-      return undefined
+  if (Object.hasOwn(tree, key)) {
+    const leaf = tree[key]
+    if (typeof leaf === "string") {
+      return leaf
     }
-    node = node[part]
   }
-  return typeof node === "string" ? node : undefined
+  for (
+    let dot = key.indexOf(".");
+    dot !== -1;
+    dot = key.indexOf(".", dot + 1)
+  ) {
+    const head = key.slice(0, dot)
+    if (!Object.hasOwn(tree, head)) {
+      continue
+    }
+    // Typed with `undefined`, as `noUncheckedIndexedAccess` would read it.
+    const node: string | MessageTree | undefined = tree[head]
+    if (node === undefined || typeof node === "string") {
+      continue
+    }
+    const found = lookupMessage(node, key.slice(dot + 1))
+    if (found !== undefined) {
+      return found
+    }
+  }
+  return undefined
 }
 
 /**
