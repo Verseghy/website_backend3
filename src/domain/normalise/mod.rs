@@ -76,14 +76,19 @@
 //! then, as when N3 unwraps a centre between two headings, a body that the
 //! parser alone settles in three parses
 //! (`a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`). Or
-//! it is a link fostered out of a table into another link. Once N7 runs
-//! here, the sanitiser repairs such nesting (its structural pass unwraps a
-//! nested link, ADR 0037), and the tests expect the body to settle then.
-//! Whether `apply` goes on depends on what N7 removes: an unwrapped link,
-//! like every removal that no N7 rule plans, still stops it unless the
-//! resolution file accepts the row (data-migration.md §7.1, N7). None of
-//! these is a shape `CKEditor` writes; the tests measure how rarely tag
-//! soup meets one.
+//! it is a link fostered out of a table into another link. Like every
+//! refused body, such a body stops the import's `apply`, and the dry run
+//! names it before that (data-migration.md §7.4, D140). The maintainer
+//! accepted the rare refusal of a link left open around nested blocks as
+//! built, the one that N3's centre unwrap causes included, over a new N3
+//! rule that would settle its shape now (data-migration.md §7.4; research:
+//! DECISIONS R37 (D159)). Once N7 runs here, the sanitiser repairs such
+//! nesting (its structural pass unwraps a nested link, ADR 0037), and the
+//! tests expect the body to settle then. Whether `apply` goes on depends
+//! on what N7 removes: an unwrapped link, like every removal that no N7
+//! rule plans, still stops it unless the resolution file accepts the row
+//! (data-migration.md §7.1, N7). None of these is a shape `CKEditor`
+//! writes; the tests measure how rarely tag soup meets one.
 //!
 //! **N9** ([`fixed_point`]) checks an output against both fixed points,
 //! `normalise(out) == out` and `S(out) == out`.
@@ -348,8 +353,10 @@ mod tests {
         // Each later parse moves it eight blocks more: with sixteen blocks
         // the third pass still changes the body, and it is refused (see
         // "The fixed-point loop" in the module documentation), with or
-        // without the rules. The first body is the one the properties over
-        // `arb_plain_legacy` found (shrunk by proptest; its seeds are in
+        // without the rules. The maintainer accepted this rare refusal as
+        // built (D159, data-migration.md §7.4), so the test asserts it. The
+        // first body is the one the properties over `arb_plain_legacy`
+        // found (shrunk by proptest; its seeds are in
         // `proptest-regressions/domain/normalise/mod.txt`), the second the
         // shortest of its kind: eight lists of one item each.
         let found = concat!(
@@ -433,6 +440,10 @@ mod tests {
         // the first pass. Without N3 it settles: the parser alone settles it
         // in three parses, and so does `normalise` with a `div` in place of
         // the centre, which keeps the inner heading out of the outer one.
+        // The maintainer accepted this rare refusal as built, over a new N3
+        // rule that would settle the body now (D159, data-migration.md
+        // §7.4), so the test asserts it: when N7 joins the pass, it shows
+        // whether the body is still refused.
         // The filter of `arb_plain_legacy` leaves it out, because its first
         // parse nests the links; leaving out only the bodies whose links
         // stay nested after a pass would miss it.
@@ -608,12 +619,14 @@ mod tests {
     /// is gone, as when N3 unwraps a centre between two headings
     /// (`a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`).
     /// Such a legacy body stops the import's `apply` (data-migration.md
-    /// §7.4, D140). Once N7 runs inside the pass, the sanitiser repairs
-    /// both kinds, and those tests expect the body to settle then: they
-    /// fail, and this filter goes with them. Whether `apply` then goes on depends on what N7
-    /// removes: a nested link it unwraps (ADR 0037), like every removal
-    /// that no N7 rule plans, still stops it unless an `N7-accept` entry
-    /// covers the row (data-migration.md §7.1, N7).
+    /// §7.4, D140), a rare refusal that the maintainer accepted as built,
+    /// the one that N3 causes included (D159). Once N7 runs inside the
+    /// pass, the sanitiser repairs both kinds, and those tests expect the
+    /// body to settle then: they fail, and this filter goes with them.
+    /// Whether `apply` then goes on depends on what N7 removes: a nested
+    /// link it unwraps (ADR 0037), like every removal that no N7 rule plans,
+    /// still stops it unless an `N7-accept` entry covers the row
+    /// (data-migration.md §7.1, N7).
     ///
     /// The filter takes the nested links that settle as well, because
     /// leaving out only the bodies whose links stay nested after a pass
@@ -743,7 +756,8 @@ mod tests {
         // The one refused family among the plain pieces, a link the parse
         // leaves inside another link, is left out by the generator, and its
         // two kinds are pinned by `a_link_left_open_around_sixteen_blocks_is_refused`
-        // and `a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`.
+        // and `a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`:
+        // rare refusals that the maintainer accepted as built (D159).
         #[test]
         fn legacy_markup_is_never_refused(raw in arb_plain_legacy()) {
             prop_assert!(normalise(&raw).is_ok(), "{:?}", raw);
