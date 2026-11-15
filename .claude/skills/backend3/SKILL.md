@@ -386,9 +386,22 @@ is its specification; each slice adds the step for its own tables.
    source pool it is given (only the task reads `ctx` and the source setting
    `settings.import.source_database_url`, which production and development
    fill from `IMPORT_SOURCE_DATABASE_URL`; data-migration.md section 4.1),
-   inserts in the foreign-key order of section 4.3 with explicit values (no
-   model save hooks), and writes the `import` (and `import_original`)
-   revisions and the per-table activity entry (ADR 0011 section 4).
+   and only with `tasks::import_mysql::source::select_rows`, the source
+   query layer: it reads only the 17 tables of the allow-list in
+   `src/domain/import_mysql/source_tables.rs` and refuses any other table,
+   the newsletter's first (NWS-01), before it sends anything. Its errors
+   carry no part of the source URL. Only `src/tasks/import_mysql/source.rs`
+   builds or sends a statement to the source or opens a connection to it:
+   `tests/architecture.rs` fails when another file of the import task names
+   sqlx's statement or connection API (`sqlx::query`, `Executor`,
+   `MySqlPoolOptions`, `MySqlPool::connect`, ...). A new kind of statement,
+   such as the source session's `LOCK TABLES` or the schema fingerprint,
+   goes into a file that joins `SOURCE_STATEMENT_FILES` in that test, names
+   its tables from `SOURCE_TABLES` and maps the driver's errors with
+   `source::source_error`. The step inserts in the foreign-key order of
+   section 4.3 with explicit values (no model save hooks), and writes the
+   `import` (and `import_original`) revisions and the per-table activity
+   entry (ADR 0011 section 4).
 4. **Refusals** (section 4.2): an uncovered defect instance, a precondition
    mismatch or a constraint violation stops the import with a message that
    names the defect id, the row id and the rule.
@@ -403,16 +416,19 @@ is its specification; each slice adds the step for its own tables.
    production shape of the table that `public-api.md` section 17.2 and the
    ADR 0019 section 2 table list, written by hand in the legacy format, and
    assert the result through the public API's request helpers.
-7. **Safety**: the source must be a local throwaway MySQL in `test` and
-   `development`. The guard hook blocks a non-local
+7. **Safety**: the source must be a local throwaway MySQL in `test`,
+   `development` and `e2e`. The guard hook blocks a non-local
    `IMPORT_SOURCE_DATABASE_URL` for cargo commands (ADR 0024 section 4,
-   layer 2). The task's own refusal of a non-local source in those
-   environments (layer 3) comes with the slice that adds the MySQL test
-   source, before any step connects to the source: until then the task
-   opens no source connection, because its pool connects on first use and
-   `run` has no step yet. Never point a run at the production database; the
-   operator runs the production import in the cut-over window.
-8. **Run it**: `IMPORT_SOURCE_DATABASE_URL=mysql://<local throwaway source>
+   layer 2), and the task itself refuses a source that is not local there
+   (layer 3, `src/domain/import_mysql/source_guard.rs`): the host must be
+   `localhost`, `127.0.0.1` or `::1`, or the URL's `socket` parameter must
+   name a Unix socket; a container-network name such as `mysql` is
+   refused. Never point a run at the production database; the operator
+   runs the production import in the cut-over window.
+8. **Run it**: start the source, `podman-compose --profile import up -d
+   mysql` (the legacy schema of `tests/fixtures/legacy/schema.sql`; a step
+   that needs rows adds its synthetic fixture), then
+   `IMPORT_SOURCE_DATABASE_URL=mysql://loco:loco@127.0.0.1:3306/verseghy
    cargo loco task import_mysql mode:dry-run snapshot_at:<RFC 3339, UTC>
    resolutions:<file> storage_root:<dir> report:<empty dir>` against the local
    databases, then check `report.md` and `summary.json` in the report
@@ -420,9 +436,12 @@ is its specification; each slice adds the step for its own tables.
    unknown argument, a `snapshot_at` that is not UTC or lies after the start
    of the run, and a report directory that is not empty or lies inside
    `storage_root`. The task and its MySQL driver exist only with the default
-   Cargo feature `import-mysql`. Its tests set the source in the context they
-   run the task with (`tests/tasks/import_mysql.rs`), because
-   `config/test.yaml` names none.
+   Cargo feature `import-mysql`; code and tests that use the driver are
+   behind it, and the CI `Test` job builds and tests once without it. Its
+   tests set the source in the context they run the task with
+   (`tests/tasks/import_mysql.rs`), because `config/test.yaml` names none,
+   and the source layer's tests read the compose source
+   (`tests/tasks/import_mysql_source.rs`).
 9. **PR**: the `import` scope, for example `feat(import): import labels and post labels`,
    with the D-numbers it resolves and the parity IDs it finishes.
 

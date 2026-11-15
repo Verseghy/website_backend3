@@ -126,8 +126,11 @@ settings:
       large_preset: 0
   # The legacy import's source (data-migration.md §3.3, §4.1): a local
   # throwaway MySQL loaded from a synthetic fixture, never a production
-  # database. The guard hook blocks cargo commands whose
-  # IMPORT_SOURCE_DATABASE_URL is not local (ADR 0024 §4). Unset by default;
+  # database, such as compose.yaml's (`podman-compose --profile import up -d
+  # mysql`): mysql://loco:loco@127.0.0.1:3306/verseghy. The guard hook blocks
+  # cargo commands whose IMPORT_SOURCE_DATABASE_URL is not local, and the
+  # task itself refuses a source that is not local here (ADR 0024 §4, layers
+  # 2 and 3), the container-network name `mysql` included. Unset by default;
   # the import_mysql task then refuses to start, naming this key. Quoted and
   # escaped like production's, so any value reaches the task's own check.
   import:

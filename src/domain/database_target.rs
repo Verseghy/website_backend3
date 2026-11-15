@@ -167,21 +167,37 @@ fn is_local_host(host: &str, from_authority: bool) -> bool {
     } else {
         host.to_owned()
     };
-    if socket_candidate.starts_with('/') {
-        return true;
-    }
-    let bare = host
+    socket_candidate.starts_with('/') || is_local_tcp_host(host)
+}
+
+/// Whether a TCP host name, as a driver connects to it, is one of the three
+/// local spellings: `localhost` (in any case), `127.0.0.1` or `::1` (bare, or
+/// in the brackets of a URL authority, in any IPv6 notation). Every other
+/// name and address is not local, other loopback addresses and
+/// container-network names such as `postgres` or `mysql` included.
+///
+/// The import task applies the same rule to its MySQL source (ADR 0024 §4,
+/// layer 3; `domain::import_mysql::source_guard`), so the two guards cannot
+/// disagree on what "local" means.
+///
+/// - `host`: the host exactly as the driver uses it, not percent-decoded.
+#[must_use]
+pub fn is_local_tcp_host(host: &str) -> bool {
+    // Brackets only ever hold an IPv6 address; `[localhost]` is no host.
+    if let Some(inner) = host
         .strip_prefix('[')
         .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host);
-    if bare.eq_ignore_ascii_case("localhost") {
-        return true;
+    {
+        return inner
+            .parse::<Ipv6Addr>()
+            .is_ok_and(|address| address == Ipv6Addr::LOCALHOST);
     }
-    match bare.parse::<IpAddr>() {
-        Ok(IpAddr::V4(address)) => address == Ipv4Addr::LOCALHOST,
-        Ok(IpAddr::V6(address)) => address == Ipv6Addr::LOCALHOST,
-        Err(_) => false,
-    }
+    host.eq_ignore_ascii_case("localhost")
+        || match host.parse::<IpAddr>() {
+            Ok(IpAddr::V4(address)) => address == Ipv4Addr::LOCALHOST,
+            Ok(IpAddr::V6(address)) => address == Ipv6Addr::LOCALHOST,
+            Err(_) => false,
+        }
 }
 
 /// One database connection that the configuration asks for.
@@ -381,6 +397,7 @@ mod tests {
             "postgres://%2Frun%2Fpostgresql/db",
             "postgres:///db?host=/run/postgresql",
             "postgres://localhost/db?host=/tmp&hostaddr=127.0.0.1",
+            "postgres://localhost/db?host=[::1]",
             "  postgres://localhost/db  ",
         ] {
             assert_eq!(locality(uri), Locality::Local, "{uri}");
@@ -409,6 +426,10 @@ mod tests {
             ("postgres://localhost/x?hostaddr=10.0.0.5", "10.0.0.5"),
             ("postgres://%2Ftmp/x?host=remote", "remote"),
             ("postgres:///x?host=", ""),
+            // Brackets hold only an IPv6 address: a bracketed name or IPv4
+            // address in a query parameter is no local host.
+            ("postgres://localhost/x?host=[localhost]", "[localhost]"),
+            ("postgres://localhost/x?hostaddr=[127.0.0.1]", "[127.0.0.1]"),
         ] {
             assert_eq!(
                 locality(uri),
@@ -417,6 +438,40 @@ mod tests {
                 },
                 "{uri}"
             );
+        }
+    }
+
+    #[test]
+    fn exactly_three_tcp_hosts_are_local() {
+        for host in [
+            "localhost",
+            "LocalHost",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "[0:0:0:0:0:0:0:1]",
+        ] {
+            assert!(is_local_tcp_host(host), "{host}");
+        }
+        for host in [
+            "",
+            "mysql",
+            "postgres",
+            "db.example.org",
+            "127.0.0.2",
+            "127.1",
+            "0.0.0.0",
+            "::",
+            "[::2]",
+            "::ffff:127.0.0.1",
+            "localhost.",
+            "local%68ost",
+            "/run/mysqld/mysqld.sock",
+            "[localhost]",
+            "[127.0.0.1]",
+            " localhost",
+        ] {
+            assert!(!is_local_tcp_host(host), "{host}");
         }
     }
 
@@ -651,6 +706,45 @@ mod tests {
         #[test]
         fn locality_never_panics(uri in any::<String>()) {
             let _ = locality(&uri);
+        }
+
+        #[test]
+        fn only_127_0_0_1_of_the_loopback_network_is_a_local_tcp_host(
+            b in any::<u8>(),
+            c in any::<u8>(),
+            d in any::<u8>(),
+        ) {
+            let host = format!("127.{b}.{c}.{d}");
+            prop_assert_eq!(is_local_tcp_host(&host), (b, c, d) == (0, 0, 1));
+        }
+
+        #[test]
+        fn localhost_is_a_local_tcp_host_in_any_case_and_nothing_around_it(
+            upper in proptest::collection::vec(any::<bool>(), 9),
+            decoration in prop_oneof![Just(""), Just("."), Just(" "), Just("x"), Just("-")],
+            before in any::<bool>(),
+        ) {
+            let host: String = "localhost"
+                .chars()
+                .zip(upper)
+                .map(|(letter, upper)| if upper { letter.to_ascii_uppercase() } else { letter })
+                .collect();
+            prop_assert!(is_local_tcp_host(&host));
+            let bracketed = format!("[{host}]");
+            prop_assert!(!is_local_tcp_host(&bracketed), "{}", bracketed);
+            if !decoration.is_empty() {
+                let decorated = if before {
+                    format!("{decoration}{host}")
+                } else {
+                    format!("{host}{decoration}")
+                };
+                prop_assert!(!is_local_tcp_host(&decorated), "{}", decorated);
+            }
+        }
+
+        #[test]
+        fn generated_names_are_never_local_tcp_hosts(host in remote_host()) {
+            prop_assert!(!is_local_tcp_host(&host));
         }
 
         #[test]

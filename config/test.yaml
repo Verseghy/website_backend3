@@ -121,6 +121,7 @@ settings:
   # The legacy import's source (data-migration.md §4.1): none. This file does
   # not read IMPORT_SOURCE_DATABASE_URL, so a variable left in a shell cannot
   # change a run; a test that runs the import_mysql task sets the source in
-  # the app context it runs the task with.
+  # the app context it runs the task with, and the task accepts only a local
+  # one here (ADR 0024 §4, layer 3).
   import:
     source_database_url: ""

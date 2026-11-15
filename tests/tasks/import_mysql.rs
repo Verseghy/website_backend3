@@ -418,6 +418,67 @@ async fn an_unusable_source_is_refused_without_showing_the_url() {
     .await;
 }
 
+/// ADR 0024 §4, layer 3: in the test environment (as in development and
+/// e2e) the task refuses a source that is not local, before the lock and
+/// before any connection, naming the setting and never showing the URL.
+#[tokio::test]
+async fn a_source_that_is_not_local_is_refused_naming_the_setting() {
+    with_app_at(start(), |_router, ctx, _clock| async move {
+        let paths = Paths::new();
+        for host in [
+            // The compose service's container-network name.
+            "mysql:3306",
+            "source-host-3f9a.example",
+            "127.0.0.2:3306",
+            "[::2]:3306",
+            "local%68ost",
+            "localhost.",
+        ] {
+            let source = format!("mysql://backend3_import:{PASSWORD}@{host}/verseghy");
+            let message = refusal(&with_source(&ctx, &source), paths.arguments()).await;
+            assert!(
+                message.starts_with(
+                    "refusing to start: LOCO_ENV=test, but settings.import.source_database_url \
+                     (IMPORT_SOURCE_DATABASE_URL) points at a MySQL server that is not local."
+                ),
+                "{host}: {message}"
+            );
+            for shown in [PASSWORD, "backend3_import", host] {
+                assert!(!message.contains(shown), "{shown}: {message}");
+            }
+        }
+        // Behind the lock nothing ran: no report, as for every refusal.
+        assert!(
+            paths.report_files().is_empty(),
+            "a refused run wrote a report"
+        );
+    })
+    .await;
+}
+
+/// The local spellings pass the guard: the run goes on and writes its
+/// report. A socket parameter replaces the host, as in the MySQL driver.
+#[tokio::test]
+async fn a_local_source_passes_the_guard() {
+    with_app_at(start(), |_router, ctx, _clock| async move {
+        for source in [
+            format!("mysql://backend3_import:{PASSWORD}@localhost:9/verseghy"),
+            format!("mysql://backend3_import:{PASSWORD}@[::1]:9/verseghy"),
+            format!(
+                "mysql://backend3_import:{PASSWORD}@source-host-3f9a.example/verseghy\
+                 ?socket=%2Frun%2Fmysqld%2Fmysqld.sock"
+            ),
+        ] {
+            let paths = Paths::new();
+            run(&with_source(&ctx, &source), paths.arguments())
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(paths.report_files(), ["report.md", "summary.json"]);
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn the_report_never_holds_the_source_url() {
     with_app_at(start(), |_router, ctx, _clock| async move {

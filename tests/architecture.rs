@@ -71,6 +71,17 @@
 //! filters on each is beyond a text check; the soft-deleted twins of the
 //! public fixtures (`tests/support/fixtures.rs`) catch that.
 //!
+//! A seventh check also covers all of `src/`: the legacy MySQL source is
+//! reached only through the import's source layer,
+//! `src/tasks/import_mysql/source.rs` (data-migration.md §3.3; NWS-01;
+//! ADR 0024 §4, layer 3). Outside `src/tasks/import_mysql/`, no file names
+//! `sqlx`, the import's MySQL driver. Inside it, only the files of
+//! `SOURCE_STATEMENT_FILES` name sqlx's statement and connection API (the
+//! constants below) or call a `connect` function. So every read of a legacy
+//! table goes through `select_rows` and its allow-list, which keeps the
+//! newsletter unread, and every source pool through `connect_options` and
+//! its source guard.
+//!
 //! The scan is a text check, so a determined bypass is possible (ADR 0008,
 //! Consequences); it exists to catch honest mistakes early.
 
@@ -134,6 +145,59 @@ const BANNED_DIRECTORIES: &[&str] = &[
     "shared",
     "lib",
 ];
+
+/// The directory, relative to `src/`, of the legacy import task: the only
+/// code of `src/` that may name sqlx, the import's MySQL driver, which
+/// Cargo.toml builds only with the `import-mysql` feature
+/// (data-migration.md §3.3).
+const IMPORT_TASK_DIR: &str = "tasks/import_mysql";
+
+/// The files of the import task, relative to `src/`, that may build and
+/// send statements to the legacy source and open connections to it. Every
+/// other file reads the source through their functions, so neither the
+/// source allow-list (`src/domain/import_mysql/source_tables.rs`) nor the
+/// source guard can be passed by. A file that adds a kind of statement, such
+/// as the source session's `LOCK TABLES` or the schema fingerprint, joins
+/// this list in the PR that adds it, so that PR's review sees the new
+/// statement path; it names its tables from `SOURCE_TABLES` as well.
+const SOURCE_STATEMENT_FILES: &[&str] = &["tasks/import_mysql/source.rs"];
+
+/// sqlx's names that build or send a statement, or open a connection to send
+/// one on; every name that starts with `query` counts too (the `query*`
+/// functions and macros and the `query_builder` module). Outside
+/// [`SOURCE_STATEMENT_FILES`], the import task names sqlx only for what
+/// passes the source on or reads its rows: `MySqlPool`, `MySqlRow`, `Row`
+/// and the decoded types.
+const SOURCE_STATEMENT_API: &[&str] = &[
+    // A statement, and the marker that lets a built string through as one.
+    "raw_sql",
+    "AssertSqlSafe",
+    "QueryBuilder",
+    // The traits whose methods send a statement on a pool or a connection.
+    "Executor",
+    "MySqlExecutor",
+    "Execute",
+    // Connection options, pool options, connections, and acquiring one.
+    "MySqlConnectOptions",
+    "MySqlPoolOptions",
+    "PoolOptions",
+    "ConnectOptions",
+    "MySqlConnection",
+    "Connection",
+    "Acquire",
+];
+
+/// The functions that open a connection or a pool when a path calls them, as
+/// in `MySqlPool::connect(url)`, which would pass the source guard by.
+const CONNECT_FUNCTIONS: &[&str] = &[
+    "connect",
+    "connect_with",
+    "connect_lazy",
+    "connect_lazy_with",
+];
+
+/// Keywords that can stand inside a `use` of sqlx and are no module of it.
+const USE_KEYWORDS: &[&str] = &["use", "pub", "crate", "self", "super", "as", "in"];
 
 /// One token of the stripped source: an identifier, `::`, or another single
 /// punctuation character.
@@ -395,9 +459,10 @@ fn violations(relative: &Path, source: &str) -> Vec<String> {
     found
 }
 
-/// Marks the tokens of every `use` statement that names chrono, so that
-/// `Local` in `use chrono::{DateTime, offset::{Local}};` is seen as chrono's.
-fn chrono_uses(tokens: &[Token]) -> Vec<bool> {
+/// Marks the tokens of every `use` statement that names the crate `krate`,
+/// so that `Local` in `use chrono::{DateTime, offset::{Local}};` is seen as
+/// chrono's, and `Executor` in `use sqlx::{Row, Executor as _};` as sqlx's.
+fn crate_uses(tokens: &[Token], krate: &str) -> Vec<bool> {
     let mut marked = vec![false; tokens.len()];
     for (start, token) in tokens.iter().enumerate() {
         if ident(Some(token)) != Some("use") {
@@ -407,20 +472,20 @@ fn chrono_uses(tokens: &[Token]) -> Vec<bool> {
             .iter()
             .position(|token| token == &Token::Punct(';'))
             .map_or(tokens.len(), |length| start + length);
-        if tokens[start..end].contains(&Token::Ident("chrono".to_owned())) {
+        if tokens[start..end].contains(&Token::Ident(krate.to_owned())) {
             marked[start..end].fill(true);
         }
     }
     marked
 }
 
-/// Whether the path that ends at `tokens[index]` passes through `chrono`,
-/// as in `chrono::prelude::Local`.
-fn through_chrono(tokens: &[Token], mut index: usize) -> bool {
+/// Whether the path that ends at `tokens[index]` passes through one of
+/// `roots`, as `chrono::prelude::Local` passes through `chrono`.
+fn through(tokens: &[Token], mut index: usize, roots: &[&str]) -> bool {
     while index >= 2 && tokens[index - 1] == Token::PathSep {
         index -= 2;
         match ident(tokens.get(index)) {
-            Some("chrono") => return true,
+            Some(segment) if roots.contains(&segment) => return true,
             Some(_) => {}
             None => return false,
         }
@@ -435,7 +500,7 @@ fn through_chrono(tokens: &[Token], mut index: usize) -> bool {
 /// or by a glob, and both are reported. So other `Local`s, such as
 /// `Locality::Local` in `src/domain/database_target.rs`, pass.
 fn clock_reads(tokens: &[Token]) -> Vec<(usize, String)> {
-    let in_chrono_use = chrono_uses(tokens);
+    let in_chrono_use = crate_uses(tokens, "chrono");
     let mut found = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         if token == &Token::Punct('*') && in_chrono_use[index] {
@@ -457,7 +522,7 @@ fn clock_reads(tokens: &[Token]) -> Vec<(usize, String)> {
         {
             found.push((index, format!("`{name}::{function}`")));
         }
-        if name == "Local" && (in_chrono_use[index] || through_chrono(tokens, index)) {
+        if name == "Local" && (in_chrono_use[index] || through(tokens, index, &["chrono"])) {
             found.push((index, "chrono's `Local`".to_owned()));
         }
         if CLOCK_NAMES.contains(&name.as_str()) {
@@ -861,6 +926,81 @@ fn task_lock_report(files: &[(PathBuf, String)]) -> Vec<String> {
     report
 }
 
+/// Whether `name` is part of sqlx's statement or connection API
+/// ([`SOURCE_STATEMENT_API`], or a name that starts with `query`).
+fn is_statement_api(name: &str) -> bool {
+    name.starts_with("query") || SOURCE_STATEMENT_API.contains(&name)
+}
+
+/// What one file of `src/` breaks of the rule that the legacy source is
+/// reached only through the import's source layer, one report line per
+/// finding. `relative` is the path below `src/`: a file of
+/// [`SOURCE_STATEMENT_FILES`] may do everything; another file of
+/// [`IMPORT_TASK_DIR`] may not name sqlx's statement or connection API or
+/// call a [`CONNECT_FUNCTIONS`] function ([`statement_paths`]); a file
+/// outside it may not name sqlx at all.
+fn source_access_report(relative: &Path, source: &str) -> Vec<String> {
+    if SOURCE_STATEMENT_FILES
+        .iter()
+        .any(|file| relative == Path::new(file))
+    {
+        return Vec::new();
+    }
+    let tokens = tokenize(&strip(source));
+    // `Path::starts_with` compares whole components, so
+    // `tasks/import_mysql_extra.rs` is outside the import task.
+    let found = if relative.starts_with(IMPORT_TASK_DIR) {
+        statement_paths(&tokens)
+    } else if tokens.contains(&Token::Ident("sqlx".to_owned())) {
+        vec![format!(
+            "names `sqlx`, the legacy import's MySQL driver, which only src/{IMPORT_TASK_DIR}/ uses"
+        )]
+    } else {
+        Vec::new()
+    };
+    found
+        .into_iter()
+        .map(|finding| format!("src/{}: {finding}", relative.display()))
+        .collect()
+}
+
+/// Every way to build or send a statement or open a connection in the
+/// tokens of one file of the import task: a name of sqlx's statement or
+/// connection API that a `use` of sqlx brings in or a path through sqlx
+/// reaches, a glob import of sqlx, and a path call of a
+/// [`CONNECT_FUNCTIONS`] function.
+fn statement_paths(tokens: &[Token]) -> Vec<String> {
+    let in_sqlx_use = crate_uses(tokens, "sqlx");
+    // A module that a `use` of sqlx brings in, such as `mysql` in
+    // `use sqlx::{Row, mysql};`, leads into sqlx as `sqlx` itself does.
+    let mut roots = vec!["sqlx"];
+    for (index, token) in tokens.iter().enumerate() {
+        if let Token::Ident(name) = token
+            && in_sqlx_use[index]
+            && name.starts_with(|first: char| first.is_ascii_lowercase())
+            && !USE_KEYWORDS.contains(&name.as_str())
+        {
+            roots.push(name);
+        }
+    }
+    let mut found = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token == &Token::Punct('*') && in_sqlx_use[index] {
+            found.push("a glob import of sqlx, which brings in its statement API".to_owned());
+        }
+        let Some(name) = ident(Some(token)) else {
+            continue;
+        };
+        if is_statement_api(name) && (in_sqlx_use[index] || through(tokens, index, &roots)) {
+            found.push(format!("names sqlx's `{name}`"));
+        }
+        if CONNECT_FUNCTIONS.contains(&name) && index > 0 && tokens[index - 1] == Token::PathSep {
+            found.push(format!("opens a connection with `{name}`"));
+        }
+    }
+    found
+}
+
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display())) {
         let path = entry.expect("directory entry").path();
@@ -959,6 +1099,36 @@ fn every_task_runs_under_the_task_lock() {
          `backend3::models::task_lock::with_task_lock`, under its registered name, so a manual \
          run and a CronJob run never overlap (ADR 0016 §4, recipe 6 of \
          .claude/skills/backend3/SKILL.md):\n{}",
+        report.join("\n")
+    );
+}
+
+#[test]
+fn src_reaches_the_legacy_source_only_through_the_source_layer() {
+    let src = src_dir();
+    for file in SOURCE_STATEMENT_FILES {
+        assert!(
+            src.join(file).is_file(),
+            "src/{file} is in SOURCE_STATEMENT_FILES of tests/architecture.rs but does not \
+             exist; update the list"
+        );
+    }
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    let report: Vec<String> = files
+        .iter()
+        .flat_map(|file| {
+            let relative = file.strip_prefix(&src).expect("below src/");
+            source_access_report(relative, &fs::read_to_string(file).expect("read source"))
+        })
+        .collect();
+    assert!(
+        report.is_empty(),
+        "Reach the legacy MySQL source only through `tasks::import_mysql::source` \
+         (data-migration.md §3.3; NWS-01; ADR 0024 §4, layer 3): a step reads a legacy table \
+         with `select_rows`, which reads only the tables of the source allow-list, from the pool \
+         that `run` gets. A new kind of statement goes into a file of SOURCE_STATEMENT_FILES in \
+         tests/architecture.rs and names its tables from `SOURCE_TABLES`:\n{}",
         report.join("\n")
     );
 }
@@ -1223,6 +1393,140 @@ fn task_scanner_resolves_impl_paths_as_rust_does() {
             "{path:?}"
         );
     }
+}
+
+/// What [`source_access_report`] finds in `source` as the file `file` below
+/// `src/`.
+fn source_access(file: &str, source: &str) -> Vec<String> {
+    source_access_report(Path::new(file), source)
+}
+
+#[test]
+fn source_scanner_flags_each_statement_path_in_the_import_task() {
+    let step = "tasks/import_mysql/posts.rs";
+    for (source, expected) in [
+        (
+            "fn f() { sqlx::query(\"SELECT * FROM newsletter\"); }",
+            &["names sqlx's `query`"][..],
+        ),
+        (
+            "sqlx::query_scalar!(\"SELECT 1\")",
+            &["names sqlx's `query_scalar`"],
+        ),
+        (
+            "sqlx::query_as::<_, Post>(sql)",
+            &["names sqlx's `query_as`"],
+        ),
+        ("use sqlx::{query, Row};", &["names sqlx's `query`"]),
+        (
+            "sqlx::raw_sql(\"LOCK TABLES newsletter READ\")",
+            &["names sqlx's `raw_sql`"],
+        ),
+        (
+            "let _ = sqlx::query(sqlx::AssertSqlSafe(sql));",
+            &["names sqlx's `query`", "names sqlx's `AssertSqlSafe`"],
+        ),
+        ("use sqlx::Executor;", &["names sqlx's `Executor`"]),
+        (
+            "use sqlx::{MySqlPool, Executor as _};",
+            &["names sqlx's `Executor`"],
+        ),
+        (
+            "fn f<'e>(e: impl sqlx::MySqlExecutor<'e>) {}",
+            &["names sqlx's `MySqlExecutor`"],
+        ),
+        ("use sqlx::Acquire as _;", &["names sqlx's `Acquire`"]),
+        (
+            "use sqlx::mysql::MySqlPoolOptions;",
+            &["names sqlx's `MySqlPoolOptions`"],
+        ),
+        (
+            "let o = sqlx::mysql::MySqlConnectOptions::from_str(url);",
+            &["names sqlx's `MySqlConnectOptions`"],
+        ),
+        (
+            "use sqlx::{Row, mysql};\nfn f() { mysql::MySqlConnection::connect(url) }",
+            &[
+                "names sqlx's `MySqlConnection`",
+                "opens a connection with `connect`",
+            ],
+        ),
+        (
+            "fn f() { MySqlPool::connect(url) }",
+            &["opens a connection with `connect`"],
+        ),
+        (
+            "fn f() { MySqlPool::connect_lazy_with(options) }",
+            &["opens a connection with `connect_lazy_with`"],
+        ),
+        (
+            "use sqlx::prelude::*;",
+            &["a glob import of sqlx, which brings in its statement API"],
+        ),
+    ] {
+        let expected: Vec<String> = expected
+            .iter()
+            .map(|finding| format!("src/{step}: {finding}"))
+            .collect();
+        assert_eq!(source_access(step, source), expected, "{source}");
+    }
+}
+
+#[test]
+fn source_scanner_accepts_steps_that_read_through_the_layer() {
+    let step = r#"
+        //! Mentions sqlx::query("SELECT * FROM newsletter") in prose only.
+        /* and MySqlPool::connect(url) in a block comment */
+        use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+        use sqlx::{MySqlPool, Row, mysql::MySqlRow};
+        use super::source::{self, connect_options, select_rows, source_error};
+        async fn step(source_db: &MySqlPool, target_db: &DatabaseConnection) -> Result<()> {
+            let query = "a local name";
+            let rows: Vec<MySqlRow> = select_rows(source_db, "posts_labels", &["id"], &["id"]).await?;
+            let id: i64 = rows[0].try_get("id")?;
+            let _ = source::connect_options(&setting, environment)?;
+            target_db.query_all(Statement::from_string(backend, "SELECT 1")).await?;
+            let _ = "sqlx::raw_sql(sql) and MySqlPool::connect(url) in a string";
+            Ok(())
+        }
+    "#;
+    assert_eq!(
+        source_access("tasks/import_mysql/posts.rs", step),
+        Vec::<String>::new()
+    );
+    // The statement files may build, send and connect.
+    assert_eq!(
+        source_access(
+            "tasks/import_mysql/source.rs",
+            "use sqlx::{Executor, mysql::MySqlPoolOptions};\nfn f() { \
+             sqlx::query(sqlx::AssertSqlSafe(sql)); MySqlPool::connect(url); }"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn source_scanner_flags_sqlx_outside_the_import_task() {
+    let flagged = "names `sqlx`, the legacy import's MySQL driver, which only \
+                   src/tasks/import_mysql/ uses";
+    for file in [
+        "models/posts.rs",
+        "tasks/import_mysql_extra.rs",
+        "tasks/mod.rs",
+    ] {
+        assert_eq!(
+            source_access(file, "fn f(pool: &sqlx::MySqlPool) {}\nuse sqlx::Row;"),
+            [format!("src/{file}: {flagged}")],
+            "{file}"
+        );
+    }
+    assert_eq!(
+        source_access(
+            "models/posts.rs",
+            "//! sqlx in prose\nuse sea_orm::DatabaseConnection;\nfn f() { let _ = \"sqlx\"; }"
+        ),
+        Vec::<String>::new()
+    );
 }
 
 /// What [`clock_reads`] finds in `source`, without the token indexes.

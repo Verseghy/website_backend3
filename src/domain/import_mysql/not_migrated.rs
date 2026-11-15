@@ -5,9 +5,13 @@
 //! was left behind on purpose and why, next to what was imported. The list
 //! is the specification's, in its order; `tests/domain/import_not_migrated.rs`
 //! checks that the table names here and in §9.1 are the same, so the code and
-//! the document cannot drift apart. The importer reads only the tables it
-//! migrates, so none of these is ever selected (NWS-01: the newsletter
-//! subscribers stay in the legacy database).
+//! the document cannot drift apart. No row of these tables is copied. The
+//! importer reads three of them to verify them against the code (`roles`,
+//! `permissions` and `role_has_permissions`, §6.13 and §6.15) and never
+//! selects the other three (`newsletter`, `password_resets`, `migrations`):
+//! the source allow-list of [`super::source_tables`] keeps them out of
+//! every statement (NWS-01: the newsletter subscribers stay in the legacy
+//! database).
 //!
 //! The row counts of §9.1 are reference values of one dump and are not
 //! repeated here: a report states only what its own run measured.

@@ -9,3 +9,4 @@ mod image_optimise_jpeg;
 mod image_optimise_png;
 mod image_optimise_webp_gif;
 mod import_not_migrated;
+mod import_source_tables;
