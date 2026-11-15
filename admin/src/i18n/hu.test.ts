@@ -64,7 +64,7 @@ describe("hu.ts", () => {
     ).toEqual([])
   })
 
-  it("covers the English pack size recorded in ADR 0021 for ra-core 5.15.5", () => {
+  it("covers the 164-key English pack size that ADR 0021 records", () => {
     // A changed count means ra-core was upgraded: re-run the parity review.
     expect(englishKeys).toHaveLength(164)
   })
