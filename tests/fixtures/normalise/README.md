@@ -11,11 +11,13 @@ Each fixture is a pair:
 - `<name>.out.html`: what `normalise` must write for it.
 
 The name starts with the step it shows: `n0-` (the parse: character
-references, tag case, line ends), `n3-` (`<center>`), `n6-` (the dead
-host's links), `n8-` (the serialisation: only five character references
-left, double-quoted attributes, void tags without a slash), `n9-` (a
-content-v1 body, which comes out unchanged), or `alt-` (images without alt
-text, which are reported, never changed).
+references, tag case, line ends), `n3-` (`<center>`), `n5-` (legacy
+presentational markup: so far `p[align]`, `table[align]`, `h5` and `h6`,
+the italic `h2` and `p[lang]`), `n6-` (the dead host's links), `n8-`
+(the serialisation: only five character references left, double-quoted
+attributes, void tags without a slash), `n9-` (a content-v1 body, which
+comes out unchanged), or `alt-` (images without alt text, which are
+reported, never changed).
 
 For every pair the runner checks that the output equals `<name>.out.html`,
 that normalising `<name>.out.html` again returns it with no rule hit (P4),
@@ -55,6 +57,10 @@ them to:
 
 - N2 turns `n3-center-around-embed`'s legacy player into the editor's
   YouTube node (`NOT_YET_CONTENT_V1`);
+- N5b gives the two tables of `n5-table-align` the content-v1 table shape
+  (no table width, the locked `border-collapse`, `max-width` and `tbody`
+  declarations), and N7 drops their `border`, `cellpadding` and
+  `cellspacing` (`NOT_YET_CONTENT_V1`);
 - N7 drops the `text-align: inherit` that `n3-center-unclear-alignment`
   keeps after N3's `text-align: center` (`NOT_YET_CONTENT_V1`);
 - N5b's whitespace rule removes the line feeds left between the blocks of

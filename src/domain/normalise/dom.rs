@@ -286,6 +286,64 @@ pub(super) fn set_attribute(element: &mut Element, name: &str, value: &str) {
     }
 }
 
+/// Removes the attribute `name`, in no namespace, from `element`, and
+/// returns its value, or `None` when the element has no such attribute.
+/// The other attributes keep their sorted order, so `Element::attr` still
+/// finds them (see "Attribute order" in the module documentation).
+///
+/// scraper keeps the element's `id` and class list in caches that are
+/// filled on first use; the rules never read them, so removing an `id` or
+/// `class` here would only leave those caches stale, never the output,
+/// which N8 writes from the attributes.
+///
+/// - `element`: the element to change.
+/// - `name`: the attribute's name.
+pub(super) fn remove_attribute(element: &mut Element, name: &str) -> Option<StrTendril> {
+    let at = element
+        .attrs
+        .iter()
+        .position(|(attribute, _)| attribute.ns == ns!() && &*attribute.local == name)?;
+    Some(element.attrs.remove(at).1)
+}
+
+/// Gives `element` the CSS declaration `declaration` in front of its
+/// `style`, or as its whole `style` when it has none or only white space
+/// and `;`. In front, never after: a declaration that the legacy style
+/// leaves open, such as an unclosed bracket or comment, would swallow
+/// anything appended, so the new declaration always reads back as the
+/// first one. The rules write one only where nothing in the old value that
+/// N7 keeps can override it, and N7 then writes the style canonically
+/// (editor.md §3.1).
+///
+/// - `element`: the element to change.
+/// - `declaration`: one declaration, such as `text-align: center`.
+pub(super) fn prepend_declaration(element: &mut Element, declaration: &str) {
+    let value = match element.attr("style") {
+        Some(style)
+            if !style
+                .trim_matches(|c: char| c.is_ascii_whitespace() || c == ';')
+                .is_empty() =>
+        {
+            format!(
+                "{declaration}; {}",
+                style.trim_start_matches(|c: char| c.is_ascii_whitespace())
+            )
+        }
+        _ => declaration.to_owned(),
+    };
+    set_attribute(element, "style", &value);
+}
+
+/// Gives the HTML element `element` the tag name `name`, keeping its
+/// attributes and children. html5ever writes the end tag from the same
+/// name, so the element is written as a `name` element.
+///
+/// - `element`: an element in the HTML namespace.
+/// - `name`: the new lower-case tag name.
+pub(super) fn rename(element: &mut Element, name: LocalName) {
+    element.name = QualName::new(None, ns!(html), name);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +497,70 @@ mod tests {
         );
         let text = node(&html, p).first_child().expect("a text node").id();
         assert!(edit_element(&mut html, text, |_| ()).is_none());
+    }
+
+    #[test]
+    fn attributes_are_removed_and_the_rest_stay_findable() {
+        let mut html =
+            parse(r#"<p align="center" lang="en" style="color: red" xml:lang="en">x</p>"#);
+        let p = elements_named(&html, "p")[0];
+        let removed = edit_element(&mut html, p, |element| {
+            (
+                remove_attribute(element, "lang").map(|value| value.to_string()),
+                remove_attribute(element, "lang"),
+                remove_attribute(element, "missing"),
+            )
+        })
+        .expect("an element");
+        assert_eq!(removed, (Some("en".to_owned()), None, None));
+        let element = node(&html, p).value().as_element().expect("an element");
+        assert_eq!(element.attr("align"), Some("center"));
+        assert_eq!(element.attr("style"), Some("color: red"));
+        assert_eq!(element.attr("xml:lang"), Some("en"), "another attribute");
+        assert_eq!(
+            serialise(&html),
+            r#"<p style="color: red" align="center" xml:lang="en">x</p>"#
+        );
+    }
+
+    #[test]
+    fn a_declaration_goes_in_front_of_the_style() {
+        let prepended = |style: Option<&str>| {
+            let mut html = parse("<p>x</p>");
+            let p = elements_named(&html, "p")[0];
+            edit_element(&mut html, p, |element| {
+                if let Some(style) = style {
+                    set_attribute(element, "style", style);
+                }
+                prepend_declaration(element, "text-align: right");
+                element.attr("style").expect("a style").to_owned()
+            })
+            .expect("an element")
+        };
+        assert_eq!(prepended(None), "text-align: right");
+        assert_eq!(prepended(Some(" ;; ")), "text-align: right");
+        assert_eq!(
+            prepended(Some("\n color: red")),
+            "text-align: right; color: red"
+        );
+        // An unclosed comment would swallow an appended declaration.
+        assert_eq!(
+            prepended(Some("color: red; /* x")),
+            "text-align: right; color: red; /* x"
+        );
+    }
+
+    #[test]
+    fn a_renamed_element_keeps_its_attributes_and_children() {
+        let mut html = parse(r#"<h5 style="text-align: center" id="a">Cím <em>dőlt</em></h5>"#);
+        let h5 = elements_named(&html, "h5")[0];
+        edit_element(&mut html, h5, |element| rename(element, local_name!("h4")));
+        assert_eq!(html_name(node(&html, h5)), Some("h4"));
+        assert_eq!(
+            serialise(&html),
+            r#"<h4 style="text-align: center" id="a">Cím <em>dőlt</em></h4>"#
+        );
+        assert_eq!(elements_named(&html, "h5").len(), 0, "no h5 is left");
     }
 
     #[test]
@@ -604,6 +726,55 @@ mod tests {
             for (name, value) in &expected {
                 prop_assert_eq!(element.attr(name), Some(value.as_str()), "{}", name);
             }
+        }
+
+        // Removing attributes, in any order, leaves every other one
+        // findable and returns the value of each removed one once.
+        #[test]
+        fn removed_attributes_are_gone_and_the_rest_read_back(
+            existing in prop::collection::btree_set("[a-z]{1,3}", 0..6),
+            removed in prop::collection::vec("[a-z]{1,3}", 0..6),
+        ) {
+            let mut attributes = String::new();
+            for name in &existing {
+                let _ = write!(attributes, r#" {name}="v-{name}""#);
+            }
+            let mut html = parse(&format!("<span{attributes}>a</span>"));
+            let span = elements_named(&html, "span")[0];
+            let mut left = existing.clone();
+            for name in &removed {
+                let value = edit_element(&mut html, span, |element| remove_attribute(element, name))
+                    .expect("an element");
+                prop_assert_eq!(value.map(|value| value.to_string()), left.take(name).map(|name| format!("v-{name}")));
+            }
+            let element = node(&html, span).value().as_element().expect("an element");
+            prop_assert_eq!(element.attrs.len(), left.len());
+            for name in &left {
+                let expected = format!("v-{name}");
+                prop_assert_eq!(element.attr(name), Some(expected.as_str()));
+            }
+        }
+
+        // The declaration put in front reads back first, followed by the
+        // declarations the old style held.
+        #[test]
+        fn a_prepended_declaration_reads_first(style in proptest::option::of("[a-z: ;/*()-]{0,40}")) {
+            use crate::domain::rich_text::css::declarations::read;
+            let mut html = parse("<p>x</p>");
+            let p = elements_named(&html, "p")[0];
+            let written = edit_element(&mut html, p, |element| {
+                if let Some(style) = &style {
+                    set_attribute(element, "style", style);
+                }
+                prepend_declaration(element, "text-align: left");
+                element.attr("style").expect("a style").to_owned()
+            })
+            .expect("an element");
+            let after = read(&written);
+            let before = read(style.as_deref().unwrap_or(""));
+            prop_assert_eq!(after.read.first().map(|d| d.name.as_str()), Some("text-align"), "{:?}", written);
+            prop_assert_eq!(&after.read[1..], &before.read[..], "{:?}", written);
+            prop_assert_eq!(after.unreadable, before.unreadable, "{:?}", written);
         }
     }
 }

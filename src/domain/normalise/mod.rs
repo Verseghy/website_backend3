@@ -25,15 +25,19 @@
 //!   which decodes every character reference, lower-cases tag names and
 //!   normalises line ends and void tags;
 //! - **N3** (`center.rs`): `<center>` unwrapped into `text-align: center`;
+//! - **N5**, its block rules (`blocks.rs`): `p[align]` to `text-align`,
+//!   `table[align]` dropped, `h5` and `h6` to `h4`, an italic `h2` to
+//!   `<h2><em>`, and `p[lang]` stripped;
 //! - **N6** (`dead_host.rs`): `src` and `href` on the dead host's
 //!   `/storage/` rewritten to root-relative `/storage/`;
 //! - **N8** (`dom.rs`): html5ever's serialisation, which leaves only
 //!   `&amp; &lt; &gt; &nbsp;` and, in attributes, `&quot;` as references.
 //!
 //! The steps that later slices add slot in where §7.1 orders them: N1 and
-//! N2 (legacy embeds) between N0 and N3; N4 (inline `data:` images), N5
-//! (presentational markup) and N5b (the content-v1 layout) between N3 and
-//! N6; N7 (the sanitiser with its planned removals) between N6 and N8.
+//! N2 (legacy embeds) between N0 and N3; N4 (inline `data:` images)
+//! between N3 and N5, N5's inline rules beside its block rules, and N5b
+//! (the content-v1 layout) between N5 and N6; N7 (the sanitiser with its
+//! planned removals) between N6 and N8.
 //! Each step records what it changed for the
 //! run report ([`report`]), and the pass also lists, without changing them,
 //! the dead-host occurrences N6 leaves and the images without alt text
@@ -50,15 +54,20 @@
 //! returns it with no rule hits: P4, `normalise(normalise(x)) ==
 //! normalise(x)` (editor.md §13.6, data-migration.md §11.2), holds for
 //! every body the normaliser accepts. The rules only remove what they look
-//! for (`center`, the dead `/storage/` prefixes), so the passes after the
-//! first only re-parse. A body that is still changing after the last pass
-//! is refused with [`NormaliseError::NotNormalisable`], and the import
-//! treats that like a failed N9 check (data-migration.md §4.2): for example
+//! for (`center`; the `align` and `lang` attributes, the `h5` and `h6` tag
+//! names and the italic `font-style` of N5's block rules; the dead
+//! `/storage/` prefixes), so the passes after the first only re-parse. A
+//! body that is still changing after the last pass is refused with
+//! [`NormaliseError::NotNormalisable`], and the import treats that like a
+//! failed N9 check (data-migration.md §4.2): for example
 //! one with a `plaintext` element, whose end tag the serialiser writes and
 //! no parser reads, a `pre` whose content starts with three or more line
-//! feeds (each parse drops one, and the third pass still drops one), or tag
-//! soup that fosters a link out of a table into another link, which the
-//! sanitiser's structural pass unwraps (ADR 0037) once N7 runs here. None
+//! feeds (each parse drops one, and the third pass still drops one), tag
+//! soup that leaves a link open around deeply nested lists and headings
+//! with another link inside them (the adoption agency moves the inner
+//! link out only part of the way in each parse), or tag soup that fosters
+//! a link out of a table into another link, which the sanitiser's
+//! structural pass unwraps (ADR 0037) once N7 runs here. None
 //! of these is a shape `CKEditor` writes; the tests measure how rarely tag
 //! soup meets one.
 //!
@@ -72,14 +81,15 @@
 //! around it, so it grows with the size times the nesting depth of
 //! `center` elements; N3 answers its questions about a subtree once per
 //! pass and looks at most at two children of a crowded parent (`center.rs`,
-//! "Cost"), and the other rules are linear. The normaliser has no limit of
-//! its own, which is acceptable only because of its two inputs: the
-//! import's is the fixed legacy dump, and backend3's own bodies, which
-//! `content_normalize` reads, hold no `center` and are bounded by the
-//! sanitiser's size and depth limits (editor.md §7.2; research: DECISIONS
-//! R11). The sanitiser applies those limits to the import too, when N7
-//! runs. Like everything under `src/domain/`, the module is pure (ADR
-//! 0008).
+//! "Cost"). The other rules are linear: N5's block rules plan every edit in
+//! one walk, the `em` and `i` inside nested italic headings included
+//! (`blocks.rs`, "Cost"). The normaliser has no limit of its own, which is
+//! acceptable only because of its two inputs: the import's is the fixed
+//! legacy dump, and backend3's own bodies, which `content_normalize` reads,
+//! hold no `center` and are bounded by the sanitiser's size and depth
+//! limits (editor.md §7.2; research: DECISIONS R11). The sanitiser applies
+//! those limits to the import too, when N7 runs. Like everything under
+//! `src/domain/`, the module is pure (ADR 0008).
 //!
 //! ```
 //! use backend3::domain::normalise::{Rule, normalise};
@@ -94,6 +104,7 @@
 //! assert_eq!(out.report.count(Rule::DeadHostLinkRewritten), 1);
 //! ```
 
+mod blocks;
 mod center;
 mod dead_host;
 mod dom;
@@ -174,6 +185,10 @@ pub fn normalise(raw: &str) -> Result<Normalised, NormaliseError> {
 fn pass(input: &str, report: &mut NormaliseReport) -> (String, Observations) {
     let mut html = dom::parse(input);
     center::unwrap_centres(&mut html, report);
+    // After N3, which reads a paragraph's `align`, counts `h5` and `h6`
+    // among the aligned headings and must centre an italic `h2` before N5
+    // puts an `em` inside it (`blocks.rs`, "Order").
+    blocks::map_blocks(&mut html, report);
     dead_host::rewrite_links(&mut html, report);
     let observations = Observations {
         dead_host_kept: dead_host::occurrences(&html),
@@ -379,8 +394,22 @@ mod tests {
         "<ol><li>", "<dl><dd>", "<td align=\"left\">", "<p style=\"text-align: inherit\">",
     ];
 
+    /// N5's block shapes, for [`arb_legacy`] only. [`arb_plain_legacy`]
+    /// keeps the pieces above: its properties expect no refusal, and the
+    /// extra headings and paragraphs here make more likely the one tag soup
+    /// among them that the parser repairs a few levels per pass (a link
+    /// left open around deeply nested lists and headings, with another
+    /// link inside them), which is refused with or without N5. `blocks.rs`
+    /// checks that its own shapes settle.
+    #[rustfmt::skip]
+    const BLOCK_PIECES: &[&str] = &[
+        "<p align=\"center\">", "<P ALIGN=\"JUSTIFY\">", "<p lang=\"en\">", "<table align=\"left\"><tr><td>",
+        "<h2 style=\"font-style:italic\">", "<h6>",
+    ];
+
     fn arb_legacy() -> impl Strategy<Value = String> {
-        prop::collection::vec(prop::sample::select(PIECES), 0..40)
+        let pieces: Vec<&str> = PIECES.iter().chain(BLOCK_PIECES).copied().collect();
+        prop::collection::vec(prop::sample::select(pieces), 0..40)
             .prop_map(|pieces| pieces.concat())
     }
 
@@ -423,12 +452,13 @@ mod tests {
         // P4 below holds for the bodies the normaliser accepts, so the
         // generator must not hide behind refusals: on a fixed sample, the
         // rules fire, later passes run, and almost every body settles. The
-        // few refusals are links fostered out of tables into other links,
-        // which N7's structural pass unwraps (ADR 0037).
+        // few refusals are links that tag soup nests in other links, fostered
+        // out of tables or left open around deeply nested lists and headings
+        // (see "Fixed point" in the module documentation).
         use proptest::strategy::ValueTree;
         let mut runner = proptest::test_runner::TestRunner::deterministic();
         let strategy = arb_legacy();
-        let (mut refused, mut later, mut centred, mut rewritten) = (0, 0, 0, 0);
+        let (mut refused, mut later, mut centred, mut mapped, mut rewritten) = (0, 0, 0, 0, 0);
         for _ in 0..2_000 {
             let raw = strategy
                 .new_tree(&mut runner)
@@ -441,13 +471,22 @@ mod tests {
                         later += 1;
                     }
                     centred += out.report.count(Rule::CenterUnwrapped);
+                    mapped += out
+                        .report
+                        .hits()
+                        .filter(|(rule, _)| rule.step() == Step::N5)
+                        .map(|(_, count)| count)
+                        .sum::<usize>();
                     rewritten += out.report.count(Rule::DeadHostLinkRewritten);
                 }
             }
         }
         assert!(refused <= 10, "{refused} of 2000 refused");
         assert!(later >= 20, "only {later} bodies needed a second pass");
-        assert!(centred >= 500 && rewritten >= 500, "{centred} {rewritten}");
+        assert!(
+            centred >= 500 && mapped >= 500 && rewritten >= 500,
+            "{centred} {mapped} {rewritten}"
+        );
     }
 
     /// At least 512 cases, as P1 runs (editor.md §13.6), or more when
@@ -524,6 +563,29 @@ mod tests {
                             prop_assert!(element.attr(name).and_then(dead_host::rewritten).is_none());
                         }
                     }
+                }
+            }
+        }
+
+        // N5's block rules leave nothing for themselves either, after the
+        // parse repairs and the other rules: no `align` or `lang` on a
+        // paragraph, no `align` on a table, and no `h5` or `h6`.
+        // `blocks.rs` checks the italic headings over its own shapes.
+        #[test]
+        fn no_block_shape_is_left(raw in arb_legacy()) {
+            if let Ok(out) = normalise(&raw) {
+                let html = dom::parse(&out.html);
+                for node in html.root_element().descendants() {
+                    let (Some(name), Some(element)) = (dom::html_name(node), node.value().as_element()) else {
+                        continue;
+                    };
+                    let left = match name {
+                        "p" => element.attr("align").or(element.attr("lang")),
+                        "table" => element.attr("align"),
+                        "h5" | "h6" => Some(name),
+                        _ => None,
+                    };
+                    prop_assert!(left.is_none(), "{:?}: {} in {:?}", raw, name, out.html);
                 }
             }
         }
