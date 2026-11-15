@@ -1,6 +1,6 @@
 # 0028. Guardrails as built, wider checks and a fail-closed hook
 
-- Status: Accepted (2026-10-25)
+- Status: Amended by [0035](0035-guardrails-for-in-cluster-redis-argo-cd-patches-and-deletion.md) (2026-10-26)
 - Decision questions: none: amends [ADR 0024](0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md) §4, which records Q37, and carries the updated recipe list of its §2, which records Q43a. It records the maintainer's answers of 2026-10-25 to D23, D30 and, for ADR 0024 §2, D66 of the decision register (research: DECISIONS R9), and to D69 of the second decision register (research: DECISIONS R15).
 
 ## Context

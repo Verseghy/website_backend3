@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # guard-bash.sh: the PreToolUse hook that screens every Bash command an agent
 # runs in this repository (layer 2 of the guardrails, ADR 0024 section 4 as
-# amended by ADR 0028).
+# amended by ADR 0028 and ADR 0035).
 #
 # Why it exists
 #   Layer 1, the deny rules in .claude/settings.json, matches command text as
 #   written. It misses the same command behind a wrapper (`sh -c '...'`), with
 #   another flag order, or as the app binary instead of `cargo loco`. This hook
-#   reads the whole command, splits it the way a shell would, and blocks:
+#   reads the whole command, splits it the way a shell would (ANSI-C $'...'
+#   quoting decoded), finds oc's verb the way oc's command parser does, also
+#   behind options it does not know (`oc --wait ns delete web`), and blocks:
 #
 #   check 1, dangerous commands anywhere in the command:
 #     - kubectl (Verseghy uses oc, never kubectl);
@@ -19,12 +21,24 @@
 #       also when the command line runs an `oc get` of one of them and the
 #       oc delete takes its resources from another command's output:
 #       `oc delete $(oc get pvc -o name)`, `oc get pvc -o name | xargs oc
-#       delete`, `oc get pvc -o yaml | oc delete -f -`;
+#       delete`, `oc get pvc -o yaml | oc delete -f -`; and every
+#       `oc delete --raw`, which deletes whatever its URI names (ADR 0035);
 #     - `argocd app delete`, `argocd app delete-resource` and `argocd appset
-#       delete`, with any options (ADR 0028; the last two since D69);
-#     - an `oc patch` whose patch names finalizers, or names a PV's
-#       persistentVolumeReclaimPolicy with Delete, Recycle (since D69) or a
-#       value only the shell knows (ADR 0028);
+#       delete`, with any options (ADR 0028; the last two since D69), and
+#       `argocd app confirm-deletion` (since D105, ADR 0035), which releases
+#       the deletions that a Prune=confirm or Delete=confirm sync option
+#       holds back; argocd counts under its release download names too
+#       (`argocd-linux-amd64`);
+#     - an `oc patch`, or (since D105) an `argocd app patch-resource`, whose
+#       patch names finalizers, or names a PV's persistentVolumeReclaimPolicy
+#       with Delete, Recycle (since D69) or a value only the shell knows
+#       (ADR 0028), read as the JSON or YAML decoder reads it, escapes
+#       included, or that replaces or removes a whole object or its whole
+#       metadata, and with it the finalizers (ADR 0035);
+#     - (since D105) an `oc annotate`, an `oc patch` or any argocd command
+#       that names Argo CD's deletion-approved annotation: it is what `argocd
+#       app confirm-deletion` writes, so setting it another way releases the
+#       same deletions;
 #     - Loco's data-wiping subcommands `db reset`, `db down`, `db truncate`
 #       and `db seed --reset` / `-r` of any binary: cargo loco, the app binary
 #       backend3-cli, or inside oc exec / oc rsh / oc debug;
@@ -35,10 +49,17 @@
 #     it blocks when the target host is not local (localhost, 127.0.0.1,
 #     ::1 or a Unix socket) or cannot be checked, and for cargo
 #     commands it checks the importer source IMPORT_SOURCE_DATABASE_URL the
-#     same way. Any listed command run through oc exec, oc rsh or oc debug
-#     (also as a heredoc, a here-string or an echo or printf script piped into
-#     them, through any further pipeline stages) runs in the cluster and is
-#     always blocked. Only the command part counts there: the words after `--`
+#     same way. Any listed command, and (since D105, ADR 0035) the Redis
+#     client redis-cli, run through oc exec, oc rsh or oc debug (also as a
+#     heredoc, a here-string or an echo or printf script piped into them,
+#     through any further pipeline stages) runs in the cluster and is always
+#     blocked. A redis-cli on the agent's own host is not checked: the
+#     clusters' Redis answers there only through a port-forward, which this
+#     check blocks. Nor is one in a new pod that the agent starts (`oc run
+#     ... -- redis-cli -h <service>`, `oc create job`), which D105's answer,
+#     naming oc exec, oc rsh and oc debug, does not cover; a psql there is
+#     still caught by its target check. Only the command part of oc exec,
+#     oc rsh or oc debug counts: the words after `--`
 #     for exec and debug; for rsh the words after the pod, the program its
 #     --shell names, and with -f every word. So a pod, container or namespace
 #     named like a client (`oc exec deploy/mysql -- df -h`) is not blocked by
@@ -46,10 +67,11 @@
 #     with an unquoted $(...) or `...` does not end the command part
 #     (`oc exec $(oc get pod -o name) -- psql` is blocked). It also blocks an
 #     `oc port-forward` to a PostgreSQL, MySQL, MariaDB or (since D69) Redis
-#     port (ADR 0028), because the forwarded database then answers on
-#     localhost, which this check would otherwise take for a local one. No
-#     Redis client is a listed command, so a forwarded Redis would answer on
-#     localhost with no check at all.
+#     port (ADR 0028), also written with a leading `+` (ADR 0035), because
+#     the forwarded database then answers on localhost, which this check
+#     would otherwise take for a local one. No Redis client is a listed
+#     command, so a forwarded Redis would answer on localhost with no check
+#     at all.
 #
 #   Layer 3, the load_config guard and the CLI pre-check in the Rust code, is
 #   the one that cannot be bypassed from a shell. This hook is a second line of
@@ -58,10 +80,34 @@
 #   script.sh`, `oc delete -f list.txt`, `oc patch --patch-file p.json`), and
 #   neither is text that only a shell run computes, because the hook reads the
 #   command and does not run it: a variable's value (`P=psql; oc exec pod --
-#   $P`), printf formats and echo -e escapes, or decoded output (`base64 -d`).
-#   Nor does it block what no answer has put in its scope yet (ADR 0028,
-#   "Negative and risks"): a Redis client run in the cluster, `argocd app
-#   patch-resource` and `argocd app confirm-deletion`.
+#   $P`), printf formats and echo -e escapes, brace expansion
+#   (`deletion-appro{v,}ed`), globs, or decoded output (`base64 -d`). (The
+#   output of an echo or printf that a shell runs is read, see lex, and so
+#   are the escapes of $'...' quoting, see ansi_c_text; a substitution that
+#   fills in only part of the command name, `o$(echo c) delete ...`, or a
+#   double-quoted one with double quotes inside, is not, and each echo or
+#   printf output is read as a line of its own, also where bash prints it
+#   on one line, `printf oc; echo ' delete ...'`.) A heredoc that xargs
+#   or parallel read, directly or through cat (`xargs oc <<'EOF'`), and a
+#   here-string that cat passes on through a pipe (`cat <<< '...' | xargs oc`,
+#   `cat <<< '...' | oc exec -i pod -- sh`) are not read as the arguments or
+#   the script either, although a here-string or piped echo text is. Some
+#   routes are not checked at all, here or in website_k8s's hook: an
+#   `oc replace`, `oc apply` or `oc edit` that drops finalizers or replaces
+#   an object, `oc replace --raw` included; `argocd app sync --prune` and
+#   `argocd app set --auto-prune`; an ssh tunnel to a database (`ssh -L
+#   15432:<db>:5432 <host>`); file commands in a pod (`oc exec <pod> --
+#   rm -rf /var/lib/postgresql/data`); commands that an interpreter runs
+#   (`python3 -c '...'`); and output redirected into a process substitution
+#   (`echo '...' > >(bash)`). The deletion-approved annotation is checked
+#   only in `oc annotate`, `oc patch` and argocd commands: a manifest that
+#   sets it is not checked when `oc apply`, `oc create` or `oc replace`
+#   reads it, even inline as a heredoc or as piped echo text, nor when it
+#   comes from a file, another command's output or an editor (`oc edit`,
+#   `argocd app edit`). The only Redis client the hook knows is redis-cli,
+#   the one the clusters' Redis image ships, and only through oc exec,
+#   oc rsh or oc debug, not in a pod the agent starts; ADR 0035, "Negative
+#   and risks", lists these paths.
 #
 # Contract with Claude Code (verified against the "Hooks reference" of the
 # Claude Code docs, 2026-10-25)
@@ -94,18 +140,34 @@
 #     of the command.
 #   - The policy is a jq program embedded below, so the hook depends only on
 #     bash and jq. jq's regular expressions do the tokenising in C.
+#   - oc's verb and argocd's subcommands are found the way cobra, which both
+#     use, finds them (see oc_verb_indices and argocd_subcommands), so an
+#     option written before them, a verb-local one included (`oc -p
+#     '<patch>' patch ...`), cannot hide them. oc's verb is read in two
+#     ways, the hook's and cobra's, and each verb's words with and without
+#     the words before it (see oc_verb_words; `oc --wait pvc delete data`
+#     deletes the claim), and every reading counts (ADR 0035).
 #   - Shell parsing is approximated, deliberately erring towards blocking. A
 #     word is parsed again as a command only where a shell would run it (the
 #     command string of -c, also after `--` or other options; the arguments of
 #     eval, ssh and watch; a here-string read by a shell; echo or printf
-#     output piped into a shell or into oc exec, oc rsh or oc debug; and
-#     $(...) inside double quotes), and a
-#     heredoc body counts as a script only when a shell reads it (the
-#     receiver is matched with quotes and backslashes removed, and a variable
-#     as the receiver counts as a shell), so commit messages and files that
-#     merely mention a command are not blocked. The cases it handles are
-#     pinned by scripts/tests/test-guard-bash.sh, which must pass before this
-#     file changes (it runs in the CI "Test" job).
+#     output piped into a shell or into oc exec, oc rsh or oc debug, or in a
+#     substitution whose output the shell runs; and $(...) inside double
+#     quotes), and a heredoc body counts as a script only when a shell reads
+#     it (the receiver is matched with quotes and backslashes removed, and a
+#     variable as the receiver counts as a shell), so commit messages and
+#     files that merely mention a command are not blocked. The cases it
+#     handles are pinned by scripts/tests/test-guard-bash.sh, which must pass
+#     before this file changes (it runs in the CI "Test" job).
+#   - ADR 0035 section 2 reads command text the way the programs read it,
+#     for every check: options before the oc verb, oc get's value options,
+#     escapes and whole-object operations in a patch, $'...' and $"..."
+#     quoting, substitutions whose output the shell runs, `oc delete --raw`,
+#     port numbers with a `+`, argocd's download names, text that xargs or
+#     parallel pass on, and argocd as the value of an oc option. Where a
+#     reading blocks more than needed (every `oc delete --raw`, every
+#     `$patch: replace|delete` or `$retainKeys`, wherever it stands), ADR
+#     0035's "Negative and risks" says so.
 #   - Where ADR 0024 leaves room, it is stricter. The maintainer accepted
 #     these points as built, and ADR 0028 section 4 records them; a new point
 #     like them needs the maintainer's acceptance or an amending ADR first
@@ -176,9 +238,10 @@ IFS= read -r -d '' GUARD_JQ <<'JQ' || true
 #   $check - the check number of ADR 0024 section 4 (1 or 2);
 #   $text  - what was refused and what to do instead.
 def msg($check; $text):
-  "Blocked by .claude/hooks/guard-bash.sh (ADR 0024 section 4 as amended by ADR 0028, check \($check)): \($text)\n"
+  "Blocked by .claude/hooks/guard-bash.sh (ADR 0024 section 4 as amended by ADR 0028 and ADR 0035, check \($check)): \($text)\n"
   + "The guardrails are described in docs/design/adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md, section 4, "
-  + "and docs/design/adr/0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md.";
+  + "docs/design/adr/0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md "
+  + "and docs/design/adr/0035-guardrails-for-in-cluster-redis-argo-cd-patches-and-deletion.md.";
 
 # Advice for a block that may be a false positive caused by text that only
 # mentions a command, for example in a commit message.
@@ -191,7 +254,26 @@ def text_only_hint:
 
 def basename: sub("^.*/"; "");
 
+# Whether a program name, without its directory, is argocd: `argocd`, or a
+# name of argocd's release downloads, which keep their file name when they
+# are installed (`argocd-linux-amd64`, `argocd-darwin-arm64`,
+# `argocd-windows-amd64.exe`; ADR 0035). Any name that starts with `argocd`
+# and goes on with `-`, `_` or `.` counts, which errs towards blocking.
+def is_argocd_name: test("^argocd(?:[-_.]|$)");
+
 def is_assignment: test("^[A-Za-z_][A-Za-z0-9_]*=");
+
+# The value of a string of hexadecimal (base 16) or octal (base 8) digits.
+#   $base - 16 or 8.
+def digits_value($base):
+  ascii_downcase | explode | reduce .[] as $c (0; . * $base + (if $c >= 97 then $c - 87 else $c - 48 end));
+
+# The character of a code point, or U+FFFD for a number that is not a
+# Unicode scalar value (a surrogate or a value beyond U+10FFFF), which jq's
+# implode would refuse. The escapes decoded with it (see ansi_c_text and
+# decoded_text) only need to be right for the ASCII letters the checks match.
+def codepoint_text:
+  if (. >= 0 and . < 55296) or (. > 57343 and . <= 1114111) then [.] | implode else "\ufffd" end;
 
 # The positional words of an argument list: options are skipped, and so is the
 # word after an option that takes a separate value.
@@ -229,33 +311,109 @@ def first_positional($valopts):
 
 # oc options that take a separate value, so their value is not read as a
 # resource, a verb or a pod (for example the namespace in `-n apps`): the
-# global options of `oc options` (oc 4.22) and the value options of delete,
-# replace, exec, rsh, debug and port-forward. A boolean option must never be
-# listed: the word after it would be skipped, and a pod taken for its value
-# would let the next word, the command, pass for the pod in check_in_cluster.
-# That is why patch's -p is not listed: it is the boolean --previous of
-# `oc logs -p`. check_oc_patch reads every word of an oc patch instead.
+# global options of `oc options` (oc 4.22) and the value options of the verbs
+# whose positional words the checks read: get (`--sort-by`, `--chunk-size`,
+# `-L`, `--label-columns` and `--subresource` among them, ADR 0035), delete,
+# exec, rsh, debug and port-forward. (check_oc_patch and
+# check_deletion_approval read every word of an oc patch or oc annotate, and
+# an oc replace counts only by its verb.) An option that pflag gives a value
+# of its own when it stands alone (NoOptDefVal: delete's --cascade, the
+# --dry-run of delete and debug) takes no separate value and is not listed.
+# A boolean option must never be listed: the word after it would be skipped,
+# and a pod taken for its value would let the next word, the command, pass
+# for the pod in check_in_cluster. That is why patch's -p is not listed: it
+# is the boolean --previous of `oc logs -p`. scripts/tests/test-guard-bash.sh
+# compares the list with the oc 4.22 client when that client is on PATH.
 def oc_value_options:
   ["-n", "--namespace", "-l", "--selector", "-f", "--filename", "-o", "--output",
    "--field-selector", "--context", "--cluster", "--kubeconfig", "--kuberc", "--server", "-s",
    "--token", "--user", "--as", "--as-group", "--as-uid", "--as-user-extra", "-k", "--kustomize",
    "--timeout", "--grace-period", "--request-timeout", "--template", "--raw",
    "--certificate-authority", "--client-certificate", "--client-key", "--cache-dir",
-   "--tls-server-name", "--loglevel", "-v", "--v", "--log-flush-frequency",
+   "--tls-server-name", "--loglevel", "-v", "--v", "--vmodule", "--log-flush-frequency",
    "--profile", "--profile-output", "-c", "--container", "--shell",
    "--pod-running-timeout", "--image", "--image-stream", "--node-name", "--to-namespace",
-   "--as-user", "--address"];
+   "--as-user", "--address", "--chunk-size", "-L", "--label-columns", "--sort-by",
+   "--subresource"];
+
+# The options that oc itself defines as booleans (`oc options`, oc 4.22), and
+# its help flag. Before the verb, cobra reads every other option without `=`
+# as one that takes the next word as its value (see cobra_verb_index).
+def oc_root_boolean_options:
+  ["--disable-compression", "--insecure-skip-tls-verify", "--match-server-version",
+   "--warnings-as-errors", "-h", "--help"];
+
+# The index of oc's verb in the words after `oc` as cobra finds it, or null.
+# cobra's Command.Find (its stripFlags, in the cobra that oc 4.22 vendors)
+# reads the words before the verb with oc's own options only: an option
+# `--name`, or a two-character `-x`, without `=` takes the next word as its
+# value unless oc itself defines it as a boolean, also when only the verb
+# defines it, and also when the verb reads it as a boolean. So oc 4.22 runs
+# `oc -p '<patch>' patch pvc data`, `oc --type merge patch ...` and
+# `oc --field-manager m annotate ...` as patch and annotate, and
+# `oc --vmodule x=1 delete ...` as delete. `--` ends the search.
+def cobra_verb_index:
+  first(foreach .[] as $w ({i: -1, skip: false, stop: false, hit: false};
+      .i += 1
+      | .hit = false
+      | if .stop then .
+        elif .skip then .skip = false
+        elif $w == "--" then .stop = true
+        elif ($w | startswith("-")) then
+          .skip = (($w | contains("=") | not)
+                   and (($w | startswith("--")) or ($w | length) == 2)
+                   and ($w | IN(oc_root_boolean_options[]) | not))
+        else .hit = true end;
+      select(.hit) | .i)) // null;
+
+# The indices of the words after `oc` that oc may run as its verb, as a
+# stream: the first positional word as positionals reads it with
+# oc_value_options, and the verb cobra finds (see cobra_verb_index). Each one
+# covers what the other misses: cobra's reading finds the verb behind an
+# option the hook does not list (`oc -p '<patch>' patch ...`, which
+# oc_value_options cannot list because `-p` is the boolean --previous of
+# `oc logs -p`), and the hook's list finds it behind a boolean that a newer
+# oc may define on oc itself. The checks look at both, which errs towards
+# blocking.
+def oc_verb_indices:
+  ([first_positional_index(oc_value_options), cobra_verb_index] | map(values) | unique)[];
+
+# The words that oc's verb parses, for the verb at index $k of the words after
+# `oc`, as a stream of one or two lists. cobra hands the verb every word but
+# the verb itself (Command.Find, argsMinusFirstX), options before the verb
+# included, and the verb's own options are interspersed (pflag), so the first
+# list is all of them: in `oc --wait pvc delete data` the verb reads
+# `pvc data` (oc 4.22 applies `oc --overwrite <key>=<value> annotate ...`
+# the same way), and in `oc --shell /usr/bin/psql rsh pod` its --shell. When
+# the words before the verb hold a word that positionals reads as positional,
+# an option there that the hook does not list may take it as its value
+# instead, so the words after the verb alone are the second list.
+#   $k - the index of the verb (see oc_verb_indices).
+def oc_verb_words($k):
+  .[:$k] as $pre
+  | ($pre + .[$k + 1:]),
+    (if ($pre | positionals(oc_value_options) | length) > 0 then .[$k + 1:] else empty end);
+
+# The verbs of every `oc` in a list of words, as a stream (see
+# oc_verb_indices).
+def oc_verbs:
+  . as $s
+  | range(0; $s | length) as $i
+  | select(($s[$i] | basename) == "oc")
+  | $s[$i + 1:] as $w
+  | $w | oc_verb_indices | $w[.];
 
 # The first `oc exec`, `oc rsh` or `oc debug` in a list of words, as
-# {verb, i} with the index i of its `oc`, or null. Global options may stand
-# between oc and the verb.
+# {verb, i} with the index i of its `oc`, or null. Options may stand between
+# oc and the verb (see oc_verb_indices).
 def in_cluster_oc:
   . as $s
   | first(range(0; $s | length) as $i
       | select(($s[$i] | basename) == "oc")
-      | ($s[$i + 1:] | first_positional(oc_value_options)) as $verb
-      | select($verb | IN("exec", "rsh", "debug"))
-      | {verb: $verb, i: $i}) // null;
+      | $s[$i + 1:] as $w
+      | $w | oc_verb_indices | $w[.]
+      | select(IN("exec", "rsh", "debug"))
+      | {verb: ., i: $i}) // null;
 
 # The words of a text, cut at blanks with plain string splits. Their cost
 # grows linearly with the text; a regex split (splits) rescans the string for
@@ -277,8 +435,9 @@ def shell_option_values:
     else empty end;
 
 # The command part of `oc exec`, `oc rsh` or `oc debug`: the words it runs
-# inside the cluster. The input is the words after the verb. Only these words
-# can start a program there, so a pod, container or namespace named like a
+# inside the cluster. The input is the words the verb parses (see
+# oc_verb_words): the words after it, and any options before it. Only these
+# words can start a program there, so a pod, container or namespace named like a
 # database client (`oc exec -n verseghy deploy/mysql -- df -h`) is not one.
 # The rules follow the oc 4.22 sources (pkg/cli/rsh, pkg/cli/debug and the
 # vendored k8s.io/kubectl pkg/cmd/exec):
@@ -346,6 +505,47 @@ def runner_feed($before; $command):
       | {replace: (if $r != null and $r != "" and any($command[]; contains($r)) then $r else null end)}
     end;
 
+# The programs whose arguments the checks read: oc and argocd for check 1,
+# and the database commands of check 2 (the app binary backend3-cli takes
+# Loco's db subcommands). When xargs or GNU parallel runs one of them, the
+# text they read on stdin becomes its arguments (see runner_fed_index).
+# argocd is not listed: runner_fed_index finds it by is_argocd_name, under
+# its own name and its download names.
+def fed_programs: ["oc", "cargo", "backend3-cli", "sea-orm-cli", "psql", "pg_restore", "mysql", "mariadb"];
+
+# The index of the command that xargs or GNU parallel runs in a segment, when
+# it is one of fed_programs (argocd also under its download names, see
+# is_argocd_name), or null: the first such word after the last xargs or
+# parallel word, so wrappers such as `timeout 5` may stand between. oc exec,
+# oc rsh and oc debug are found by in_cluster_oc first.
+def runner_fed_index:
+  . as $s
+  | (first(range(($s | length) - 1; -1; -1) as $j
+       | select($s[$j] | basename | IN("xargs", "parallel")) | $j) // null) as $x
+  | if $x == null then null
+    else first(range($x + 1; $s | length) as $k
+           | select($s[$k] | basename | IN(fed_programs[]) or is_argocd_name) | $k) // null end;
+
+# The segments that xargs or GNU parallel run with the text they read on
+# stdin, which is the input: with each input line in place of the replace
+# string (`xargs -I{} oc annotate {} ...`), or with the input words appended
+# (`echo pvc/data | xargs oc delete`), as runner_feed says. A segment with
+# the replace string filled in is the command as the runner runs it, so the
+# runner and its options are left out: kept, they would make the checks that
+# ask runner_feed (generated_delete, check_port_forward) take the filled-in
+# command for one that the runner still appends words to. An appended
+# segment keeps them, so those checks still see that the words came from
+# the runner.
+#   $cur  - the words of the segment;
+#   $i    - the index of the command they run;
+#   $feed - what runner_feed returned for it, never null.
+def fed_segments($cur; $i; $feed):
+  if $feed.replace != null then
+    (first(range($i - 1; -1; -1) as $j | select($cur[$j] | basename | IN("xargs", "parallel")) | $j) // $i) as $x
+    | [split("\n")[] | select(test("\\S")) | sub("^[ \\t]+"; "") as $line
+       | $cur[:$x] + [$cur[$i:][] | split($feed.replace) | join($line)]]
+  else [$cur + [blank_words]] end;
+
 # Words after which kubectl is being run rather than mentioned.
 def runner_words:
   ["sudo", "doas", "env", "exec", "command", "builtin", "nohup", "nice", "time",
@@ -371,27 +571,82 @@ def cargo_subcommand:
 # subshell group. Redirections are dropped. An unquoted $(...), `...` or
 # process substitution <(...) is lexed as segments of its own, and the
 # segment around it goes on after it with a placeholder word in its place
-# (see lex_chunk).
+# (see lex_chunk). When the shell runs the output of such a substitution as
+# commands, and it is echo or printf output, that text is split as commands
+# too (see substitution_use, ADR 0035).
 # Quotes and backslashes are removed from each word the way the shell joins
-# them. A quoted string that the shell would run as a command (after `-c`,
-# `--command`, `eval`, `ssh` or `watch`, and every $(...) or `...` inside
-# double quotes) is split again into segments of its own, recursively.
+# them; a $'...' part has its escapes decoded (see ansi_c_text), and a $"..."
+# part counts as double-quoted (ADR 0035). A quoted string that the shell
+# would run as a command (after `-c`, `--command`, `eval`, `ssh` or `watch`,
+# and every $(...) or `...` inside double quotes) is split again into
+# segments of its own, recursively.
 
 # One token per match. Capture groups, in order: [comment, redirection,
-# separator, word]. Quotes and escapes stay inside the word for word_text.
+# separator, word]. Quotes and escapes stay inside the word for word_text. A
+# $'...' part comes first among a word's parts, so that a `\'` inside it does
+# not end it.
 def token_re:
   "(#[^\\n]*)"
   + "|((?:[0-9]+|&)?[<>]+&?[0-9-]*)"
   + "|(&&|\\|\\||;;|\\|&|[;&|()`\\n])"
-  + "|((?:'[^']*'|\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|\\\\[\\s\\S]|[^\\s'\"\\\\;&|()<>`#])"
-  + "(?:'[^']*'|\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|\\\\[\\s\\S]|[^\\s'\"\\\\;&|()<>`])*)";
+  + "|((?:\\$'(?:\\\\[\\s\\S]|[^'\\\\])*'|'[^']*'|\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|\\\\[\\s\\S]|[^\\s'\"\\\\;&|()<>`#])"
+  + "(?:\\$'(?:\\\\[\\s\\S]|[^'\\\\])*'|'[^']*'|\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|\\\\[\\s\\S]|[^\\s'\"\\\\;&|()<>`])*)";
 
 # The parts of one word. Capture groups: [single-quoted content,
-# double-quoted content, escaped character, plain text].
-def part_re: "'([^']*)'|\"((?:\\\\[\\s\\S]|[^\"\\\\])*)\"|\\\\([\\s\\S])|([^'\"\\\\]+)";
+# double-quoted content (also of a $"..." part, bash's locale quoting, which
+# is a double-quoted string that bash may translate), escaped character,
+# plain text, the content of a $'...' part (ANSI-C quoting, see ansi_c_text)].
+# Plain text stops at a `$` right before a quote, so that the `$` of $'...'
+# and $"..." belongs to the quoted part, as the shell reads it, and is not
+# kept as text (`$'ns'` is ns, not $ns).
+def part_re:
+  "'([^']*)'|\\$?\"((?:\\\\[\\s\\S]|[^\"\\\\])*)\"|\\\\([\\s\\S])|((?:[^'\"\\\\$]|\\$(?!['\"]))+)"
+  + "|\\$'((?:\\\\[\\s\\S]|[^'\\\\])*)'";
 
 # Removes the backslashes that escape $ ` " \ inside double quotes.
 def dq_unescape: gsub("\\\\(?<c>[$`\"\\\\])"; .c);
+
+# The single-character escapes of bash's ANSI-C quoting ($'...'), by the
+# character after the backslash (bash manual, "ANSI-C Quoting").
+def ansi_c_simple_escapes:
+  {"a": "\u0007", "b": "\b", "e": "\u001b", "E": "\u001b", "f": "\f", "n": "\n", "r": "\r",
+   "t": "\t", "v": "\u000b", "'": "'", "\"": "\"", "?": "?"};
+
+# The text inside a $'...' word part, as bash decodes it (bash manual,
+# "ANSI-C Quoting"; ADR 0035): the escapes of ansi_c_simple_escapes, \NNN
+# (one to three octal digits), \xHH (one or two hexadecimal digits), \uHHHH
+# and \UHHHHHHHH (a Unicode code point) and \cX (a control character). An
+# unknown escape keeps its backslash, and a NUL ends the text, as in bash. A
+# byte above 0x7F becomes the code point of that number, which is enough for
+# the ASCII words the checks match. So `$'\x6e\x73'` reads as ns. The text
+# is cut at backslashes with a plain string split, so the cost grows
+# linearly with it.
+def ansi_c_text:
+  def unescape_head:
+    .[0:1] as $c
+    | if $c | test("[0-7]") then
+        capture("^(?<d>[0-7]{1,3})(?<r>[\\s\\S]*)$") | (.d | digits_value(8) % 256 | codepoint_text) + .r
+      elif $c == "x" and test("^x[0-9A-Fa-f]") then
+        capture("^x(?<d>[0-9A-Fa-f]{1,2})(?<r>[\\s\\S]*)$") | (.d | digits_value(16) | codepoint_text) + .r
+      elif $c == "u" and test("^u[0-9A-Fa-f]") then
+        capture("^u(?<d>[0-9A-Fa-f]{1,4})(?<r>[\\s\\S]*)$") | (.d | digits_value(16) | codepoint_text) + .r
+      elif $c == "U" and test("^U[0-9A-Fa-f]") then
+        capture("^U(?<d>[0-9A-Fa-f]{1,8})(?<r>[\\s\\S]*)$") | (.d | digits_value(16) | codepoint_text) + .r
+      elif $c == "c" and length > 1 then
+        (.[1:2] | explode[0] | (if . == 63 then 127 else . % 32 end) | codepoint_text) + .[2:]
+      elif ansi_c_simple_escapes | has($c) then ansi_c_simple_escapes[$c] + .[1:]
+      else "\\" + . end;
+  # An empty text splits into no pieces at all.
+  if . == "" then ""
+  else
+    split("\\") as $p
+    # .lit: the backslash before this piece was the second one of a `\\`.
+    | reduce $p[1:][] as $q ({out: $p[0], lit: false};
+        if .lit then .out += $q | .lit = false
+        elif $q == "" then .out += "\\" | .lit = true
+        else .out += ($q | unescape_head) end)
+    | (.out | split("\u0000") | .[0]) // ""
+  end;
 
 # Programs whose quoted argument is itself a shell command line.
 def reparse_words: ["eval", "ssh", "watch"];
@@ -415,9 +670,25 @@ def var_receiver_re:
 def in_cluster_receiver_re:
   "(?:^|[\\s;&|(])(?:[^\\s;&|()]*/)?oc\\s(?:[^;&|()\\n]*\\s)?(?<verb>exec|rsh|debug)(?=[\\s;&|)]|$)";
 
-# The text with every quote and backslash removed: the words a shell would
-# see, joined, which is close enough for the receiver tests above.
-def unquoted_text: split("\"") | join("") | split("'") | join("") | split("\\") | join("");
+# The words a shell would see in a text, joined, which is close enough for
+# the receiver tests above and for check_in_cluster, as a stream of one or
+# two readings. The callers count a match in either (ADR 0035):
+#   - the text with every quote and backslash removed, so `s\h`, `s''h` and
+#     `"psql"` read as sh and psql. It errs towards blocking: it also removes
+#     a backslash that the shell keeps inside quotes;
+#   - when the text holds a `$'` or a `$"`, also the text read part by part
+#     as the lexer reads a word (see part_re): a $'...' part decoded (see
+#     ansi_c_text) and the `$` of a $"..." part dropped, so `o$'c' exec`
+#     names oc. A `$'` inside double or single quotes is text there, as in
+#     bash, so it never starts a part that a NUL would cut short:
+#     `echo "$'\0"; psql; echo "'"` still holds psql, in this reading and in
+#     the first. (Only text that holds `$'` or `$"` pays for the scan.)
+def unquoted_texts:
+  (split("\"") | join("") | split("'") | join("") | split("\\") | join("")),
+  (if test("\\$['\"]") then
+     [scan(part_re) | .[0] // (.[1] | values | dq_unescape) // .[2] // .[3] // (.[4] | values | ansi_c_text)]
+     | join("")
+   else empty end);
 
 # Quotes a text as one single-quoted shell word.
 def sq_quote: "'" + gsub("'"; "'\\''") + "'";
@@ -434,12 +705,14 @@ def sq_quote: "'" + gsub("'"; "'\\''") + "'";
 def strip_heredocs:
   gsub("(?<pre>^[^\\n<]*)<<-?[ \\t]*(?<q>['\"]?)(?<d>[A-Za-z0-9_.-]+)\\k<q>(?<rest>[^\\n]*)\\n(?:(?<body>[\\s\\S]*?)\\n)?[ \\t]*\\k<d>[ \\t]*(?=\\n|$)";
     (.pre + " " + .rest) as $line
-    | ($line | unquoted_text) as $plain
+    # Each reading of the line counts (see unquoted_texts).
+    | [$line | unquoted_texts] as $plain
+    | (first($plain[] | select(test(in_cluster_receiver_re)) | capture(in_cluster_receiver_re).verb) // null) as $verb
     | (.body // "") as $body
     | $line + "\n"
-      + if ($plain | test(in_cluster_receiver_re)) then
-          "oc \($plain | capture(in_cluster_receiver_re).verb) stdin -- sh -c \($body | sq_quote)"
-        elif ($plain | test(shell_receiver_re)) or ($plain | test(var_receiver_re)) then $body
+      + if $verb != null then
+          "oc \($verb) stdin -- sh -c \($body | sq_quote)"
+        elif any($plain[]; test(shell_receiver_re) or test(var_receiver_re)) then $body
         elif .q == "" then ([$body | scan("\\$\\([\\s\\S]*?\\)|`[^`]*`")] | join("\n"))
         else "" end);
 
@@ -495,20 +768,104 @@ def is_shell_word: (sub("^.*/"; "") | IN(shell_words[])) or test("^\\$\\{?(?:SHE
 def shell_value_options: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"];
 
 # A command can only be blocked if it contains one of these words, so every
-# other command is allowed without being parsed.
-def trigger_re: "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|mariadb|sea-orm-cli|cargo|argocd";
+# other command is allowed without being parsed. redis-cli (D105) is blocked
+# only next to an oc, but it is a trigger word too: a long pipeline is cut
+# into chunks, and a chunk without a trigger word is skipped, so the echo
+# that pipes `redis-cli FLUSHALL` into an oc exec in a later chunk would be
+# lost (see lex).
+def trigger_re: "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|mariadb|sea-orm-cli|redis-cli|cargo|argocd";
 
 # The variables check 2 reads.
 def watched_var_re: "DATABASE_URL|PGHOST|PGSERVICE|MYSQL_HOST";
 
 # Whether a piece of shell text can matter to any check: it holds a trigger
 # word, or an assignment that check 2 reads. Quotes and backslashes are
-# dropped first, so k'ube'ctl still counts. split/join is linear, unlike a
-# gsub with one match per quote. lex skips the chunks for which this is false,
-# because no check can block a segment without such a word.
+# dropped first, so k'ube'ctl still counts. A `\n` or `\t` counts as a
+# blank before that (ADR 0035): lex turns them into a line break and a tab
+# in the text a printf prints (see printed_text), so in `printf
+# 'ls\noc delete ns web' | sh` the word oc starts after the `\n`, which
+# dropping only the backslash would join to it (`lsnoc`). split/join is
+# linear, unlike a gsub with one match per quote. Text with a $'...' or
+# $"..." part always counts (ADR 0035), because its escapes (`$'\x6f\x63'`
+# is oc) or the `$` before its quote (`o$"c"`) hide the word from this
+# test. lex skips the chunks for which this is false, because no check can
+# block a segment without such a word.
 def may_matter:
-  split("\"") | join("") | split("'") | join("") | split("\\") | join("")
-  | test(trigger_re + "|" + watched_var_re);
+  test("\\$['\"]")
+  or (split("\"") | join("") | split("'") | join("")
+      | split("\\n") | join(" ") | split("\\t") | join(" ") | split("\\") | join("")
+      | test(trigger_re + "|" + watched_var_re));
+
+# The words an echo prints, from the words after it: its leading options
+# (`-n`, `-e`, `-E` and their combinations, such as `-ne`) are dropped, as
+# bash's echo and coreutils' read them (ADR 0035), so `echo -n pvc/data |
+# xargs oc delete` passes pvc/data on, not an oc option `-n`. The first other
+# word and every word after it are printed, `--` and a lone `-` included.
+def echo_operands:
+  (first(range(0; length) as $i | select(.[$i] | test("^-[neE]+$") | not) | $i) // length) as $k
+  | .[$k:];
+
+# The words that the command of a segment prints when it is an echo or a
+# printf (see echo_operands; printf's format is not applied), or null.
+#   $seg - the words of the segment, assignments before the command included.
+def printed_words($seg):
+  (first(range(0; $seg | length) | select($seg[.] | is_assignment | not)) // null) as $j
+  | if $j == null then null
+    elif ($seg[$j] | basename) == "echo" then $seg[$j + 1:] | echo_operands
+    elif ($seg[$j] | basename) == "printf" then $seg[$j + 1:]
+    else null end;
+
+# The text that the echo and printf commands among a list of segments print,
+# read as lex reads piped text: echo joins its arguments with spaces, printf's
+# \n and \t become a line break and a tab, and each command prints a line of
+# its own. null when none of the segments is an echo or printf.
+def printed_text:
+  [.[] | printed_words(.) | values
+   | [.[] | split("\\n") | join("\n") | split("\\t") | join("\t")] | join(" ")]
+  | if length == 0 then null else join("\n") end;
+
+# Whether a word stands where the command name goes, from the words of the
+# segment before it, as check_kubectl reads that place (ADR 0035): every one
+# is an assignment, or one of them is a runner word (see runner_words),
+# whose own options and values may come between (`timeout 30`, `sudo -u
+# root`). After a runner word every later word counts, which errs towards
+# blocking.
+def is_command_place: all(.[]; is_assignment) or any(.[]; IN(runner_words[]));
+
+# Whether a word is the command name with none of a runner's own words before
+# it: every word before it is an assignment or a runner word (`sudo`, `env
+# X=1`). Only there does the output of a substitution in the command name's
+# place take the place of the substitution outright (see close_sub and
+# lex_chunk); after a runner's options or values, the word may be one of
+# them, so its own text stays in front of the output (ADR 0035).
+def is_bare_command_place: all(.[]; is_assignment or IN(runner_words[]));
+
+# How the shell uses the output of an unquoted substitution that has just
+# closed (ADR 0035), from the words of the segment around it, up to its
+# placeholder (the `$` or "`" word of a $(...) or `...`, or the /dev/fd/63 of
+# a process substitution, see lex_chunk):
+#   - "script" when a shell, `source` or `.` gets the process substitution:
+#     it reads the output as a script (`bash <(echo '...')`);
+#   - "command" when the $(...) or `...` is the whole word where the command
+#     name goes: the shell runs the output as the command and its first
+#     arguments (`$(echo oc) delete ...`). That place is found as
+#     check_kubectl finds it: every word before is an assignment, or one of
+#     them is a runner word, whose own options and values may stand between
+#     (`timeout 30 $(echo oc) delete ...`, `sudo -u root $(echo oc) ...`),
+#     which errs towards blocking (close_sub then keeps the placeholder in
+#     front of the output, see is_bare_command_place). In a -c or eval
+#     string, which lex reads again as commands, that is the form `bash -c
+#     "$(echo '...')"` and `eval "$(echo '...')"` take. A double-quoted one
+#     in that place is read by lex (see quoted_command_text);
+#   - null otherwise: the output is an argument, a value or text.
+#   $sh - whether a word before the placeholder is a shell (lex_chunk's .sh).
+def substitution_use($sh):
+  (.[-1] // "") as $p
+  | .[:-1] as $before
+  | if $p == "/dev/fd/63" then
+      (if $sh or any($before[]; IN("source", ".")) then "script" else null end)
+    elif ($p == "$" or $p == "`") and ($before | is_command_place) then "command"
+    else null end;
 
 # Splits shell text into an array of segments; each segment is an array of
 # words. Nested command strings are appended as further segments, after the
@@ -533,11 +890,39 @@ def may_matter:
 #     arguments (see runner_feed), so the commands it runs become segments of
 #     their own instead, with each input line in place of the replace string
 #     (`xargs -I{} oc exec {} -- df -h`), or with the input words appended;
+#   - (ADR 0035) the same text under xargs or GNU parallel when they run
+#     another command whose arguments the checks read (see fed_programs):
+#     `echo confirm-deletion x | xargs argocd app` becomes the segment
+#     `xargs argocd app confirm-deletion x` (see fed_segments). Read by any
+#     other program, the text stays data;
+#   - (ADR 0035) the echo or printf output of an unquoted substitution that
+#     the shell runs (see substitution_use): a process substitution that a
+#     shell, `source` or `.` reads, and a $(...) or `...` in place of the
+#     command name, whose output words also take its place in the segment.
+#     A word there that is one double-quoted $(...) or `...` takes that
+#     output as one word, since the quotes keep the shell from splitting it
+#     (`"$(echo oc)" delete ...`, see quoted_command_text);
 #   - and, in any other word, every $(...) or `...` inside double quotes.
 # A long text is cut into chunks first (see `chunks`), and chunks that cannot
-# matter (see may_matter) are not lexed.
-#   $depth - the nesting level; nesting stops at 6 to bound the work.
-def lex($depth):
+# matter (see may_matter) are not lexed, unless $all asks for every chunk.
+#   $depth - the nesting level; nesting stops at 6 to bound the work;
+#   $all   - true to lex every chunk, also one without a trigger word, for a
+#            text whose printed words are read (see quoted_command_text):
+#            `echo bash` there names a shell, and `echo sudo` a runner.
+def lex($depth; $all):
+  # The echo or printf output of a $(...) or `...` written as a word's only,
+  # double-quoted part, for a word in the command name's place (ADR 0035):
+  # the shell runs that output as the command name, as one word, so
+  # `"$(echo oc)" delete ns web` runs `oc delete ns web`, while
+  # `"$(echo 'oc delete')"` names a program called "oc delete". The line
+  # breaks at the end of the output are removed, as bash removes them from
+  # every command substitution, so `"$(printf 'oc\n')"` names oc too. Empty
+  # when the text inside prints nothing that the hook reads (see
+  # printed_text).
+  #   $content - the double-quoted part's text, quotes removed.
+  def quoted_command_text($content):
+    $content | dq_unescape | capture("^(?:\\$\\((?<a>[\\s\\S]*)\\)|`(?<b>[^`]*)`)$") | (.a // .b)
+    | lex($depth + 1; true) | printed_text | values | sub("\\n+$"; "");
   # Ends the current segment at separator $sep and resets the per-segment
   # state. When the segment reads text on stdin, from an echo or printf
   # earlier in its pipeline or from its here-strings, that text is handled as
@@ -547,6 +932,13 @@ def lex($depth):
     | if (.cur | length) > 0 then
         # Only a segment that reads such text needs to find its oc.
         (if .pipe != null or (.hstr | length) > 0 then .cur | in_cluster_oc else null end) as $oc
+        # Or, under xargs or parallel, another command the checks read
+        # (ADR 0035): `echo confirm-deletion x | xargs argocd app` runs
+        # `argocd app confirm-deletion x`. A here-string is a redirection,
+        # not an argument, so its words are left out of that command (the
+        # lexer keeps them in .cur, where other checks read them as text).
+        | (if (.hstr | length) > 0 then .cur - .hstr else .cur end) as $args
+        | (if $oc == null and (.pipe != null or (.hstr | length) > 0) then $args | runner_fed_index else null end) as $fed
         # printf's \n and \t, with plain string splits (a gsub is quadratic).
         | [(.pipe // [])[] | split("\\n") | join("\n") | split("\\t") | join("\t")] as $piped_in
         # echo joins its arguments with spaces; each here-string is a line.
@@ -556,16 +948,21 @@ def lex($depth):
            elif $oc != null then
              runner_feed($cur[:$oc.i]; $cur[$oc.i:]) as $feed
              | if $feed == null then
-                 .nested += [$stdin | in_cluster_script($oc.verb)] + ($stdin | lex($depth + 1))
-               elif $feed.replace != null then
-                 .nested += [$stdin | split("\n")[] | select(test("\\S")) | sub("^[ \\t]+"; "") as $line
-                             | $cur[:$oc.i] + [$cur[$oc.i:][] | split($feed.replace) | join($line)]]
-               else .nested += [$cur + [$stdin | blank_words]] end
+                 .nested += [$stdin | in_cluster_script($oc.verb)] + ($stdin | lex($depth + 1; false))
+               else .nested += ($stdin | fed_segments($cur; $oc.i; $feed)) end
            elif .pipe != null and .sh then
-             .nested += [$piped_in[] | select(test("\\S")) | lex($depth + 1)[]]
+             .nested += [$piped_in[] | select(test("\\S")) | lex($depth + 1; false)[]]
            else . end)
-        | (first(.cur[] | select(is_assignment | not)) // "" | basename) as $command
-        | .pipe = (if $piped then (if ($command | IN("echo", "printf")) then .cur[1:] else .pipe end) else null end)
+        # Not exclusive with the shell case: `echo x | xargs sh -c '...'`
+        # finds no fed program, and a fed program after a shell word gets
+        # its arguments either way.
+        | (if $depth >= 6 or $stdin == "" or $fed == null then .
+           else runner_feed($args[:$fed]; $args[$fed:]) as $feed
+             | if $feed == null then . else .nested += ($stdin | fed_segments($args; $fed; $feed)) end
+           end)
+        # The words an echo or printf pipes on (see printed_words), without
+        # an echo's options and the assignments before it.
+        | .pipe = (if $piped then (printed_words(.cur) // .pipe) else null end)
         | .segs += [.cur] | .cur = []
       # A line break right after a separator does not end the pipeline:
       # `echo psql |` and `oc exec -i pod -- sh` on the next line are one.
@@ -574,19 +971,44 @@ def lex($depth):
   # Opens an unquoted substitution: $(...), `...` or a process substitution
   # <(...) or >(...). The current segment and its state are kept aside on
   # .stack, and the text inside starts segments of its own, as a shell runs
-  # it as a command of its own.
+  # it as a command of its own. .segn records where its segments start in
+  # .segs, for close_sub.
   #   $kind - "sub" for $(...) and <(...), "tick" for `...`.
   def open_sub($kind):
-    .stack += [{kind: $kind, cur, copt, cskip, hs, hstr, sh, rw, pipe}]
+    .stack += [{kind: $kind, segn: (.segs | length), cur, copt, cskip, hs, hstr, sh, rw, pipe}]
     | .cur = [] | .copt = false | .cskip = false | .hs = false | .hstr = [] | .sh = false | .rw = false
     | .pipe = null;
   # Closes the innermost substitution: its last segment ends, and the segment
   # around it goes on with the words after it. So in
   # `oc port-forward $(oc get pod -o name) 5432` the port is still a word of
   # the oc port-forward segment, and in `oc exec $(...) -- psql` psql is
-  # still in the command part of the oc exec.
+  # still in the command part of the oc exec. When the shell runs its output
+  # (see substitution_use), the echo or printf text it prints is split as
+  # commands, and for "command" its words also replace the placeholder, as
+  # the shell's word splitting puts them there (`$(echo oc) delete ns web`
+  # runs `oc delete ns web`).
   def close_sub:
-    finish_segment(")") | .stack[-1] as $o | .stack |= .[:-1] | . + ($o | del(.kind));
+    finish_segment(")")
+    | .stack[-1] as $o
+    | .stack |= .[:-1]
+    | (if $depth >= 6 then null else $o.cur | substitution_use($o.sh) end) as $use
+    | (if $use == null then null else .segs[$o.segn:] | printed_text end) as $text
+    | . + ($o | del(.kind, .segn))
+    | if $text == null then .
+      else .nested += [$text | lex($depth + 1; false)[]]
+        | if $use == "command" then
+            [$text | blank_words] as $words
+            # After a runner's own words (`timeout 30 $(echo oc) ...`) the
+            # placeholder stays in front of the output's words, because that
+            # place is read loosely (see is_command_place) and the
+            # placeholder may stand for a runner's argument: the checks that
+            # count an expansion as not checkable (holds_expansion) still see
+            # it there.
+            | .cur = (if .cur[:-1] | is_bare_command_place then .cur[:-1] else .cur end) + $words
+            | .sh = (.sh or any($words[]; is_shell_word))
+            | .rw = (.rw or any($words[]; basename | IN(reparse_words[])))
+          else . end
+      end;
   # Closes what is still open at the end of a chunk, so that no segment kept
   # aside is lost: an unbalanced text is checked, not dropped.
   def close_all:
@@ -630,7 +1052,28 @@ def lex($depth):
          elif $t[1] != null then .hs = ($t[1] | test("<<<$")) | .ps = ($t[1] | test("^[<>]$"))
          elif $t[3] != null then (
          [$t[3] | scan(part_re)] as $parts
-         | ($parts | map(.[0] // (.[1] | values | dq_unescape) // .[2] // .[3]) | join("")) as $text
+         | ($parts | map(.[0] // (.[1] | values | dq_unescape) // .[2] // .[3] // (.[4] | values | ansi_c_text))
+            | join("")) as $text
+         # (ADR 0035) One double-quoted $(...) or `...` in the command name's
+         # place is the echo or printf output it runs (see
+         # quoted_command_text). The cheap tests on the word come first, so
+         # that the earlier words are looked at only for such a word. As in
+         # close_sub, the word's own text stays in front of that output after
+         # a runner's own words (see is_bare_command_place). The output
+         # stands only in the segment's words and in the shell and reparse
+         # flags: a -c string, a here-string and the text that eval, ssh or
+         # watch run again are read as written below, because lexing the
+         # written `$(...)` reads both the commands the substitution runs
+         # and its output in the command name's place, while the output
+         # alone would drop the commands (`eval "$(echo x; oc delete ns
+         # web)"` runs both).
+         | (if $depth < 6 and ($parts | length) == 1 and $parts[0][1] != null
+               and ($parts[0][1] | test("^(?:\\$\\([\\s\\S]*\\)|`[^`]*`)$")) and (.cur | is_command_place)
+            then first(quoted_command_text($parts[0][1])) // null
+            else null end) as $printed
+         | (if $printed == null then [$text]
+            elif .cur | is_bare_command_place then [$printed]
+            else [$text, $printed] end) as $words
          | .sh as $in_shell
          # .copt: a -c was seen and its command string is still to come;
          # .cskip: the next word is the value of a shell option.
@@ -645,16 +1088,16 @@ def lex($depth):
          | ($c.cmd or (.hs and $in_shell) or .rw) as $reparse
          | (if .hs then .hstr += [$text] else . end)
          | .copt = $c.copt | .cskip = $c.cskip | .hs = false
-         | .cur += [$text]
-         | .sh = ($in_shell or ($text | is_shell_word))
-         | .rw = (.rw or ($text | basename | IN(reparse_words[])))
+         | .cur += $words
+         | .sh = ($in_shell or any($words[]; is_shell_word))
+         | .rw = (.rw or any($words[]; basename | IN(reparse_words[])))
          | if $depth >= 6 then .
-           elif $reparse then .nested += [$text | select(test("\\S")) | lex($depth + 1)[]]
+           elif $reparse then .nested += [$text | select(test("\\S")) | lex($depth + 1; false)[]]
            else .nested += [
              $parts[] | .[1] | values | dq_unescape
              | scan("\\$\\(([\\s\\S]*)\\)|`([^`]*)`") | (.[0] // .[1])
              | select(test("\\S"))
-             | lex($depth + 1)[]
+             | lex($depth + 1; false)[]
            ]
            end)
            | .dl = ($t[3] | endswith("$"))
@@ -666,12 +1109,16 @@ def lex($depth):
   reduce (gsub("\\\\\\n"; "") | chunks) as $chunk ({segs: [], pipe: null};
     # A chunk that reads piped text from the one before is lexed even without
     # a trigger word of its own (`... psql' |` then ` bash`).
-    if .pipe != null or ($chunk | may_matter) then
+    if $all or .pipe != null or ($chunk | may_matter) then
       .pipe as $p | ($chunk | lex_chunk($p)) as $r | .segs += $r.segs | .pipe = $r.pipe
     # A skipped piece of a pipeline passes the piped text on (see split_pipeline).
     elif ($chunk | test("\\|&?[ \\t]*$")) then .
     else .pipe = null end)
   | .segs;
+
+# lex with the fast path for chunks that cannot matter (see lex/2).
+#   $depth - the nesting level, 0 for a whole command.
+def lex($depth): lex($depth; false);
 
 # ------------------------------------------------------------------ check 1
 
@@ -703,13 +1150,6 @@ def grace_periods:
     elif $s[$i] == "--grace-period" then ($s[$i + 1] // empty)
     else empty end;
 
-# The verb of the first oc command in a segment, or "".
-def oc_verb:
-  . as $s
-  | first(range(0; $s | length) as $i
-      | select(($s[$i] | basename) == "oc")
-      | ($s[$i + 1:] | first_positional(oc_value_options)) // "") // "";
-
 # Force deletion. `oc delete` and `oc replace` document --force as
 # "immediately remove resources from API and bypass graceful deletion", and
 # kubectl turns --force without a grace period into --grace-period=0
@@ -720,7 +1160,7 @@ def check_force_delete:
   . as $s
   | select(any($s[]; truthy_force))
   | ([$s | grace_periods] | last // null) as $grace
-  | select(($s | oc_verb | IN("delete", "replace"))
+  | select(any($s | oc_verbs; IN("delete", "replace"))
            or ($grace != null and ($grace | test("^[+-]?0+$"))))
   | msg(1; "`--force` force-deletes: on `oc delete` and `oc replace` it removes the resource at once and bypasses graceful deletion "
            + "(kubectl sets the grace period to 0 when --force has none), and with `--grace-period=0` it does so on any command. "
@@ -741,12 +1181,16 @@ def protected_kinds_text:
   "a PersistentVolumeClaim, PersistentVolume, Argo CD Application or ApplicationSet, namespace or project";
 
 # Whether a resource argument (`pvc`, `pods,pvc`, `persistentvolumeclaim.v1`,
-# `pvc/data`) names a protected kind in its type part.
+# `pvc/data`) names a protected kind in its type part. An empty type part
+# (`/x`, `,`, the /dev/fd/63 of `oc delete <(...)`) names none: jq splits ""
+# into no pieces, so the `// ""` keeps protected_kind from getting null,
+# which would stop the hook with an error instead of a verdict.
 def names_protected_kind:
-  any(split(",")[] | split("/")[0] | ascii_downcase | split(".")[0]; protected_kind);
+  any(split(",")[] | (split("/")[0] // "") | ascii_downcase | (split(".")[0] // ""); protected_kind);
 
 # Every `oc <verb>` in a segment, as {before, words, args}: the words before
-# oc, the words after it, and the positional arguments after the verb. The
+# oc, the words after it, and the positional arguments the verb reads, once
+# for each way oc may read them (see oc_verb_indices and oc_verb_words). The
 # verb is found first, so only an oc with that verb reads all its arguments.
 #   $verb - the oc verb, for example "delete".
 def oc_verb_args($verb):
@@ -754,9 +1198,10 @@ def oc_verb_args($verb):
   | range(0; $s | length) as $i
   | select(($s[$i] | basename) == "oc")
   | $s[$i + 1:] as $w
-  | ($w | first_positional_index(oc_value_options)) as $k
-  | select($k != null and $w[$k] == $verb)
-  | {before: $s[:$i], words: $w, args: ($w[$k + 1:] | positionals(oc_value_options))};
+  | $w | oc_verb_indices as $k
+  | select($w[$k] == $verb)
+  | $w | oc_verb_words($k)
+  | {before: $s[:$i], words: $w, args: positionals(oc_value_options)};
 
 # The resource arguments that name a protected kind. Only resource types are
 # matched, as kubectl reads them: the first argument after the verb
@@ -777,6 +1222,18 @@ def protected_delete_advice:
 def check_oc_delete:
   first(oc_verb_args("delete") | .args | protected_resource_args) as $arg
   | msg(1; "`oc delete` names '\($arg)', \(protected_kinds_text). " + protected_delete_advice);
+
+# oc delete with --raw, in any position (ADR 0035): kubectl then sends an
+# HTTP DELETE to the URI it names ("Raw URI to DELETE to the server",
+# `oc delete --help`, oc 4.22), and the URI can name any object, a namespace
+# or a claim included (`/api/v1/namespaces/web`), without the resource types
+# check_oc_delete reads. The hook does not read the URI, so every one is
+# blocked; `oc get --raw` only reads and stays allowed.
+def check_oc_delete_raw:
+  first(oc_verb_args("delete") | .words[] | select(. == "--raw" or startswith("--raw=")))
+  | msg(1; "`oc delete --raw` sends a DELETE request to the URI it names, which can name any object "
+           + "(\(protected_kinds_text) included), and this hook does not read the URI, so agents never use it. "
+           + protected_delete_advice);
 
 # Whether a word holds text that the shell or a runner fills in when it
 # runs: a variable, a $(...) or `...` (unquoted, the lexer leaves a `$` or a
@@ -811,7 +1268,7 @@ def generated_delete:
     | ($feed != null and $feed.replace == null and (($args[0] // "") | contains("/")))
       or (($args | length) == 0 and (.words | any(.[]; is_filename_option) | not))
       or any($args | to_entries[] | select(.key == 0 or ($args[0] | contains("/")));
-             .value | split("/")[0] | holds_expansion($feed.replace))
+             .value | (split("/")[0] // "") | holds_expansion($feed.replace))
       or any(.words as $w | range(0; $w | length) as $i
              | if $w[$i] == "-f" or $w[$i] == "--filename" then ($w[$i + 1] // "")
                elif ($w[$i] | startswith("--filename=")) then $w[$i][11:]
@@ -839,101 +1296,398 @@ def check_generated_delete:
 # argocd's options that take a separate value, so their value is not read as
 # a subcommand: the global options of argocd
 # (argoproj/argo-cd@17b98d9b6:cmd/argocd/commands/root.go) and the value
-# options of `argocd app delete` (cmd/argocd/commands/app.go) and of `argocd
-# app delete-resource` (cmd/argocd/commands/app_resources.go); `argocd appset
-# delete` has only the boolean -y (cmd/argocd/commands/applicationset.go). A
-# boolean option must never be listed.
+# options of the subcommands the checks below look for: `argocd app delete`
+# and `argocd app confirm-deletion` (-N, --app-namespace;
+# cmd/argocd/commands/app.go), and `argocd app delete-resource` and `argocd
+# app patch-resource` (--patch and --patch-type are patch-resource's own;
+# cmd/argocd/commands/app_resources.go); `argocd appset delete` has only the
+# boolean -y (cmd/argocd/commands/applicationset.go). The list serves every
+# argocd command line, so a boolean option of any subcommand must never be
+# listed: the subcommand after it would be taken for its value. No argocd
+# subcommand defines --patch or --patch-type as a boolean.
 def argocd_value_options:
   ["--config", "--server", "--server-crt", "--client-crt", "--client-crt-key", "--auth-token",
    "--grpc-web-root-path", "--logformat", "--loglevel", "--header", "-H", "--port-forward-namespace",
    "--http-retry-max", "--argocd-context", "--server-name", "--controller-name",
    "--redis-haproxy-name", "--redis-name", "--repo-server-name", "--redis-compress", "--kube-context",
    "--propagation-policy", "-p", "--selector", "-l", "--app-namespace", "-N",
-   "--resource-name", "--kind", "--group", "--namespace", "--project"];
+   "--resource-name", "--kind", "--group", "--namespace", "--project", "--patch", "--patch-type"];
 
-# The argocd subcommands that delete, as {parent: [subcommands]}, with what
-# each one deletes, for the block reason (argoproj/argo-cd@17b98d9b6):
+# Every argocd subcommand of $subs that a segment runs, as a stream of
+# {command: "<parent> <subcommand>", words: <every word after argocd>}.
+# The subcommands are positional words, so options before the parent (`app`,
+# `appset`) and after the subcommand cannot hide them: an option missing
+# from argocd_value_options there only adds one more positional word.
+# Between them, such an option may take the word after it as its value
+# (`argocd app --new-option v delete x`; cobra's stripFlags reads an unknown
+# `--option` without `=value` that way), so when the first positional word
+# after the parent directly follows an option without `=value`, the next
+# positional word counts as the subcommand too. A boolean option looks the
+# same, so this errs towards blocking. argocd defines no alias for any word
+# the checks look for, and cobra matches command names exactly (no prefix
+# matching unless a program turns it on). The program counts by its name and
+# by the names of its release downloads (see is_argocd_name).
+#   $subs - the subcommands to find, as {parent: [subcommands]}.
+def argocd_subcommands($subs):
+  . as $s
+  | range(0; $s | length) as $i
+  | select($s[$i] | basename | is_argocd_name)
+  | $s[$i + 1:] as $w
+  | [$w | positional_indices(argocd_value_options)] as $p
+  | range(0; ($p | length) - 1) as $j
+  | $w[$p[$j]] as $parent
+  | ($subs[$parent] // empty) as $listed
+  | $p[$j + 1] as $k
+  | $p[$j + 2] as $m
+  | (if ($w[$k] | IN($listed[])) then $w[$k]
+     elif ($w[$k - 1] | startswith("-") and (contains("=") | not))
+          and $m != null and ($w[$m] | IN($listed[])) then $w[$m]
+     else empty end) as $sub
+  | {command: "\($parent) \($sub)", words: $w};
+
+# The argocd subcommands that are blocked with any options and arguments, as
+# {parent: [subcommands]}, with what each one does, for the block reason
+# (argoproj/argo-cd@17b98d9b6):
 #   - `app delete` (ADR 0028) deletes an Application, and with its default
 #     --cascade every resource the Application manages;
 #   - `app delete-resource` (D69) deletes resources an Application manages,
 #     of any kind its --kind names, a PersistentVolumeClaim included;
 #   - `appset delete` (D69) deletes ApplicationSets, and with them all their
 #     Applications ("Are you sure you want to delete ... and all its
-#     Applications?").
-# argocd defines no alias for any of these words, and cobra matches command
-# names exactly (no prefix matching unless a program turns it on).
-def argocd_deleting_subcommands: {app: ["delete", "delete-resource"], appset: ["delete"]};
+#     Applications?");
+#   - `app confirm-deletion` (D105, ADR 0035) gets the Application, sets its
+#     argocd.argoproj.io/deletion-approved annotation to the current time and
+#     updates it (NewApplicationConfirmDeletionCommand in app.go). That
+#     releases what a Prune=confirm or Delete=confirm sync option holds back
+#     until it is confirmed: the prunes and deletions of the resources that
+#     carry it (docs/user-guide/sync-options.md).
+def argocd_blocked_subcommands: {app: ["delete", "delete-resource", "confirm-deletion"], appset: ["delete"]};
 
-# The block reason for one deleting argocd subcommand.
-#   $command - "app delete", "app delete-resource" or "appset delete".
-def argocd_delete_what($command):
+# Advice for a block of Argo CD's deletion approval: `argocd app
+# confirm-deletion` and the annotation it writes (see check_deletion_approval).
+def deletion_approval_advice:
+  "A held deletion is approved by a human, after checking what Argo CD would then delete and that a verified backup exists. "
+  + "Stop and ask the maintainer.";
+
+# The block reason for one blocked argocd subcommand.
+#   $command - "app delete", "app delete-resource", "app confirm-deletion" or
+#              "appset delete".
+def argocd_blocked_reason($command):
   if $command == "app delete" then
-    "deletes an Argo CD Application through the Argo CD API, as `oc delete application` does"
+    "deletes an Argo CD Application through the Argo CD API, as `oc delete application` does. " + protected_delete_advice
   elif $command == "app delete-resource" then
     "deletes resources that an Argo CD Application manages through the Argo CD API, of any kind, "
-    + "a PersistentVolumeClaim included, as `oc delete` does, and the hook does not tell one kind from another"
+    + "a PersistentVolumeClaim included, as `oc delete` does, and the hook does not tell one kind from another. "
+    + protected_delete_advice
+  elif $command == "app confirm-deletion" then
+    "sets the argocd.argoproj.io/deletion-approved annotation on an Argo CD Application, which releases the prunes and deletions "
+    + "that a Prune=confirm or Delete=confirm sync option holds back until a human confirms them, so agents never run it. "
+    + deletion_approval_advice
   else
     "deletes an Argo CD ApplicationSet through the Argo CD API, and with it all its Applications, "
-    + "as `oc delete applicationset` does"
+    + "as `oc delete applicationset` does. " + protected_delete_advice
   end;
 
-# A deleting argocd subcommand with any options (ADR 0028, D69): `argocd app
-# delete`, `argocd app delete-resource` or `argocd appset delete` (see
-# argocd_deleting_subcommands). The subcommands are positional words, so
-# options before the parent (`app`, `appset`) and after the subcommand cannot
-# hide them: an option missing from argocd_value_options there only adds one
-# more positional word. Between them, such an option may take the word after
-# it as its value (`argocd app --new-option v delete x`; cobra's stripFlags
-# reads an unknown `--option` without `=value` that way), so when the first
-# positional word after the parent directly follows an option without
-# `=value`, the next positional word counts as the subcommand too. A boolean
-# option looks the same, so this errs towards blocking.
-def check_argocd_delete:
-  . as $s
-  | argocd_deleting_subcommands as $subs
-  | first(range(0; $s | length) as $i
-      | select(($s[$i] | basename) == "argocd")
-      | $s[$i + 1:] as $w
-      | [$w | positional_indices(argocd_value_options)] as $p
-      | range(0; ($p | length) - 1) as $j
-      | $w[$p[$j]] as $parent
-      | ($subs[$parent] // empty) as $deleting
-      | $p[$j + 1] as $k
-      | $p[$j + 2] as $m
-      | if ($w[$k] | IN($deleting[])) then "\($parent) \($w[$k])"
-        elif ($w[$k - 1] | startswith("-") and (contains("=") | not))
-             and $m != null and ($w[$m] | IN($deleting[])) then "\($parent) \($w[$m])"
-        else empty end) as $command
-  | msg(1; "`argocd \($command)` \(argocd_delete_what($command)). " + protected_delete_advice);
+# A blocked argocd subcommand with any options (ADR 0028, D69, D105): `argocd
+# app delete`, `argocd app delete-resource`, `argocd app confirm-deletion` or
+# `argocd appset delete` (see argocd_blocked_subcommands and, for how they
+# are found, argocd_subcommands).
+def check_argocd_blocked:
+  first(argocd_subcommands(argocd_blocked_subcommands) | .command) as $command
+  | msg(1; "`argocd \($command)` \(argocd_blocked_reason($command))");
 
-# An `oc patch` that can destroy data (ADR 0028):
-#   - one that removes finalizers. Without them a resource goes without the
+# A word of a patch or an annotation as the program that reads it decodes
+# it, for the matches of patch_hazard and names_deletion_approval, in lower
+# case. kubectl reads a patch as YAML, of which JSON is a part (oc 4.22
+# applies `-p` text in either), and both decoders turn an escape in a quoted
+# string into its character: JSON's \uXXXX, and YAML's \xXX, \uXXXX and
+# \UXXXXXXXX. So `"fin\u0061lizers"` is finalizers and
+# `"argocd.argoproj.io/deletion-\x61pproved"` is the annotation's key. Only
+# escapes of ASCII characters are decoded, because every word matched is
+# ASCII. JSON's `\/` is a `/` (RFC 8259 section 7, ADR 0035): the API
+# server's JSON decoder reads it so in a patch that reaches it as written,
+# as Argo CD sends patch-resource's --patch (`"path":"\/metadata"` replaces
+# the whole metadata) and kubectl a patch that starts with `{`. kubectl's
+# YAML decoder (go-yaml v2), which reads every other `-p` patch, refuses
+# it, so there it only errs towards blocking. YAML's escaped line break
+# inside a double-quoted string (a `\` before a line break: LF, CR LF, CR,
+# or the NEL, LS or PS that go-yaml v2 reads as one too; the next line's
+# indentation dropped) joins a word across lines, so it is removed with that
+# indentation (ADR 0035). The lexer removes a `\` and an LF as a shell line
+# continuation before this, also inside single quotes, where the shell keeps
+# them, and leaves the next line's indentation in the word, which the
+# callers drop (see without_spaces and without_blanks); so this matters for
+# the other line breaks and for one that a $'...' part decodes
+# (`$'final\\\n  izers'`). Splitting at each backslash keeps the cost linear
+# in the length of the word (a gsub would be quadratic, see `chunks`). An
+# escaped backslash (`\\u0061`) is decoded as if it were not escaped, which
+# errs towards blocking: no word the checks match holds a backslash, so
+# decoding more escapes than the decoder does can only add a match.
+def decoded_text:
+  (if contains("\\") then
+     split("\\") as $p
+     | $p[0] + ([$p[1:][]
+         | if test("^u00[0-7][0-9A-Fa-f]") then (.[3:5] | digits_value(16) | codepoint_text) + .[5:]
+           elif test("^x[0-7][0-9A-Fa-f]") then (.[1:3] | digits_value(16) | codepoint_text) + .[3:]
+           elif test("^U000000[0-7][0-9A-Fa-f]") then (.[7:9] | digits_value(16) | codepoint_text) + .[9:]
+           elif test("^(?:\\r\\n?|[\\n\u0085\u2028\u2029])") then sub("^(?:\\r\\n?|[\\n\u0085\u2028\u2029])[ \\t]*"; "")
+           elif startswith("/") then .
+           else "\\" + . end] | join(""))
+   else . end)
+  | ascii_downcase;
+
+# A text with every blank (space, tab, CR, LF) removed, so that a key that a
+# YAML escaped line break folds across lines (`final` and `izers` with the
+# next line's indentation between them, see decoded_text) is matched whole.
+def without_blanks: [blank_words] | join("");
+
+# A text with its spaces and tabs removed and its line breaks kept (ADR
+# 0035), for patch_hazard. A key that an escaped line break folds across
+# lines is matched whole (`final` and `  izers`), and so is a block YAML
+# value in which the lexer has left the next line's indentation after
+# removing the escaped line break as a shell line continuation (see
+# decoded_text; `path: "/meta    data"`), while the line breaks that end a
+# value and start the next key stay. without_blanks would join those lines
+# too (`replacepath:`), and no decoder joins words across a line break that
+# is not escaped. Plain string splits keep the cost linear.
+def without_spaces: split(" ") | join("") | split("\t") | join("");
+
+# YAML node properties that may stand before a value and leave it the same
+# string: a tag (`!!str`, `!<tag:yaml.org,2002:str>`) and an anchor (`&a`),
+# and a comment, which runs to the end of its line, after which the value
+# starts on the next line (`path: # all of it`, then `  /metadata`) (ADR
+# 0035). kubectl decodes every patch that does not start with `{` with
+# go-yaml v2 (k8s.io/apimachinery util/yaml ToJSON, sigs.k8s.io/yaml
+# YAMLToJSON), which accepts them there. A `#` right after the colon of a
+# JSON key cannot occur in valid JSON, so it never hides a JSON value.
+# go-yaml needs a blank after a tag or an anchor, but patch_hazard also
+# matches the patch with its spaces removed (see without_spaces), which
+# glues a tag to its value (`path:!!str"/metadata"`), so no blank is
+# required here; a tag glued to a value in the text as written
+# (`path: !!str/metadata`) is a tag with an empty value for go-yaml, which
+# is the path "" of the whole object, so that counts too. A tag or an
+# anchor never holds `!`, `&`, `#` or a quote here, so each property starts
+# at one of those characters and the pattern has one way to match, which
+# keeps it linear.
+def yaml_properties_re: "(?:(?:!(?:<[^>]*>|[^\\s,{}\\[\\]!&#\"']*)|&[^\\s,{}\\[\\]!&#\"']+)\\s*|#[^\\n]*\\n\\s*)*";
+
+# A patch, in decoded_text's lower case, that replaces or removes a whole
+# object or its whole metadata, which drops its finalizers without naming
+# them (ADR 0035):
+#   - a JSON patch operation whose path is "" (the whole object) or
+#     "/metadata", in JSON or YAML (`"path":"/metadata"`, `path: /metadata`),
+#     also after a YAML tag, anchor or comment (see yaml_properties_re);
+#     the API server accepts a `replace` there that gives no UID, because it
+#     keeps the existing one (k8s.io/apiserver pkg/registry/rest, BeforeUpdate:
+#     "Use the existing UID if none is provided");
+#   - a strategic merge `$patch: replace` or `$patch: delete` directive, which
+#     replaces the map it stands in with the patch or empties it, and
+#     `$retainKeys`, which keeps only the keys it lists (k8s.io/apimachinery
+#     pkg/util/strategicpatch, handleDirectiveInMergeMap and
+#     applyRetainKeysDirective). The hook cannot tell which map a directive
+#     stands in, so each one counts, wherever it is;
+#   - a `path` or `$patch` key whose YAML value is a block scalar (`|`, `>`)
+#     or an alias (`*a`), which go-yaml also reads as a plain string there:
+#     the hook does not read those values, so each one counts, which errs
+#     towards blocking.
+def whole_metadata_patch_re:
+  "(?:^|[^a-z0-9_])path[\"']?\\s*:\\s*" + yaml_properties_re
+  + "(?:\"(?:/metadata)?\"|'(?:/metadata)?'|/metadata(?=[\\s,}\\]]|$)|[|>*])"
+  + "|\\$patch[\"']?\\s*:\\s*" + yaml_properties_re + "(?:[\"']?(?:replace|delete)|[|>*])"
+  + "|\\$retainkeys";
+
+# A `path` key whose value is only a YAML tag (`path: !!str`, also after an
+# anchor), with nothing after it on its line but a comment, or in a flow
+# mapping only a blank before the `,` or `}` (`{path: !!str }`): go-yaml
+# reads it as the empty string, the path "" of the whole object (ADR 0035).
+# A tag whose value starts on the next line (`path: !!str` then
+# `  /metadata`) also counts, which errs towards blocking. It is matched
+# only on a patch as written (see patch_hazard): with the spaces removed, a
+# tag and the value after it are glued together and look like a tag alone.
+def tag_only_path_re:
+  "(?:^|[^a-z0-9_])path[\"']?\\s*:[ \\t]*(?:&[^\\s,{}\\[\\]!&#\"']+[ \\t]+)?"
+  + "!!?(?:<[^>]*>|[^\\s,{}\\[\\]!&#\"']*)(?:[ \\t]*(?:#[^\\n]*)?(?=[\\r\\n]|$)|[ \\t]+(?=[,}\\]]))";
+
+# What a word of a patch does that agents never do, or nothing (ADR 0028,
+# D105, ADR 0035). The word is compared in lower case:
+#   - it names finalizers. Without them a resource goes without the
 #     protection they hold (kubernetes.io/pvc-protection, Argo CD's resources
 #     finalizer). A merge patch that sets the list, a JSON patch `remove` and
 #     a strategic merge $deleteFromPrimitiveList each remove some, and the
 #     hook cannot tell all of them from an addition, so it matches every
 #     patch that names finalizers, additions included;
-#   - one that sets a PV's reclaim policy to Delete, which deletes the volume
-#     with its claim, or (D69) to the deprecated Recycle, which wipes the
-#     volume's data (`rm -rf /thevolume/*`) when its claim is released: its
-#     patch names persistentVolumeReclaimPolicy and, in the same word, Delete,
-#     Recycle or a shell expansion, whose value cannot be checked. Setting
-#     Retain stays allowed. Other values are not matched.
-# Every word after `oc` is read, in lower case, because kubectl takes the
+#   - it sets a PV's reclaim policy to Delete, which deletes the volume with
+#     its claim, or (D69) to the deprecated Recycle, which wipes the volume's
+#     data (`rm -rf /thevolume/*`) when its claim is released: it names
+#     persistentVolumeReclaimPolicy and, in the same word, Delete, Recycle or
+#     a shell expansion, whose value cannot be checked. Setting Retain stays
+#     allowed. Other values are not matched;
+#   - it replaces or removes a whole object or its whole metadata, and with
+#     it the finalizers, without naming them (see whole_metadata_patch_re).
+# The word is read as the patch decoder reads it (see decoded_text), so an
+# escape such as fin\u0061lizers counts too, both as it is and with its
+# spaces and tabs removed (see without_spaces): a key folded across lines
+# counts only without them, and the whole-metadata rule needs the blank or
+# line break that ends a YAML value (`path: /metadata` before the next key),
+# which the second reading keeps. A tag with no value counts only as written
+# (see tag_only_path_re).
+def patch_hazard:
+  decoded_text as $written
+  | ($written, ($written | without_spaces))
+  | if contains("finalizers") then "changes finalizers"
+    elif contains("persistentvolumereclaimpolicy") and test("delete|recycle|[$`]") then
+      "sets a PersistentVolume's reclaim policy to Delete or Recycle (or to a value only the shell knows)"
+    elif test(whole_metadata_patch_re) or (. == $written and test(tag_only_path_re)) then
+      "replaces or removes a whole object or its whole metadata (a JSON patch on the path \"\" or \"/metadata\", "
+      + "or a strategic merge `$patch: replace`, `$patch: delete` or `$retainKeys`), and with it the finalizers"
+    else empty end;
+
+# Why a finalizer or reclaim-policy patch is blocked, and what is allowed.
+def patch_advice:
+  "Without its finalizers a resource is deleted without the protection they hold, "
+  + "a PersistentVolume whose reclaim policy is Delete is deleted with its claim, "
+  + "and one whose policy is Recycle has its data wiped when its claim is released, so agents never do any of these. "
+  + "Setting the reclaim policy to Retain is allowed (`oc patch pv <name> -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Retain\"}}'`). "
+  + "For anything else, stop and ask the maintainer." + text_only_hint;
+
+# An `oc patch` that can destroy data (ADR 0028, ADR 0035; see
+# patch_hazard). Every word after `oc` is read, because kubectl takes the
 # patch from -p, --patch, -p=... or a joined -p..., and a resource name
 # rarely holds these words. A patch from --patch-file, or from another
 # command's output, is not visible to the hook.
 def check_oc_patch:
-  first(oc_verb_args("patch") | .words[] | ascii_downcase
-    | if contains("finalizers") then "changes finalizers"
-      elif contains("persistentvolumereclaimpolicy") and test("delete|recycle|[$`]") then
-        "sets a PersistentVolume's reclaim policy to Delete or Recycle (or to a value only the shell knows)"
-      else empty end) as $what
-  | msg(1; "this `oc patch` \($what). Without its finalizers a resource is deleted without the protection they hold, "
-           + "a PersistentVolume whose reclaim policy is Delete is deleted with its claim, "
-           + "and one whose policy is Recycle has its data wiped when its claim is released, so agents never do any of these. "
-           + "Setting the reclaim policy to Retain is allowed (`oc patch pv <name> -p '{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Retain\"}}'`). "
-           + "For anything else, stop and ask the maintainer." + text_only_hint);
+  first(oc_verb_args("patch") | .words[] | patch_hazard) as $what
+  | msg(1; "this `oc patch` \($what). " + patch_advice);
+
+# An `argocd app patch-resource` that can destroy data (D105, ADR 0035): the
+# rule of check_oc_patch, read the same way, because patch-resource sends
+# its --patch, in any of its three --patch-type formats, to a resource that
+# an Application manages, a PersistentVolumeClaim among them
+# (NewApplicationPatchResourceCommand in app_resources.go). Every word after
+# argocd is read, so the patch counts wherever it stands (`--patch X`,
+# `--patch=X`). It is found like the blocked subcommands (see
+# argocd_subcommands); a patch-resource whose patch is harmless, and the
+# argocd subcommands that only read (`app get`, `app get-resource`, `app
+# resources`), stay allowed.
+def check_argocd_patch_resource:
+  first(argocd_subcommands({app: ["patch-resource"]}) | .words[] | patch_hazard) as $what
+  | msg(1; "this `argocd app patch-resource` \($what). It sends the patch through the Argo CD API to a resource that an Application manages, "
+           + "and the same patch through `oc patch` is blocked too. " + patch_advice);
+
+# Whether a word names Argo CD's deletion-approved annotation (D105). The key
+# is argocd.argoproj.io/deletion-approved; only its last part is matched, in
+# lower case, so that a JSON patch path, which writes the / of the key as ~1
+# (/metadata/annotations/argocd.argoproj.io~1deletion-approved), counts too.
+# The word is read as a patch decoder reads it (see decoded_text), with its
+# blanks removed (see without_blanks), so `deletion\u002dapproved` and a key
+# folded across lines count as well.
+def names_deletion_approval: decoded_text | without_blanks | contains("deletion-approved");
+
+# The runner words after which the next word is surely the program that runs,
+# with the later words as its arguments: each reads no positional word of its
+# own before the command, and stops reading its own options at the first
+# word that is not one (getopt's "+" in sudo, env, ionice, setsid, strace,
+# xargs and procps's watch; coreutils' nice; bash's exec, command, builtin,
+# eval and time; nohup, zsh's noglob and the shell keywords). A runner that
+# permuted its arguments would still run the word right after it, the first
+# one that is not its option, so this does not rely on the "+". Left out of
+# runner_words, which errs the other way (see is_command_place): ssh and
+# rsh, whose first positional word is a host, after which OpenSSH reads
+# options again, so `ssh oc -n argocd app patch ...` runs argocd on the host
+# oc (rsh is oc's verb too); debug, oc's verb; chroot, flock and timeout,
+# whose first positional word is a directory, a lock file or a duration
+# (timeout counts with a duration, see is_sure_command_place); stdbuf, which
+# needs an option; doas, which is left out until its ports are checked; and
+# find's -exec words, which follow find's own words.
+def sure_runner_words:
+  runner_words - ["ssh", "rsh", "debug", "chroot", "flock", "timeout", "stdbuf", "doas",
+                  "-exec", "-execdir", "-ok", "-okdir"];
+
+# Whether a word is a duration as timeout reads it, in its plain form (`30`,
+# `1.5m`).
+def is_duration: test("^[0-9]+(?:\\.[0-9]+)?[smhd]?$");
+
+# Whether the next word after a list of words is surely the program that the
+# segment runs: each word is an assignment, a word of sure_runner_words, or
+# `timeout` with a plain duration right after it, or that duration
+# (`timeout 30 oc get ...`). This errs towards "not sure": a runner's own
+# options (`sudo -u root`, `timeout -s KILL 30`) make it false, because the
+# hook does not know which of them take a value, and the word after such an
+# option may be its value (`env -u oc -v argocd ...` unsets a variable named
+# oc and runs argocd).
+def is_sure_command_place:
+  . as $b
+  | all(range(0; $b | length);
+        . as $j
+        | ($b[$j] | is_assignment or IN(sure_runner_words[]))
+          or ($b[$j] == "timeout" and (($b[$j + 1] // "") | is_duration))
+          or ($j > 0 and $b[$j - 1] == "timeout" and ($b[$j] | is_duration)));
+
+# Whether the `oc` at index $oc of a segment surely runs and only reads, so
+# that an `argocd` word that is the value of one of its options is surely
+# not a program (see check_deletion_approval): the words before it put it
+# in the program's place for sure (see is_sure_command_place), and every
+# verb that oc may run (see oc_verb_indices) is get or describe. Both are
+# needed: with a runner's options before it, the `oc` may be one of their
+# values (`sudo -u oc -n argocd app patch ...`), and a verb that runs a
+# program, such as `oc run ... -- sudo -n argocd app patch ...`, runs
+# argocd in a pod. Each verb reading must be get or describe, because a
+# word that one reading takes for the verb may be an option's value in the
+# other (`oc --field-manager get run ...` runs `oc run`). No verb at all
+# leaves oc printing its help, but counts as not sure all the same.
+#   $oc - the index of the `oc` word in the segment.
+def oc_surely_reads($oc):
+  . as $s
+  | ($s[:$oc] | is_sure_command_place)
+    and ([$s[$oc + 1:] | oc_verb_indices as $k | $s[$oc + 1 + $k]] as $v
+         | ($v | length) > 0 and all($v[]; IN("get", "describe")));
+
+# Argo CD's deletion approval set by other means than `argocd app
+# confirm-deletion` (D105, "the annotation spelling"; ADR 0035). Argo CD
+# documents the manual way: apply the annotation
+# argocd.argoproj.io/deletion-approved to the Application
+# (docs/user-guide/sync-options.md). So it blocks:
+#   - an `oc annotate` or `oc patch` that names it in any word after `oc`,
+#     whatever the resource and whatever the value, its removal (`KEY-`)
+#     included, as the patch rule matches finalizer additions too;
+#   - any argocd command that names it. `argocd app patch` and `argocd app
+#     patch-resource` write it with their --patch, and `argocd app create
+#     --upsert` merges its --annotations into an existing Application
+#     (server/application/application.go, updateApp with merge). The hook
+#     does not tell these from an argocd command that only prints such a
+#     key, nor from a command in which `argocd` is only an argument
+#     (`grep -rn argocd docs/deletion-approved.md`), which errs towards
+#     blocking; the maintainer confirmed this reading as built (D109). It
+#     does not look for the subcommand either, because two options that
+#     argocd_value_options lacks (`argocd app --repo <url> --path <dir>
+#     create`) would hide it from argocd_subcommands. `argocd app set` has
+#     no option that sets an annotation. Every `argocd` word counts, after
+#     any wrapper and under argocd's download names too (see
+#     is_argocd_name), except the value of an option of the segment's first
+#     oc when that oc surely runs and only reads (see oc_surely_reads): in
+#     `oc get application x -n argocd -o jsonpath=...`, `argocd` is
+#     upstream Argo CD's default namespace (or a context named so), not a
+#     program.
+# Read-only commands stay allowed: `oc get` or `oc describe` of the
+# annotation, also in a namespace or context named argocd, and an
+# `oc annotate` of any other key, Argo CD's own included
+# (`argocd.argoproj.io/refresh=hard`).
+def check_deletion_approval:
+  . as $s
+  | (first(range(0; $s | length) as $j | select(($s[$j] | basename) == "oc") | $j) // null) as $oc
+  # Computed once per segment: it does not depend on the argocd word.
+  | ($oc != null and ($s | oc_surely_reads($oc))) as $oc_reads
+  | first(
+      ((oc_verb_args("annotate") | {how: "oc annotate", words}),
+       (oc_verb_args("patch") | {how: "oc patch", words}),
+       (range(0; $s | length) as $i | select($s[$i] | basename | is_argocd_name)
+        | select(($oc_reads and $oc < $i - 1 and ($s[$i - 1] | IN(oc_value_options[]))) | not)
+        | {how: "argocd", words: $s[$i + 1:]}))
+      | select(any(.words[]; names_deletion_approval)) | .how) as $how
+  | msg(1; "this `\($how)` command names Argo CD's argocd.argoproj.io/deletion-approved annotation, the one `argocd app confirm-deletion` writes. "
+           + "On an Application it releases the prunes and deletions that a Prune=confirm or Delete=confirm sync option holds back, "
+           + "whoever sets it, so agents never set or remove it. "
+           + deletion_approval_advice + text_only_hint);
 
 def check_db_wipe:
   . as $s
@@ -1091,6 +1845,23 @@ def db_commands:
         else empty end
     else empty end;
 
+# Every Redis client in a segment, as {kind, name, args} like db_commands:
+# redis-cli (D105, ADR 0035), the client that the redis images of the
+# clusters ship. It runs any Redis command, FLUSHALL included, so in the
+# cluster it is blocked whatever its options and arguments, `redis-cli ping`
+# too. It is not one of db_commands, because those also get the target check
+# on the agent's own host, and the answer to D105 keeps a redis-cli there
+# allowed: the clusters' Redis answers on this host only through a
+# port-forward, which check_port_forward blocks. Other Redis-protocol
+# programs (valkey-cli, keydb-cli, redis-benchmark) are not listed; ADR
+# 0035 records them as open.
+def redis_clients:
+  . as $s
+  | range(0; $s | length) as $i
+  | ($s[$i] | basename) as $b
+  | select($b == "redis-cli")
+  | {kind: "redis", name: $b, args: $s[$i + 1:]};
+
 # Every database target of one command (sources 1 to 4 of ADR 0024 section 4,
 # check 2). Explicit sources are always checked: every inline variable the
 # command kind reads, every option and every connection string, even where the
@@ -1156,34 +1927,52 @@ def local_db_advice:
 def may_name_program:
   (test("^/(?:etc|var|run|proc|sys|dev|usr/share)/") | not) or test("/s?bin/[^/]*$");
 
-# A database command run through oc exec, oc rsh or oc debug. The words are
+# A database command, or (D105) a Redis client (see redis_clients), run
+# through oc exec, oc rsh or oc debug. The words are
 # stripped of quotes and backslashes and cut at blanks, so an oc inside a
 # quoted command string (`parallel 'oc exec {} -- psql'`) and a client written
-# in quotes inside a script (`sh -c '"psql" ...'`) count too. Only the command
-# part of the first oc exec, rsh or debug counts (see in_cluster_command), so
-# a pod, container or namespace named like a client does not; that command
-# part runs to the end of the segment, so it holds every later one. After a
+# in quotes inside a script (`sh -c '"psql" ...'`) count too. When a word holds
+# a `$'` or a `$"`, the segment is read a second time with that word's
+# $'...' and $"..." parts read as bash reads them (see unquoted_texts), and
+# either reading counts (ADR 0035). Only the command
+# part of the first oc exec, rsh or debug counts (see in_cluster_command), in
+# each way oc may read its verb and the words that verb parses (see
+# oc_verb_indices and oc_verb_words, ADR 0035), so a pod, container or
+# namespace named like a client does not; that command part runs to the end
+# of the segment, so it holds every later one. After a
 # shell word in the command part, the words are also cut at shell
 # separators, so a client inside a `sh -c` script counts after a `;` without
 # a space (`sh -c 'cd tmp;psql'`). Elsewhere they are not, because ( ) | < >
 # in a search pattern or a message are text: `grep -E "oc (exec|rsh) .* psql"`
 # names no verb, and `rg "oc exec [^ ]+ -- (psql|mysql)"` no client.
 def check_in_cluster:
-  [.[] | unquoted_text | blank_words] as $f
-  | first(range(0; $f | length) as $i
-      | select(($f[$i] | basename) == "oc")
-      | $f[$i + 1:] as $rest
-      | ($rest | first_positional_index(oc_value_options)) as $v
-      | select($v != null and ($rest[$v] | IN("exec", "rsh", "debug")))
-      | {verb: $rest[$v], part: ($rest[$v + 1:] | in_cluster_command($rest[$v]))}) as $oc
-  | (first($oc.part | to_entries[] | select(.value | is_shell_word) | .key) // null) as $shell
-  | (if $shell == null then $oc.part
-     else $oc.part[:$shell + 1]
-          + [$oc.part[$shell + 1:][] | splits("[;&|()`<>]+") | select(length > 0)] end) as $words
-  | first($words | map(select(may_name_program)) | db_commands) as $c
-  | msg(2; "`\($c.name)` runs inside the cluster through `oc \($oc.verb)`, so its database is not local, whatever its options say. "
-           + "Agents never run database commands in the cluster; stop and ask the maintainer."
-           + text_only_hint);
+  . as $s
+  | first(
+      ([$s[] | first(unquoted_texts) | blank_words],
+       (select(any($s[]; test("\\$['\"]"))) | [$s[] | last(unquoted_texts) | blank_words]))
+      | . as $f
+      | first(range(0; $f | length) as $i
+          | select(($f[$i] | basename) == "oc")
+          | $f[$i + 1:] as $rest
+          | [$rest | oc_verb_indices | select($rest[.] | IN("exec", "rsh", "debug"))]
+          | select(length > 0)
+          | [.[] as $v | $rest | oc_verb_words($v) | {verb: $rest[$v], part: in_cluster_command($rest[$v])}]) as $readings
+      | $readings[] | .verb as $verb | .part
+      | (first(to_entries[] | select(.value | is_shell_word) | .key) // null) as $shell
+      | (if $shell == null then .
+         else .[:$shell + 1] + [.[$shell + 1:][] | splits("[;&|()`<>]+") | select(length > 0)] end)
+      | first(map(select(may_name_program)) | (db_commands, redis_clients))
+      | {verb: $verb, name, kind}) as $c
+  | if $c.kind == "redis" then
+      msg(2; "`\($c.name)` runs inside the cluster through `oc \($c.verb)`, so it reaches the Redis there with any command, FLUSHALL included, "
+             + "whatever its options say. Agents never run a Redis client in the cluster, `redis-cli ping` included; stop and ask the maintainer. "
+             + "A redis-cli on this host is not blocked."
+             + text_only_hint)
+    else
+      msg(2; "`\($c.name)` runs inside the cluster through `oc \($c.verb)`, so its database is not local, whatever its options say. "
+             + "Agents never run database commands in the cluster; stop and ask the maintainer."
+             + text_only_hint)
+    end;
 
 # Whether the remote part of an `oc port-forward` port spec
 # ([LOCAL_PORT:]REMOTE_PORT) reaches a database: PostgreSQL's 5432, MySQL's
@@ -1193,21 +1982,26 @@ def check_in_cluster:
 # `mysqlx`, `redis`, `tcp-redis` and `tcp-sentinel` count) or is db.
 # Sentinel counts because its SENTINEL SET, REMOVE and FAILOVER commands
 # reconfigure the Redis servers it monitors (Redis docs, "High availability
-# with Redis Sentinel").
+# with Redis Sentinel"). A number may carry a leading `+` (ADR 0035): for a
+# Service, kubectl reads the remote port with Go's strconv.Atoi, which
+# accepts the sign, and forwards the plain number
+# (translateServicePortToTargetPort, k8s.io/kubectl pkg/cmd/portforward), so
+# `15432:+5432` forwards PostgreSQL.
 def database_port:
-  if test("^[0-9]+$") then tonumber | IN(5432, 3306, 33060, 6379, 26379)
+  if test("^\\+?[0-9]+$") then ltrimstr("+") | tonumber | IN(5432, 3306, 33060, 6379, 26379)
   else ascii_downcase | test("postgres|mariadb|sql|redis|sentinel|^db$") end;
 
 # An `oc port-forward` to a database port (ADR 0028; Redis since D69). oc
 # listens on localhost by default (--address), so the database in the cluster
 # then answers on localhost, and every client this check counts as local would
-# reach it. No Redis client is among the listed commands (see db_commands), so
-# a forwarded Redis would be reached with no check at all; the port-forward is
-# the one point where the hook sees it. A port spec counts when its remote
-# part is a database port (see database_port), or holds a shell expansion or
-# the replace string of xargs or parallel, which cannot be checked (see
-# holds_expansion); and when xargs or parallel append their input words, the
-# ports cannot be seen at all.
+# reach it. No Redis client is among the listed commands (see db_commands),
+# and a redis-cli on the agent's own host is not checked (see redis_clients),
+# so a forwarded Redis would be reached with no check at all; the
+# port-forward is the one point where the hook sees it. A port spec counts
+# when its remote part is a database port (see database_port), or holds a
+# shell expansion or the replace string of xargs or parallel, which cannot be
+# checked (see holds_expansion); and when xargs or parallel append their
+# input words, the ports cannot be seen at all.
 # The first positional word after the verb is the target (TYPE/NAME or a
 # pod); the rest are port specs. An empty port spec has an empty remote
 # part, which is no database port. A database served on another port is not
@@ -1220,7 +2014,7 @@ def check_port_forward:
       end) as $port
   | msg(2; "`oc port-forward` forwards \($port), "
            + "which is a PostgreSQL, MySQL, MariaDB or Redis port or cannot be checked. A port-forward makes the database or Redis in the cluster answer on localhost, "
-           + "where this check would take a database for a local one and does not check Redis clients at all. "
+           + "where this check would take a database for a local one and does not check a Redis client on this host at all. "
            + "Agents never connect to a database or Redis in the cluster; stop and ask the maintainer."
            + text_only_hint);
 
@@ -1264,8 +2058,8 @@ def verdict:
       # matter, which keeps long commands cheap.
       [$cmd | gsub("\\\\\\n"; "") | (if test("<<") then strip_heredocs else . end) | lex(0)[]] as $segs
       | (first(($segs | scoped_segments[] | .vars as $vars | .seg
-                | (check_kubectl, check_force_delete, check_oc_delete, check_argocd_delete, check_oc_patch,
-                   check_db_wipe, check_sea_orm_wipe,
+                | (check_kubectl, check_force_delete, check_oc_delete, check_oc_delete_raw, check_argocd_blocked, check_oc_patch,
+                   check_argocd_patch_resource, check_deletion_approval, check_db_wipe, check_sea_orm_wipe,
                    check_in_cluster, check_port_forward, check_db_target($vars), check_import_source($vars))),
                ($segs | check_generated_delete)) // null) as $why
       | if $why == null then "allow" else "block\n\($why)" end
