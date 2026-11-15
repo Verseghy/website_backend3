@@ -229,8 +229,12 @@ chrono = "0.4"
 # The compiled-in tz database of src/domain/budapest.rs, pinned exactly (ADR
 # 0010 point 5): new tz data can move the Budapest wall time of a stored
 # instant. 0.10.4 carries tz data 2025b, which budapest::TZ_DATA_VERSION records
-# and a unit test checks. loco-rs 1.2.0's scheduler (tokio-cron-scheduler 0.15)
-# already builds this release, so it adds no crate to Cargo.lock.
+# and a unit test checks; its Budapest table ends in 2099
+# (budapest::CHRONO_TZ_LAST_CHANGE_YEAR). A bump follows the two-sided tz-data
+# procedure of ADR 0041 §3, with the midnight snapshot of tests/tz_parity and
+# its parity test against PostgreSQL's tz data.
+# loco-rs 1.2.0's scheduler (tokio-cron-scheduler 0.15) already builds this
+# release, so it adds no crate to Cargo.lock.
 chrono-tz = "=0.10.4"
 # Metrics library (ADR 0023 §9), picked by the bootstrap PR after checking the
 # releases on 2026-10-24: `prometheus-client` (0.25.1 of 2026-09-01), the
@@ -311,8 +315,9 @@ axum-test = "17"
 # drops its database (tests/support, tests/models/task_lock.rs).
 futures-util = "0.3"
 # The committed snapshots of the /api/v1 OpenAPI document (ADR 0005 §4): "a
-# snapshot change is an API change", and of the schema that the migrations
-# create (tests/schema, ADR 0009), and the inline snapshot of the session
+# snapshot change is an API change", of the schema that the migrations
+# create (tests/schema, ADR 0009) and of backend3's Budapest midnights
+# (tests/tz_parity, ADR 0041 §2), and the inline snapshot of the session
 # cookie's attributes (tests/requests/auth_login.rs). CI sets CI=true and
 # INSTA_UPDATE=no, so a mismatch fails and no .snap.new (or, for the inline
 # snapshot, .pending-snap) draft is written. No extra features.

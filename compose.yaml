@@ -6,12 +6,17 @@
 #
 # - The major version matches production: PostgreSQL 18. The image is pinned
 #   by the digest of its multi-arch index; a bump changes tag and digest
-#   together.
+#   together. The image also brings the tz data that PostgreSQL's
+#   `AT TIME ZONE` and the Budapest-midnight check use, so a bump states the
+#   image's tz data version (the first line of /usr/share/zoneinfo/tzdata.zi)
+#   and passes the parity test of tests/tz_parity (ADR 0041 §3).
 # - The locale matches production too: initdb runs with the builtin C.UTF-8
 #   locale (POSTGRES_INITDB_ARGS below). CI's Test job checks it.
 # - The credentials are local throwaway values, not secrets. POSTGRES_USER is
 #   the image's bootstrap superuser, so it may CREATE DATABASE for Loco's
-#   per-test databases (`_loco_test_<random>_<timestamp>`).
+#   per-test databases (`_loco_test_<random>_<timestamp>`), and pg_read_file
+#   the image's tzdata.zi for the tz data version that tests/tz_parity
+#   checks and reports (ADR 0041 §2).
 # - All three local databases exist from the first start: backend3_test
 #   (POSTGRES_DB), and backend3_development and backend3_e2e from the init
 #   script below. They cannot come from `backend3-cli db create`: loco-rs

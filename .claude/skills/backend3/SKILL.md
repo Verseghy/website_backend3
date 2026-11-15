@@ -112,7 +112,12 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    `EventWallTime::from_instant`, whose error is a defect in the stored data
    (a server error), and turn a received one into an instant with
    `to_midnight` or `to_instant`, whose error (a spring-gap time, a day
-   without a midnight) is a validation error on the field (ADR 0010 point 6).
+   without a midnight, a day after `budapest::CHRONO_TZ_LAST_CHANGE_YEAR`:
+   `NonexistentWallTime`, `NoMidnight`, `AfterTzTable`) is a validation error
+   on the field (ADR 0010 point 6, ADR 0041 §2). `to_midnight` refuses every
+   day after that year because backend3 stores none (chrono-tz's table ends
+   there); the public month and grid bounds, which are never stored, use
+   `budapest::date_to_midnight`, which converts every year.
    Never format or parse these forms in a handler. `src/domain/date_text.rs`
    holds the strict text forms, which other pure code may reuse; whether the
    date part of the public keyset cursor reads them, or backend2's
@@ -404,7 +409,11 @@ is its specification; each slice adds the step for its own tables.
    entry (ADR 0011 section 4).
 4. **Refusals** (section 4.2): an uncovered defect instance, a precondition
    mismatch or a constraint violation stops the import with a message that
-   names the defect id, the row id and the rule.
+   names the defect id, the row id and the rule. A legacy calendar day
+   converts through `budapest::date_to_stored_midnight`, never
+   `date_to_midnight`, and its `NoMidnight` or `AfterTzTable` (a day after
+   `budapest::CHRONO_TZ_LAST_CHANGE_YEAR`) stops the import and reports the
+   row (ADR 0010 point 6, ADR 0041 §2).
 5. **Verification and report**: add the table to the row counts and digests
    of section 10 and to the run report of section 11.3: the step's data joins
    `RunSummary` in `src/domain/import_mysql/report.rs`, which renders

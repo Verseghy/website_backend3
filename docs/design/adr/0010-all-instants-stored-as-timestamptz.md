@@ -1,6 +1,6 @@
 # 0010. All instants stored as timestamptz
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0041](0041-budapest-midnight-parity-and-a-two-sided-tz-data-procedure.md) (2026-11-01)
 - Decision questions: Q9
 
 ## Context

@@ -24,9 +24,10 @@
 //! - **Reading does not convert.** A received day or wall time that has the
 //!   form is read even if it has no instant: a wall time that the spring
 //!   change skips, or one of the few days before 1984 without a Budapest
-//!   midnight. The conversion to an instant refuses it, so that the admin
-//!   API answers on the field (ADR 0010 point 6) instead of refusing the
-//!   whole body.
+//!   midnight. So is a day after `budapest::CHRONO_TZ_LAST_CHANGE_YEAR`,
+//!   which is not stored (ADR 0041 §2). The conversion to an instant
+//!   refuses it, so that the admin API answers on the field (ADR 0010
+//!   point 6) instead of refusing the whole body.
 //!
 //! Both derive `ts_rs::TS` as `string` and are exported to
 //! `admin/src/bindings/`, so an admin DTO with such a field gets a named
@@ -101,15 +102,20 @@ impl CalendarDate {
     }
 
     /// The instant of this day's Europe/Budapest midnight, the form in which
-    /// a calendar-day column stores it (ADR 0010 point 2).
+    /// a calendar-day column stores it (ADR 0010 point 2), through
+    /// [`budapest::date_to_stored_midnight`]: every admin write of a day
+    /// converts here.
     ///
     /// # Errors
     ///
     /// [`BudapestTimeError::NoMidnight`] for a day on which the clocks
-    /// skipped 00:00, which happened only on a few days before 1984. The
-    /// admin API answers it on the field.
+    /// skipped 00:00, which happened only on a few days before 1984, and
+    /// [`BudapestTimeError::AfterTzTable`] for a day after 31 December of
+    /// [`budapest::CHRONO_TZ_LAST_CHANGE_YEAR`], whose midnight backend3's
+    /// and PostgreSQL's tz data may not share (ADR 0041 §2). The admin API
+    /// answers both on the field.
     pub fn to_midnight(self) -> Result<DateTime<Utc>, BudapestTimeError> {
-        budapest::date_to_midnight(self.0)
+        budapest::date_to_stored_midnight(self.0)
     }
 
     /// The calendar day.
@@ -581,6 +587,11 @@ mod tests {
                 date: skipped.date()
             })
         );
+        // So is a day after the end of chrono-tz's table (ADR 0041 §2).
+        let first = format!("{}-01-01", budapest::CHRONO_TZ_LAST_CHANGE_YEAR + 1);
+        let late: CalendarDate = serde_json::from_value(json!(first)).expect("in the form");
+        let date = late.date();
+        assert_eq!(late.to_midnight(), Err(B::AfterTzTable { date }));
     }
 
     #[test]
@@ -704,15 +715,22 @@ mod tests {
         }
 
         // Every day converts to its Budapest midnight and back, except the
-        // few days before 1984 on which the clocks skipped 00:00.
+        // few days before 1984 on which the clocks skipped 00:00 and the
+        // days after the end of chrono-tz's table, which are not stored
+        // (ADR 0041 §2).
         #[test]
         fn every_calendar_date_round_trips_through_its_midnight(date in days()) {
+            let after_the_table = date.date().year() > budapest::CHRONO_TZ_LAST_CHANGE_YEAR;
             match date.to_midnight() {
-                Ok(midnight) => prop_assert_eq!(CalendarDate::from_midnight(midnight), Ok(date)),
-                Err(error) => prop_assert!(
-                    matches!(error, B::NoMidnight { .. }) && date.date().year() < 1984,
-                    "{}: {}", date, error
+                Ok(midnight) => {
+                    prop_assert!(!after_the_table, "{}", date);
+                    prop_assert_eq!(CalendarDate::from_midnight(midnight), Ok(date));
+                }
+                Err(B::NoMidnight { .. }) => prop_assert!(date.date().year() < 1984, "{}", date),
+                Err(B::AfterTzTable { date: refused }) => prop_assert!(
+                    after_the_table && refused == date.date(), "{}", date
                 ),
+                Err(other) => return Err(TestCaseError::fail(format!("{date}: {other:?}"))),
             }
         }
 
