@@ -30,16 +30,19 @@ ADR 0005 (bindings) before changing anything here.
   loads a tracking image from marmelab's server, which the admin CSP forbids).
 - **react-router stays on major 7.** ra-core 5.15.5 accepts `^6.28.1 || ^7.1.1`
   only; npm's `latest` tag is 8.
-- **ra-core's query-string stays on 7.** ra-core 5.15.5 parses list and
-  create URLs with its nested query-string 7.1.3 (CommonJS), which
-  `require()`s decode-uri-component 0.2.2. That chain stays as ra-core ships
-  it until a ra-core release leaves query-string 7. An npm `overrides` entry
-  or a Vite alias for query-string or decode-uri-component never points at a
-  vendored or patched copy of either: the maintainer's rule is to never
+- **ra-core's query-string stays on 7.** ra-core 5.15.6 parses list and
+  create URLs with `@marmelab/query-string` 7.1.4, marmelab's CommonJS fork
+  of query-string 7.1.3, which `require()`s `@marmelab/decode-uri-component`
+  0.2.3, a fork of decode-uri-component 0.2.2 with the CVE-2026-45822 fix
+  backported. That is the upstream fix the maintainer chose to wait for, and
+  the chain stays as ra-core ships it until a ra-core release leaves the
+  query-string 7 line. An npm `overrides` entry or a Vite alias for
+  `@marmelab/query-string` or `@marmelab/decode-uri-component` never points
+  at a vendored or patched copy of either: the maintainer's rule is to never
   vendor a fix and to always wait for the upstream release (research:
   DECISIONS R22, D113). `src/ra-core-query-string.test.ts` stays, and must
   stay green. Two published release lines break ra-core, so never override
-  or alias to them either:
+  or alias the `@marmelab` names to them either:
   - query-string 8 and later, which export only a default: ra-core's named
     imports fail to link, which `npm run build` and every test that imports
     ra-core report;
@@ -50,8 +53,8 @@ ADR 0005 (bindings) before changing anything here.
     production bundle.
 
   The app's own query-string (10, for the kit's `filter-form.tsx`) is a
-  separate copy. Drop this note, and that test's override reasoning, when a
-  ra-core release leaves query-string 7.
+  separate package. Drop this note, and that test's override reasoning, when
+  a ra-core release leaves the query-string 7 line.
 
 ## Rules for this directory
 

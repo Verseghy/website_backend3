@@ -64,10 +64,13 @@ export const QUERY_CASES = {
   },
   "keeps an undecodable escape as it is instead of throwing": {
     // `%E0%A4%A` is a truncated UTF-8 sequence, which `decodeURIComponent`
-    // rejects. decode-uri-component falls back to decoding what it can and
-    // leaves the rest literal, so a mistyped link still opens the list. A
-    // decoder that throws here would crash the screen; one that writes U+FFFD
-    // instead (as query-string 10 does) is a deliberate change of this case.
+    // rejects. `@marmelab/decode-uri-component` 0.2.3 falls back to decoding
+    // what it can and leaving the rest literal, so a mistyped link still
+    // opens the list. Its fallback, rewritten as a single pass for the
+    // CVE-2026-45822 fix, returns the same here as decode-uri-component
+    // 0.2.2's did. A decoder that throws here would crash the screen; one
+    // that writes U+FFFD instead (as query-string 10 does) is a deliberate
+    // change of this case.
     run: () =>
       parseQueryFromLocation({
         search: "?filter=%7B%22q%22%3A%22a%E0%A4%A%22%7D",

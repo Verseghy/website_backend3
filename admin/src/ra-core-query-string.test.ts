@@ -3,23 +3,25 @@
  * ra-core's URL query parsing, run against the query-string it really loads:
  * in Node and in the production bundle the browser gets.
  *
- * Why this exists: ra-core 5.15.5 reads a list screen's `?filter=…&page=…`
+ * Why this exists: ra-core 5.15.6 reads a list screen's `?filter=…&page=…`
  * (`parseQueryFromLocation`) and a create screen's `?source=…`
- * (`getRecordFromLocation`) with its own nested query-string 7.1.3, a
- * CommonJS package that `require()`s the CommonJS decode-uri-component 0.2.2.
- * That chain stays as ra-core ships it, and an npm override or a Vite alias of
- * either never points at a vendored or patched copy (admin/CLAUDE.md,
- * "ra-core's query-string stays on 7"). These tests stop an override or alias
- * to a published release that breaks ra-core, as the ESM-only releases do:
+ * (`getRecordFromLocation`) with `@marmelab/query-string` 7.1.4, marmelab's
+ * CommonJS fork of query-string 7.1.3. It `require()`s the CommonJS
+ * `@marmelab/decode-uri-component` 0.2.3, a fork of decode-uri-component
+ * 0.2.2 with the CVE-2026-45822 fix backported. That chain stays as ra-core
+ * ships it, and an npm override or a Vite alias of either `@marmelab` name
+ * never points at a vendored or patched copy (admin/CLAUDE.md, "ra-core's
+ * query-string stays on 7"). These tests stop an override or alias of either
+ * name to a published release that breaks ra-core, as the ESM-only ones do:
  *
- * - decode-uri-component 0.4 and later: query-string 7's `require()` gets a
- *   module namespace object, so every non-empty query throws a TypeError
- *   ("decodeComponent is not a function" in Node; the bundle names the
- *   minified variable instead). `vite build`, every other unit test and the
- *   E2E suite stay green, because no screen parses a query yet, so these
- *   tests are the only ones that fail.
+ * - decode-uri-component 0.4 and later: the query-string 7 fork's
+ *   `require()` gets a module namespace object, so every non-empty query
+ *   throws a TypeError ("decodeComponent is not a function" in Node; the
+ *   bundle names the minified variable instead). `vite build`, every other
+ *   unit test and the E2E suite stay green, because no screen parses a query
+ *   yet, so these tests are the only ones that fail.
  * - query-string 8 and later: they export only a default, so ra-core's
- *   `import { parse, stringify } from "query-string"` fails to link
+ *   `import { parse, stringify } from "@marmelab/query-string"` fails to link
  *   (`MISSING_EXPORT` in `vite build`, a `SyntaxError` in Node and in every
  *   test that imports ra-core, these ones included).
  *
