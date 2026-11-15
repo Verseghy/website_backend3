@@ -83,6 +83,14 @@
 //! newsletter unread, and every source pool through `connect_options` and
 //! its source guard.
 //!
+//! An eighth check, in [`admin_mounts`], covers all of `src/` too: only the
+//! admin route table (`src/controllers/admin/routes.rs`) builds `/api/admin`
+//! routes, and only `App::routes` mounts its router (ADR 0007 §5, "Deny by
+//! default"). `tests/requests/admin_routes.rs` compares what `App::routes`
+//! mounts with the table; this check covers the hooks that test cannot see,
+//! such as `before_routes`. It reuses this file's scanners for comments and
+//! literals.
+//!
 //! The scan is a text check, so a determined bypass is possible (ADR 0008,
 //! Consequences); it exists to catch honest mistakes early.
 
@@ -97,6 +105,9 @@ use std::{
 // own; `#[path]` keeps the module beside this file instead.
 #[path = "architecture/sql_dates.rs"]
 mod sql_dates;
+
+#[path = "architecture/admin_mounts.rs"]
+mod admin_mounts;
 
 /// Identifiers that must not appear as tokens in `src/domain/`.
 const BANNED_IDENTIFIERS: &[&str] = &["loco_rs", "sea_orm", "sqlx", "tokio", "rand", "AppContext"];

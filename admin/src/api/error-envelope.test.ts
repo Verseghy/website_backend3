@@ -1,4 +1,5 @@
 import fc from "fast-check"
+import { HttpError } from "ra-core"
 import { describe, expect, it } from "vitest"
 
 import type { ErrorCode } from "@/bindings/ErrorCode"
@@ -6,11 +7,13 @@ import type { ErrorEnvelope } from "@/bindings/ErrorEnvelope"
 import { hu } from "@/i18n/hu"
 
 import {
+  REFUSED_WITHOUT_ENVELOPE_KEY,
   envelopeMessage,
   errorCodeKey,
   isKnownErrorCode,
   keyMessage,
   parseErrorEnvelope,
+  refusalError,
 } from "./error-envelope"
 
 /** Every code of the binding, from the message file that must cover it. */
@@ -136,6 +139,66 @@ describe("envelopeMessage", () => {
           } else {
             expect(message).toEqual({ kind: "text", text: description })
           }
+        }
+      )
+    )
+  })
+})
+
+describe("refusalError", () => {
+  const FORBIDDEN: ErrorEnvelope = {
+    error: "forbidden",
+    description: "The signed-in account may not perform this operation",
+    field: null,
+    params: {},
+  }
+
+  it("turns a 403 forbidden into the Hungarian key, keeping the status and the envelope", () => {
+    const error = refusalError(403, FORBIDDEN)
+    expect(error).toBeInstanceOf(HttpError)
+    expect(error.message).toBe("errors.forbidden")
+    expect(error.status).toBe(403)
+    expect(error.body).toEqual(FORBIDDEN)
+    // The key ra-core's notification translates is the ADR 0007 §5 message.
+    expect(hu.errors.forbidden).toBe("Nincs jogosultságod ehhez a művelethez.")
+  })
+
+  it("shows the server's description for a code this build does not know", () => {
+    const envelope = {
+      ...FORBIDDEN,
+      error: "post.published_locked",
+      description: "Publishing needs the publish posts permission",
+    }
+    const error = refusalError(403, envelope)
+    expect(error.message).toBe("Publishing needs the publish posts permission")
+    expect(error.body).toEqual(envelope)
+  })
+
+  it("falls back to ra-core's HTTP error message without an envelope", () => {
+    for (const body of [undefined, null, "<html>", { error: "forbidden" }]) {
+      const error = refusalError(502, body)
+      expect(error.message).toBe(REFUSED_WITHOUT_ENVELOPE_KEY)
+      expect(error.status).toBe(502)
+      expect(error.body).toBeNull()
+    }
+    expect(REFUSED_WITHOUT_ENVELOPE_KEY).toBe("ra.notification.http_error")
+  })
+
+  it("keeps the status and reads the message as envelopeMessage does", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 400, max: 599 }),
+        fc.oneof(fc.constantFrom(...CODES), fc.string({ minLength: 1 })),
+        fc.string(),
+        (status, code, description) => {
+          const envelope = { error: code, description, field: null, params: {} }
+          const error = refusalError(status, envelope)
+          expect(error.status).toBe(status)
+          expect(error.body).toEqual(envelope)
+          const message = envelopeMessage(envelope)
+          expect(error.message).toBe(
+            message.kind === "key" ? message.key : message.text
+          )
         }
       )
     )

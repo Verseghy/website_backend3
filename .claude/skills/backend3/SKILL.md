@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, or a queue worker. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, a queue worker, or an admin API route with its requirement. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its nine repeated tasks. They sit on
+These recipes are backend3's way of doing its ten repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -138,24 +138,20 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    date part of the public keyset cursor reads them, or backend2's
    `%Y-%m-%d` that public-api.md §5.2 names, is for `public-posts-list` to
    decide with its cursor.
-7. **Admin API**: thin handlers in `src/controllers/admin/<name>.rs`. Every
-   route is declared with its permission in the admin route table (deny by
-   default, ADR 0007 sections 4-5); errors use the envelope and `ErrorCode`
-   of ADR 0021 section 4 (`controllers::admin::error_response`). Until the
-   route table exists, mount the route in `controllers::admin::routes()`,
-   above its last line: that layer gives every admin response
-   `Cache-Control: no-store` (ADR 0023 §6), and loco-rs 1.2.0 applies a
-   group's layer only to the routes added before it.
-   `tests/requests/auth_login.rs` fails for an admin route without it.
+7. **Admin API**: thin handlers in `src/controllers/admin/<name>.rs`, each
+   mounted by one entry of the admin route table with its requirement
+   (deny by default, ADR 0007 sections 4-5): recipe 10. Errors use the
+   envelope and `ErrorCode` of ADR 0021 section 4
+   (`controllers::admin::error_response`).
    A handler that reads a JSON body takes `Result<Json<T>, JsonRejection>`
    and answers a refused body with `controllers::admin::json_rejection_response`:
    `422 invalid_body`, or `413 body_too_large` above the request body limit
-   (research: DECISIONS R15 (D74)). Mount it above the
-   `DefaultBodyLimit::max(JSON_BODY_LIMIT)` layer of `routes()`, so its body
-   may be at most 4 MiB (ADR 0023 §5).
+   (research: DECISIONS R15 (D74)). The route table puts every route that is
+   not an upload route under `DefaultBodyLimit::max(JSON_BODY_LIMIT)`, so
+   its body may be at most 4 MiB (ADR 0023 §5).
    An upload handler (an entity image field, later the media library) is
-   mounted between that layer and the `no-store` layer, so it keeps the
-   128 MiB of `server.middlewares.limit_payload` (ADR 0015 §6). It takes
+   marked `.upload()` in the table, so it keeps the 128 MiB of
+   `server.middlewares.limit_payload` (ADR 0015 §6). It takes
    `Result<Multipart, MultipartRejection>` last, reads the one `file` part
    with `controllers::admin::media::receive_image_part` (the media and image
    settings of `media_uploads(&ctx)`), stores it with
@@ -188,18 +184,22 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    Request tests of an upload endpoint follow `tests/requests/media_upload.rs`
    and give each test its own media volume (`tests/support::TempMedia`).
    A handler for a signed-in account takes
-   `controllers::admin::session::AdminSession`, which loads the account on
-   every request and answers `401 unauthorized` itself when it is trashed,
-   anonymised or inactive, when the token's `tv` is stale, or when the scope
-   is not the route's (ADR 0006 §1). Once the session holds, it also reads
-   the roles and extra grants the account holds into `session.grants`
+   `controllers::admin::session::AdminSession`, which hands it the session
+   that the route table's guard opened for the request: the account, loaded
+   on every request, and `401 unauthorized` already answered when it is
+   trashed, anonymised or inactive, when the token's `tv` is stale, or when
+   the scope is not the route's (ADR 0006 §1). The guard also read the roles
+   and extra grants the account holds into `session.grants`
    (`domain::authz::AccountGrants`: `effective()` and `is_admin()`), so a
    role change applies on the next request (ADR 0007 §5); never query
    `user_roles` or `user_permissions` in a handler. The default accepts only a full
    `admin` session; `AdminSession<AdminOrPasswordChange>` is for the three
-   routes ADR 0006 §4 opens to a `password_change` session. Never take
-   Loco's `JWT` or `JWTWithUser` in an admin handler: they skip these
-   checks. A request test covers the route's `401` without a session.
+   routes ADR 0006 §4 opens to a `password_change` session, which the table
+   also marks `.accepting::<AdminOrPasswordChange>()`. The extractor never
+   opens a session itself: on a route outside the table, or a `Public` one,
+   it answers `500`. Never take Loco's `JWT` or `JWTWithUser` in an admin
+   handler: they skip these checks. A request test covers the route's `401`
+   without a session and its `403` (recipe 10).
 8. **Public endpoint**, if the feature has one: recipe 3.
 9. **Admin screen** under `admin/src/`: resources through backend3's own data
    provider in `admin/src/data-provider/` (never `ra-data-json-server` or
@@ -971,3 +971,68 @@ this recipe follows.
    that fails enqueues nothing), and, with a `PgQueue` on the test's pool
    in `BackgroundQueue` mode, the job as the queue stores it
    (`tests/workers/delete_owned_files.rs` has the set-up).
+
+---
+
+## 10. Add an admin API route
+
+Every `/api/admin` route is one entry of the admin route table,
+`table()` in `src/controllers/admin/routes.rs`, with the requirement an
+account must meet to call it (ADR 0007 sections 4-5, "Deny by default").
+`App::routes` mounts the admin API from that table only. A route that
+`App::routes` mounts outside the table fails `tests/requests/admin_routes.rs`,
+and one built in another hook (`before_routes`, `after_routes`, `serve`, an
+initializer) fails `tests/architecture/admin_mounts.rs`, which reads the
+source for a path under `/api/admin` and for the table's router builders
+outside the table; its documentation lists what a text check cannot see.
+
+1. **Write the handler** in `src/controllers/admin/<name>.rs` (recipe 1
+   step 7). It takes `AdminSession` when it needs the account, and never
+   checks a permission itself: the table's guard has done that before the
+   handler runs.
+2. **Add the entry** to `table()`:
+   `AdminRoute::get(path, requirement, handler)` (or `post`, `put`,
+   `patch`, `delete`), with the path below `/api/admin` (`/labels/{id}`)
+   and the requirement from ADR 0007 section 4's table:
+   - `Requirement::Permission(Permission::EditLabels)`: the resource's
+     permission, for its list, read, create, update, delete and restore
+     alike; a record's history uses the list permission;
+   - `Requirement::AdminRole`: what only the `admin` role may do
+     (permanent delete, figures about individual people, ADR 0007 section
+     2); never a permission;
+   - `Requirement::AnyActiveUser`: the account's own screens („Fiókom”);
+   - `Requirement::Public`: only the sign-in steps of ADR 0006, which issue
+     a session. A new one goes into `PUBLIC_ROUTES` of
+     `tests/requests/admin_routes.rs` in the same PR, with its ADR.
+   An ADR 0007 section 4 row that reads "or" (the labels and authors
+   pickers that `edit posts` may read, the page picker of `edit menu`)
+   needs a new `Requirement` variant in `src/domain/authz.rs`, with its
+   unit tests and properties, in the slice that mounts the first such
+   route. Then chain what the route needs:
+   - `.upload()` for a route that receives a file (128 MiB instead of the
+     JSON routes' 4 MiB, ADR 0015 section 6);
+   - `.accepting::<AdminOrPasswordChange>()` only for the three routes
+     ADR 0006 section 4 opens to a `password_change` session, whose
+     handlers take `AdminSession<AdminOrPasswordChange>`; such a route goes
+     into `PASSWORD_CHANGE_ROUTES` of the same test.
+   A record-level rule (a published post, the user guards of ADR 0007
+   section 6) is not a route requirement: the handler checks it after
+   loading the record, with a function of `src/domain/authz.rs`, and
+   answers its own `403` code.
+3. **What the guard answers.** For every requirement but `Public`: no
+   valid session, or a scope the route does not accept, `401 unauthorized`;
+   then an account that does not meet the requirement, `403 forbidden`,
+   before the handler reads its body. A list the account may not see is
+   therefore a `403`, never `[]`. Every answer carries
+   `Cache-Control: no-store`.
+4. **Test** the route in `tests/requests/<name>.rs`: its `401` without a
+   session, its `403` for an account that lacks the requirement (an
+   account with one role or one extra grant, `tests/support/admin_probe.rs`
+   gives them), and its answers for one that meets it. The table's own
+   test (`tests/requests/admin_routes.rs`) then sees the route, and so does
+   every other check that walks the table.
+5. **The admin** gets the refusal as an envelope: a data-provider handler
+   rejects a refused answer with `refusalError` of
+   `admin/src/api/error-envelope.ts`, so ra-core's notification shows the
+   Hungarian `errors.<code>` message, and a `403` keeps the user signed in
+   (`checkError` signs out on `401` only).

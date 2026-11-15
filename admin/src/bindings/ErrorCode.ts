@@ -8,4 +8,4 @@
  * resource uses a dotted `<resource>.<reason>` code, such as
  * `search.term_too_long`.
  */
-export type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";
+export type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";

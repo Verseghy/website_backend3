@@ -168,6 +168,10 @@ describe("hu.ts", () => {
     expect(hu.errors.unauthorized).toBe(
       "A munkamenet lejárt vagy érvénytelen. Jelentkezz be újra!"
     )
+    // A permission refusal (ADR 0007 §5): the session holds, so the message
+    // never asks for a new sign-in.
+    expect(hu.errors.forbidden).toBe("Nincs jogosultságod ehhez a művelethez.")
+    expect(hu.errors.forbidden).not.toMatch(/jelentkezz/i)
     // The editor's wording of editor.md §10.1 for a file that is no image.
     expect(hu.errors.image_not_allowed).toBe(
       "Csak JPEG, PNG, GIF vagy WebP kép tölthető fel."
@@ -193,6 +197,7 @@ describe("hu.ts", () => {
       content_too_deep: ["limit", "line"],
       content_not_normalisable: ["passes"],
       unauthorized: [],
+      forbidden: [],
       ...UPLOAD_REFUSAL_PARAMS,
     }
     const unknown = Object.entries(hu.errors).flatMap(([code, message]) =>

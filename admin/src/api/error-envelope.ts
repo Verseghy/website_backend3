@@ -10,9 +10,13 @@
  * the previous admin. The body is untrusted JSON from the network, so
  * {@link parseErrorEnvelope} checks every member before anything reads it.
  *
- * The sign-in screen is the first reader; the data provider's handlers use
- * the same functions when the slices add them.
+ * The sign-in screen is the first reader. The data provider's handlers
+ * reject a refused request with {@link refusalError}, so ra-core's own
+ * notification shows the same Hungarian message: a list that the account may
+ * not see shows `errors.forbidden` (ADR 0007 §5), never an empty list.
  */
+import { HttpError } from "ra-core"
+
 import type { ErrorCode } from "@/bindings/ErrorCode"
 import { hu } from "@/i18n/hu"
 import type { MessageKey, MessageValues } from "@/i18n/keys"
@@ -147,4 +151,45 @@ export function envelopeMessage(envelope: ReceivedErrorEnvelope): UiMessage {
     return keyMessage(errorCodeKey(envelope.error), envelope.params)
   }
   return { kind: "text", text: envelope.description }
+}
+
+/**
+ * What ra-core shows for a refused request whose answer carries no readable
+ * envelope (a proxy's page, Loco's own `500` body, an empty answer).
+ */
+export const REFUSED_WITHOUT_ENVELOPE_KEY =
+  "ra.notification.http_error" satisfies MessageKey
+
+/**
+ * The rejection of a data-provider call that the admin API refused: an
+ * ra-core `HttpError`, which ra-core passes to `authProvider.checkError` and
+ * whose `message` its notification translates and shows (ADR 0021 §4).
+ *
+ * - `status` is the answer's status, which `checkError` reads: only `401`
+ *   signs the user out, so a `403 forbidden` keeps the session (ADR 0007 §7).
+ * - `message` is the `errors.<code>` key of a known code, the server's
+ *   `description` for a code this build does not know (shown as it is: it is
+ *   not shaped like a key), and {@link REFUSED_WITHOUT_ENVELOPE_KEY} without
+ *   an envelope.
+ * - `body` is the parsed envelope, or `null` without one, so a form can show
+ *   a field's message at its input with {@link envelopeMessage}. ra-core's
+ *   notification fills no placeholder, so a code whose message needs
+ *   `params` is shown by the screen from `body`, not by the notification;
+ *   `forbidden` and the other whole-request refusals need none.
+ *
+ * @param status - the HTTP status of the answer, `4xx` or `5xx`.
+ * @param body - the parsed JSON body, or `undefined` when it was not JSON.
+ * @returns the rejection.
+ */
+export function refusalError(status: number, body: unknown): HttpError {
+  const envelope = parseErrorEnvelope(body)
+  if (envelope === undefined) {
+    return new HttpError(REFUSED_WITHOUT_ENVELOPE_KEY, status, null)
+  }
+  const message = envelopeMessage(envelope)
+  return new HttpError(
+    message.kind === "key" ? message.key : message.text,
+    status,
+    envelope
+  )
 }

@@ -15,7 +15,9 @@
 //! request body that cannot be read as the endpoint's JSON DTO (the
 //! maintainer's answer of 2026-10-25, research: DECISIONS R15 (D74)), and
 //! `unauthorized` for a request without a valid admin session (ADR 0006 §1,
-//! ADR 0021 §4's 401 row). The seven codes of a refused rich-text body
+//! ADR 0021 §4's 401 row), and `forbidden` for a signed-in account that the
+//! route's requirement refuses (the route table's guard, ADR 0007 §5,
+//! ADR 0021 §4's 403 row). The seven codes of a refused rich-text body
 //! (editor.md §7.6) came with the validator that finds them,
 //! `domain::rich_text::validate_content`, before the post and page writes
 //! that answer them: each finding is a [`super::content::ContentError`],
@@ -89,6 +91,11 @@ pub enum ErrorCode {
     /// deactivated, a token that an account event revoked, or a session
     /// scope that the route does not accept.
     Unauthorized,
+    /// `403`: the session is valid, but the account does not hold what the
+    /// route asks for (a permission or the `admin` role). The session stays
+    /// valid, so the user is not signed out. A list the account may not see
+    /// answers this, never an empty list.
+    Forbidden,
     /// `422`: the upload is not a JPEG, PNG, GIF or WebP image. Its file
     /// name has another extension or none, or its content is not an image
     /// at all (an SVG or HTML file renamed to `.png`, for example). `field`
@@ -125,6 +132,9 @@ impl ErrorCode {
             Self::NotFound => 404,
             // ADR 0021 §4: 401 is "no valid session"; a failed sign-in is one.
             Self::InvalidCredentials | Self::Unauthorized => 401,
+            // ADR 0021 §4: 403 is a permission or record-level refusal
+            // (ADR 0007 §5).
+            Self::Forbidden => 403,
             // ADR 0021 §4 has no row for it; 413 with the JSON envelope
             // follows ADR 0015 §6, whose upload limit answers it (D74).
             Self::BodyTooLarge => 413,
@@ -180,6 +190,11 @@ impl ErrorCode {
             // Not Loco's "You do not have permission to access this
             // resource": that reads as a 403, and a 401 means "sign in".
             Self::Unauthorized => "There is no valid admin session; sign in again",
+            // Loco's 403 text, "You do not have permission to access this
+            // resource", reads the same; this one names the account, so a
+            // script with a Bearer token knows that signing in again does
+            // not help.
+            Self::Forbidden => "The signed-in account may not perform this operation",
             Self::ImageNotAllowed => "Only JPEG, PNG, GIF and WebP images are accepted",
             Self::ImageTypeMismatch => "The file content does not match its extension",
             Self::ImageCorrupt => "The image is corrupt",
@@ -288,6 +303,7 @@ mod tests {
                 "content_not_normalisable",
             ),
             (ErrorCode::Unauthorized, 401, "unauthorized"),
+            (ErrorCode::Forbidden, 403, "forbidden"),
             (ErrorCode::ImageNotAllowed, 422, "image_not_allowed"),
             (ErrorCode::ImageTypeMismatch, 422, "image_type_mismatch"),
             (ErrorCode::ImageCorrupt, 422, "image_corrupt"),
@@ -338,10 +354,18 @@ mod tests {
     }
 
     #[test]
+    fn the_permission_envelope_serializes_exactly() {
+        assert_eq!(
+            serde_json::to_string(&ErrorEnvelope::new(ErrorCode::Forbidden)).expect("serializes"),
+            r#"{"error":"forbidden","description":"The signed-in account may not perform this operation","field":null,"params":{}}"#
+        );
+    }
+
+    #[test]
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");

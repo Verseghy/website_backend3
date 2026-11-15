@@ -2,7 +2,7 @@
 //! every failed check, then, against PostgreSQL, the two finders, the `pid`
 //! hook, a hash that round-trips through the table, `App::truncate`, which
 //! leaves the accounts and their roles and grants alone, sign-in and its
-//! cost, the session token, the session state the admin extractor checks,
+//! cost, the session token, the session state the admin session check reads,
 //! the `Authenticable` impl, the seed account, which the seed creates once
 //! with its roles, in one transaction, and never changes, the
 //! stored TOTP secret, which decrypts only for its own row (ADR 0006

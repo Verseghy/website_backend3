@@ -30,7 +30,10 @@
 //!   `after_routes` would get none of them (ADR 0004 §3).
 //! - `routes` adds every `/api/v1` route through one builder,
 //!   `controllers::v1::routes`, which puts the CORS layer on those routes
-//!   only, so `/admin` and `/api/admin` never send CORS headers (ADR 0014).
+//!   only, so `/admin` and `/api/admin` never send CORS headers (ADR 0014),
+//!   and every `/api/admin` route through the admin route table,
+//!   `controllers::admin::routes`, which guards each with its requirement
+//!   (ADR 0007 §5).
 //! - `middlewares` keeps Loco's default stack and puts
 //!   [`NotModifiedCors`] right outside its `etag` middleware, so a `304`
 //!   under `/api/v1` carries the CORS header that the `etag` middleware drops
@@ -551,7 +554,10 @@ impl Hooks for App {
             // (src/controllers/v1/mod.rs). A public controller merges its routes
             // there, never here: a route added here would miss those layers.
             .add_route(controllers::v1::routes())
-            .add_route(controllers::admin::routes())
+            // Every /api/admin route, built from the admin route table only
+            // (src/controllers/admin/routes.rs, ADR 0007 §5). An admin
+            // controller adds its routes to that table, never here.
+            .add_route(controllers::admin::routes::routes())
     }
 
     // `cargo loco generate worker` injects `queue.register(...)` right after

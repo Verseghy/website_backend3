@@ -87,6 +87,11 @@ ADR 0005 (bindings) before changing anything here.
   kit's login page and carries the source link. A refused request's message
   comes from its error envelope through `src/api/error-envelope.ts`
   (`errors.<code>`, or the server's text for an unknown code, ADR 0021 §4).
+  A data-provider handler rejects a refused answer with `refusalError`
+  from there, an ra-core `HttpError` whose message ra-core's notification
+  shows in Hungarian: a list the account may not see shows
+  `errors.forbidden`, never an empty list, and the user stays signed in
+  (ADR 0007 §5; `src/data-provider/refusal.test.tsx`).
   Signing out ends every session of the account on the server
   (`POST /auth/logout`, ADR 0006 §2): the header shows backend3's
   `src/layout/AppUserMenu.tsx` instead of the kit's `UserMenu`, and its

@@ -1,5 +1,6 @@
-//! The admin session extractor and `GET /api/admin/auth/me` (ADR 0006 §1,
-//! §2, §4; ADR 0007 §7).
+//! The admin session, as the route table's guard opens it and the
+//! `AdminSession` extractor hands it on, and `GET /api/admin/auth/me`
+//! (ADR 0006 §1, §2, §4; ADR 0007 §7).
 //!
 //! `/auth/me` answers the signed-in account to the sign-in cookie and to a
 //! Bearer token, for an `admin` and a `password_change` session. Every
@@ -18,17 +19,20 @@
 //! invented.
 
 use axum::{
-    extract::FromRequestParts,
+    Json,
     http::{
-        HeaderMap, Request, StatusCode,
+        HeaderMap, StatusCode,
         header::{AUTHORIZATION, COOKIE},
     },
 };
 use axum_test::{TestResponse, TestServer};
 use backend3::{
-    controllers::admin::session::{AdminOrPasswordChange, AdminScope, AdminSession},
+    controllers::admin::{
+        routes::{AdminRoute, build},
+        session::{AcceptedScopes, AdminOrPasswordChange, AdminScope, AdminSession},
+    },
     domain::{
-        authz::{AccountGrants, Permission, Role},
+        authz::{Permission, Requirement, Role},
         session::SessionScope,
         session_cookie::SESSION_COOKIE_NAME,
     },
@@ -48,7 +52,7 @@ use loco_rs::{
 use serde_json::{Map, Value, json};
 use sha2::{Sha256, Sha512};
 
-use crate::support::with_server;
+use crate::support::{admin_probe::probe_server, with_server};
 
 const ME: &str = "/api/admin/auth/me";
 /// The password of the account that signs in through the endpoint.
@@ -661,8 +665,9 @@ async fn me_answers_the_roles_the_effective_permissions_and_the_admin_flag() {
 
 #[tokio::test]
 async fn a_role_or_grant_change_applies_on_the_next_request() {
-    // ADR 0007 §5, "Fresh data": the extractor reads the roles and grants
-    // on every request, and the change needs no new token (ADR 0006 §2).
+    // ADR 0007 §5, "Fresh data": the route table's guard reads the roles
+    // and grants on every request, and the change needs no new token
+    // (ADR 0006 §2).
     with_server(|server, ctx| async move {
         let user = account(&ctx, "valtozik@example.test", |_| {}).await;
         let token = admin_token(&ctx, &user);
@@ -762,7 +767,7 @@ async fn a_stored_grant_the_code_does_not_know_answers_500_never_401() {
 #[tokio::test]
 async fn a_database_failure_while_reading_the_grants_answers_500_never_401() {
     // The account read succeeds and the session check passes; only the
-    // grants query fails. That failure is the extractor's own mapping, apart
+    // grants query fails. That failure is `open_session`'s own mapping, apart
     // from the account read's, so it gets its own test: a 401 here would sign
     // the admin UI out (ADR 0006, follow-up work) for a server fault.
     with_server(|server, ctx| async move {
@@ -794,29 +799,57 @@ async fn a_database_failure_while_reading_the_grants_answers_500_never_401() {
     .await;
 }
 
-/// Runs the extractor for the scopes `A` on a request that carries `token`
-/// in the session cookie, and returns the session's scope or the refusal's
-/// status.
-async fn extract<A: backend3::controllers::admin::session::AcceptedScopes>(
+/// The scope of the session that the guard handed to a handler accepting
+/// the scopes `A`.
+async fn session_scope<A: AcceptedScopes>(session: AdminSession<A>) -> String {
+    session.scope.claim().to_owned()
+}
+
+/// The account, token subject and grants of the session that the guard
+/// handed to a handler for a full session.
+async fn session_parts(session: AdminSession) -> Json<Value> {
+    Json(json!({
+        "id": session.user.id,
+        "pid": session.claims.pid,
+        "roles": session.grants.roles.iter().map(|role| role.name()).collect::<Vec<_>>(),
+        "extra": session.grants.extra.iter().map(|grant| grant.name()).collect::<Vec<_>>(),
+    }))
+}
+
+/// A probe route, `GET /api/admin/x`, that the route table opens to any
+/// active user with the scopes `A`, served with `ctx` (which a test may
+/// have changed), and whose handler accepts the same scopes.
+fn scope_probe<A: AcceptedScopes + 'static>(ctx: &AppContext) -> TestServer {
+    probe_server(
+        ctx,
+        build(vec![
+            AdminRoute::get("/x", Requirement::AnyActiveUser, session_scope::<A>).accepting::<A>(),
+        ]),
+    )
+}
+
+/// Sends `token` in the session cookie to [`scope_probe`] for the scopes `A`,
+/// and returns the session's scope or the refusal's status.
+async fn extract<A: AcceptedScopes + 'static>(
     ctx: &AppContext,
     token: &str,
 ) -> Result<SessionScope, StatusCode> {
-    let request = Request::get("/api/admin/x")
-        .header(COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
-        .body(())
-        .expect("request");
-    let (mut parts, ()) = request.into_parts();
-    match AdminSession::<A>::from_request_parts(&mut parts, ctx).await {
-        Ok(session) => Ok(session.scope),
-        Err(response) => Err(response.status()),
+    let response = scope_probe::<A>(ctx)
+        .get("/api/admin/x")
+        .add_header(COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+        .await;
+    if response.status_code() != StatusCode::OK {
+        return Err(response.status_code());
     }
+    let claim = response.text();
+    Ok(SessionScope::from_claim(&claim).expect("the handler answers a scope"))
 }
 
 #[tokio::test]
 async fn a_full_session_route_refuses_a_password_change_session() {
-    // No route that takes only `AdminSession` exists yet, so the extractor
-    // is called directly: the default marker accepts `admin` only, and
-    // the own-account marker `admin` and `password_change` (ADR 0006 §4).
+    // No application route opens a full session only yet, so a probe table
+    // does: the default marker accepts `admin` only, and the own-account
+    // marker `admin` and `password_change` (ADR 0006 §4).
     with_server(|_server, ctx| async move {
         let user = account(&ctx, "hatokor@example.test", |_| {}).await;
         let pid = user.pid.to_string();
@@ -850,35 +883,38 @@ async fn a_full_session_route_refuses_a_password_change_session() {
             Err(StatusCode::UNAUTHORIZED)
         );
         // The session carries the account as read for the request, with its
-        // roles and grants (ADR 0007 §5).
+        // roles and grants (ADR 0007 §5), to a Bearer token too.
         give(&ctx, &user, &[2], &["edit menu"]).await;
-        let request = Request::get("/api/admin/x")
-            .header(AUTHORIZATION, format!("Bearer {admin}"))
-            .body(())
-            .expect("request");
-        let (mut parts, ()) = request.into_parts();
-        let Ok(session) = AdminSession::<AdminScope>::from_request_parts(&mut parts, &ctx).await
-        else {
-            panic!("the admin token opens a session");
-        };
-        assert_eq!(
-            (session.user.id, session.claims.pid.as_str()),
-            (user.id, pid.as_str())
+        let server = probe_server(
+            &ctx,
+            build(vec![AdminRoute::get(
+                "/x",
+                Requirement::AnyActiveUser,
+                session_parts,
+            )]),
         );
+        let response = server
+            .get("/api/admin/x")
+            .add_header(AUTHORIZATION, format!("Bearer {admin}"))
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK);
         assert_eq!(
-            session.grants,
-            AccountGrants {
-                roles: [Role::Secretary].into(),
-                extra: [Permission::EditMenu].into(),
-            }
+            response.json::<Value>(),
+            json!({
+                "id": user.id,
+                "pid": pid,
+                "roles": [Role::Secretary.name()],
+                "extra": [Permission::EditMenu.name()],
+            })
         );
     })
     .await;
 }
 
 #[tokio::test]
-async fn a_broken_jwt_configuration_answers_as_the_extractor_documents() {
-    // Pins the extractor's documentation against loco-rs 1.2.0. A missing
+async fn a_broken_jwt_configuration_answers_as_the_session_module_documents() {
+    // Pins the documentation of `controllers::admin::session` (what
+    // `open_session` answers) against loco-rs 1.2.0. A missing
     // `auth` section is a server fault, `500`. A secret that is not base64
     // fails inside Loco's token validation, which reports it as a token that
     // is not valid, so it answers `401`; ADR 0034 §3 places a boot check of

@@ -8,7 +8,7 @@
 //! `Set-Cookie` is the only one, also for a token close to its expiry,
 //! which the passive refresh of ADR 0006 §1 must leave alone here. A
 //! `password_change` session may log out. Without a valid session it
-//! answers the extractor's `401` and revokes nothing. Every other method
+//! answers the route table guard's `401` and revokes nothing. Every other method
 //! answers `405` and revokes nothing. A database failure answers `500`, and
 //! then the cookie stays and the sessions hold. Every account and password
 //! here is invented.
@@ -322,7 +322,7 @@ async fn a_password_change_session_may_log_out() {
 
 #[tokio::test]
 async fn logout_without_a_valid_session_answers_401_and_revokes_nothing() {
-    // The extractor answers before the handler runs, with the one `401` of
+    // The route table's guard answers before the handler runs, with the one `401` of
     // every refused session (tests/requests/auth_session.rs has the full
     // list), and sets no cookie. No account's version moves.
     with_server(|server, ctx| async move {
@@ -420,8 +420,8 @@ async fn a_failed_revocation_answers_500_and_keeps_the_cookie() {
     // The admin UI signs out on 401 only (ADR 0006, follow-up work), so a
     // write that fails must answer 500, never 401 or 204: the sessions
     // still hold, and the browser keeps its cookie. A trigger that refuses
-    // every UPDATE of `users` makes the write fail after the extractor's
-    // read succeeded; the per-test database is dropped afterwards.
+    // every UPDATE of `users` makes the write fail after the guard's read
+    // succeeded; the per-test database is dropped afterwards.
     with_server(|server, ctx| async move {
         let user = account(&ctx, "hiba@example.test", |_| {}).await;
         let token = admin_token_at(&ctx, &user, instant());

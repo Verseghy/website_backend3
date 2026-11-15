@@ -1,6 +1,7 @@
 //! Request tests through Loco's test server, so every response passes the
 //! whole middleware stack exactly as in production.
 
+mod admin_routes;
 mod admin_ui;
 mod auth_activity;
 mod auth_login;
