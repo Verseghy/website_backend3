@@ -19,6 +19,7 @@
 mod boot;
 mod cli;
 mod domain;
+mod image_data;
 mod media_contract;
 mod migration;
 mod models;

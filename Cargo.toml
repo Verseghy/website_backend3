@@ -145,6 +145,15 @@ serde_json = "1"
 # Names the full key path (`settings.admin_ui.dist_dir`) in settings errors
 # (ADR 0008, "Typed configuration").
 serde_path_to_error = "0.1"
+# The TOML parser of the import's defect resolution file,
+# data/import/resolutions.toml (data-migration.md §8.2; research: DECISIONS R9,
+# D12), which src/domain/import_mysql/resolutions.rs reads into a
+# `toml::Table` and validates by hand, so every message names the entry and
+# the field. The 1.x line, which loco-rs 1.2.0 already links through
+# cargo-lock (its own configuration reader uses toml 0.8), so this adds no
+# crate. Default features: `parse` and `serde` read the text, and the tests
+# write tables back with `display`.
+toml = "1.1"
 thiserror = "2"
 tracing = "0.1"
 # URI parsing for the database-target guard. sqlx parses connection URIs with
@@ -448,6 +457,7 @@ sea-orm = { workspace = true, features = ["with-ipnetwork"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
+toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

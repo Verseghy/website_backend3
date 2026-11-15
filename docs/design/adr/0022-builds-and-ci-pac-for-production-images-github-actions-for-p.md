@@ -1,6 +1,6 @@
 # 0022. Builds and CI: PAC for production images, GitHub Actions for PR checks
 
-- Status: Amended by [0027](0027-per-package-licence-exceptions-and-the-loco-advisory-ignores.md) and [0029](0029-no-filters-or-job-conditions-on-required-ci-jobs.md) (2026-10-25), and [0042](0042-licence-notices-of-the-crates-linked-into-the-backend3-binary.md) (2026-11-01)
+- Status: Amended by [0027](0027-per-package-licence-exceptions-and-the-loco-advisory-ignores.md) and [0029](0029-no-filters-or-job-conditions-on-required-ci-jobs.md) (2026-10-25), [0042](0042-licence-notices-of-the-crates-linked-into-the-backend3-binary.md) (2026-11-01), and [0045](0045-versioned-task-data-in-the-image-at-app-data.md) (2026-11-15)
 - Decision questions: Q34a, Q34b
 
 ## Context

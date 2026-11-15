@@ -1,0 +1,15 @@
+# The defect resolution list of the legacy import (ADR 0017 §3,
+# docs/design/data-migration.md §8). The image ships this file as
+# /app/data/import/resolutions.toml, the default of the import_mysql task's
+# `resolutions` argument, so the nightly rehearsals and the cut-over read
+# exactly these bytes.
+#
+# The schema, every section and every field are documented in
+# src/domain/import_mysql/resolutions.rs and data-migration.md §8.2. The task
+# refuses a file that fails its validation, and so does CI.
+#
+# This is the empty list: the schema version, no entries and no sign-off
+# date. The proposed entries are filled in from a staging dry-run report;
+# the editors' sign-off then adds `signed_off`. Only ids, dates, choices,
+# source values and digests go here, never names or content (README.md).
+version = 1

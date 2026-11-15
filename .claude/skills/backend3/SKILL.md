@@ -508,10 +508,17 @@ is its specification; each slice adds the step for its own tables.
    its verification checks in section 10.
 2. **Pure transforms** in `src/domain/` (ADR 0008): one function from legacy
    row values to the target row, taking every input as an argument, including
-   `snapshot_at` and the resolution entries. Rich-text bodies go through the
-   shared normaliser, `domain::normalise::normalise`, and its output through
-   the N9 checks of `check_fixed_point` (`data-migration.md` section 7, its
-   readings in 7.4). A new normaliser rule adds its step to the pass in
+   `snapshot_at` and the resolution entries. The entries come from the
+   step's section of the validated resolution file,
+   `domain::import_mysql::resolutions::ResolutionFile` (data-migration.md
+   section 8.2), whose precondition fields (`expect_*`) the defect check
+   compares with the source row; a defect that needs a new section or field
+   adds it there, to `Section::fields` and to the schema table of section
+   8.2 (`tests/image_data/` compares the two), with a test of every new
+   message. Rich-text bodies go through the shared normaliser,
+   `domain::normalise::normalise`, and its output through the N9 checks of
+   `check_fixed_point` (`data-migration.md` section 7, its readings in 7.4).
+   A new normaliser rule adds its step to the pass in
    `src/domain/normalise/mod.rs`, its `Rule` variants, and a
    before-and-after pair to `tests/fixtures/normalise/`. Unit tests cover every
    rule of sections 5-7 for the table, each defect including a precondition
@@ -560,7 +567,11 @@ is its specification; each slice adds the step for its own tables.
    snapshot type (recipe 2 step 6) with `models::revisions::append` and
    `Actor::Import`, or with a bulk insert that keeps the same rules
    (`domain::revision::snapshot_object`, `check_revision`, numbers from 1
-   per record), and the per-table activity entry (ADR 0011 section 4).
+   per record), and the per-table activity entry (ADR 0011 section 4), whose
+   details carry the resolution file's SHA-256 from the task's
+   `resolutions::load` (`LoadedResolutions::digest`, the digest of the bytes
+   it validated; data-migration.md section 5.4), never a second read of the
+   path.
 4. **Refusals** (section 4.2): an uncovered defect instance, a precondition
    mismatch or a constraint violation stops the import with a message that
    names the defect id, the row id and the rule. A legacy calendar day
@@ -596,12 +607,15 @@ is its specification; each slice adds the step for its own tables.
    that needs rows adds its synthetic fixture), then
    `IMPORT_SOURCE_DATABASE_URL=mysql://loco:loco@127.0.0.1:3306/verseghy
    cargo loco task import_mysql mode:dry-run snapshot_at:<RFC 3339, UTC>
-   resolutions:<file> storage_root:<dir> report:<empty dir>` against the local
-   databases, then check `report.md` and `summary.json` in the report
-   directory. The task refuses an unset source (empty or `disabled`), an
-   unknown argument, a `snapshot_at` that is not UTC or lies after the start
-   of the run, and a report directory that is not empty or lies inside
-   `storage_root`. Once it runs, it refuses a target whose `roles` or
+   resolutions:data/import/resolutions.toml storage_root:<dir> report:<empty
+   dir>` against the local databases (the default `resolutions` path is the
+   image's copy, `/app/data/import/resolutions.toml`), then check
+   `report.md` and `summary.json` in the report directory. The task refuses
+   an unset source (empty or `disabled`), an unknown argument, a
+   `snapshot_at` that is not UTC or lies after the start of the run, a
+   report directory that is not empty or lies inside `storage_root`, and a
+   resolution file that fails validation (every problem is named by entry
+   and field). Once it runs, it refuses a target whose `roles` or
    `user_permissions` CHECK differ from the code, or in which a table it
    writes holds a row (recreate the local database to start over, as the
    `AGENTS.md` commands say), a source whose schema differs from the
