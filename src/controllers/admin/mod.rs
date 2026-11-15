@@ -27,6 +27,11 @@
 //! [`json_rejection_response`], so every admin endpoint refuses a body that
 //! is not its DTO the same way: `422 invalid_body`, or `413 body_too_large`
 //! above the request body limit (research: DECISIONS R15 (D74)).
+//!
+//! A handler that writes an activity entry takes
+//! [`client_context::ClientContext`] for the request id and, on a sign-in
+//! or account entry, the client address, and passes them down to the model
+//! (ADR 0011 §5, recipe 8 of the project skill).
 
 use axum::{
     Json,
@@ -42,6 +47,7 @@ use crate::{
 };
 
 pub mod auth;
+pub mod client_context;
 pub mod media;
 pub mod session;
 

@@ -2,6 +2,7 @@
 //! whole middleware stack exactly as in production.
 
 mod admin_ui;
+mod auth_activity;
 mod auth_login;
 mod auth_logout;
 mod auth_session;
@@ -14,6 +15,7 @@ mod public_fixtures;
 mod public_global;
 mod public_harness;
 mod public_router;
+mod request_id;
 mod retired_routes;
 mod security_headers;
 mod site;

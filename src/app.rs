@@ -32,10 +32,15 @@
 //!   [`NotModifiedCors`] right outside its `etag` middleware, so a `304`
 //!   under `/api/v1` carries the CORS header that the `etag` middleware drops
 //!   (public-api.md §9, ADR 0014).
-//! - `after_routes` adds the fallback `/storage` router when
+//! - `after_routes` wraps Loco's router, middleware stack included, in the
+//!   layer that drops a client's `x-request-id` header, so that Loco makes
+//!   the id of every request itself
+//!   ([`controllers::request_id::without_client_request_id`]; research:
+//!   DECISIONS R23 (D119)), then adds the fallback `/storage` router when
 //!   `settings.media.serve_storage` is on (ADR 0015 §4), outside Loco's
-//!   middleware stack, and then wraps the finished router, middleware stack
-//!   and `/storage` included, in the HTTP request metrics layer.
+//!   middleware stack and that layer, and then wraps the finished router,
+//!   middleware stack and `/storage` included, in the HTTP request metrics
+//!   layer.
 //! - `serve` puts [`trim_trailing_slash`] in front of the finished router,
 //!   so `/api/v1/posts/` is served exactly like `/api/v1/posts`
 //!   (public-api.md DEC-10, open item O-2), and runs the `/metrics` listener
@@ -491,18 +496,26 @@ impl Hooks for App {
         stack
     }
 
-    /// Adds the fallback `/storage` router when `settings.media.serve_storage`
-    /// is on ([`storage::mount`], ADR 0015 §4), then wraps everything in the
-    /// HTTP request metrics layer ([`metrics::with_http_metrics`]).
+    /// Wraps Loco's router in the layer that drops a client's `x-request-id`
+    /// ([`controllers::request_id::without_client_request_id`]), adds the
+    /// fallback `/storage` router when `settings.media.serve_storage` is on
+    /// ([`storage::mount`], ADR 0015 §4), then wraps everything in the HTTP
+    /// request metrics layer ([`metrics::with_http_metrics`]).
     ///
     /// Loco calls this hook with its middleware stack already applied
-    /// (loco-rs 1.2.0 `boot::setup_routes`), so the `/storage` routes stay
-    /// outside it: no body limit, request timeout, `etag` or compression
-    /// layer reaches them. The metrics layer comes last, so it counts
+    /// (loco-rs 1.2.0 `boot::setup_routes`), so the request id layer sits
+    /// outside Loco's middlewares: the header is gone before Loco's
+    /// `request_id` middleware reads it, and Loco makes a UUID v4 for every
+    /// request (research: DECISIONS R23 (D119)). The `/storage` routes are
+    /// merged after it and stay outside both: no body limit, request
+    /// timeout, `etag`, compression or request id layer reaches them, and
+    /// they carry no request id to drop. The metrics layer comes last and
+    /// stays the outermost, so it times everything inside and counts
     /// `/storage` requests too.
     async fn after_routes(router: AxumRouter, ctx: &AppContext) -> Result<AxumRouter> {
         let metrics = shared_metrics(ctx)?;
         let settings = Settings::from_section(ctx.config.settings.as_ref()).map_err(Error::msg)?;
+        let router = controllers::request_id::without_client_request_id(router);
         let router = storage::mount(router, &settings.media);
         Ok(metrics::with_http_metrics(router, metrics.http().clone()))
     }

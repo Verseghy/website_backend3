@@ -9,6 +9,9 @@
 //!   (ADR 0023 §9).
 //! - [`not_found`]: the fallback for unknown paths, with the JSON `404` of
 //!   `/api/admin`, `/api/v1` and backend1's retired REST routes.
+//! - [`request_id`]: the layer that drops a client's `x-request-id`, so
+//!   every request's id is one the server made (research: DECISIONS R23
+//!   (D119)).
 //! - [`site`]: `/` and `/robots.txt` (ADR 0014).
 //! - [`storage`]: `/storage/**` served by backend3 itself, the fallback of
 //!   ADR 0015 §4, mounted only when `settings.media.serve_storage` is on.
@@ -23,6 +26,7 @@ pub mod admin;
 pub mod admin_ui;
 pub mod metrics;
 pub mod not_found;
+pub mod request_id;
 pub mod site;
 pub mod storage;
 pub mod v1;
