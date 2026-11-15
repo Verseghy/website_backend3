@@ -11,6 +11,7 @@ mod auth_logout;
 mod auth_refresh;
 mod auth_session;
 mod auth_token;
+mod authz_matrix;
 mod media_upload;
 mod metrics;
 mod not_found;

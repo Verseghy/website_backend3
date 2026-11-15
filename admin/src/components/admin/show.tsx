@@ -19,7 +19,7 @@ import {
 } from "ra-core";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { EditButton } from "@/components/admin/edit-button";
+import { CanAccessEditButton } from "@/auth/access-buttons";
 
 export interface ShowProps
   extends ShowViewProps, Omit<ShowBaseProps, "children"> {}
@@ -175,7 +175,7 @@ export const ShowView = ({
         </h2>
         {actions ?? (
           <div className="flex justify-end items-center">
-            {hasEdit ? <EditButton /> : null}
+            {hasEdit ? <CanAccessEditButton /> : null}
           </div>
         )}
       </div>

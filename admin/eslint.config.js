@@ -9,6 +9,16 @@ import tseslint from "typescript-eslint"
 import { defineConfig, globalIgnores } from "eslint/config"
 
 import noUiLiterals from "./eslint-rules/no-ui-literals.mjs"
+import noUngatedButtons from "./eslint-rules/no-ungated-buttons.mjs"
+
+// backend3's own rules, under one plugin object: flat config refuses one
+// plugin name bound to two different objects for the same file.
+const local = {
+  rules: {
+    "no-ui-literals": noUiLiterals,
+    "no-ungated-buttons": noUngatedButtons,
+  },
+}
 
 export default defineConfig([
   globalIgnores([
@@ -116,9 +126,23 @@ export default defineConfig([
     // ADR 0021 §7 "No literals": every UI string comes from src/i18n/hu.ts.
     files: ["src/**/*.tsx"],
     ignores: ["src/i18n/**", "src/**/*.test.tsx", "src/test/**"],
-    plugins: { local: { rules: { "no-ui-literals": noUiLiterals } } },
+    plugins: { local },
     rules: {
       "local/no-ui-literals": "error",
+    },
+  },
+  {
+    // ADR 0007 §7: no kit button asks canAccess, so the create, edit,
+    // delete and bulk-delete buttons come from the access wrappers of
+    // src/auth/access-buttons.tsx, the only module that may import the
+    // kit's own. The kit's pages are checked too (LOCAL_CHANGES.md), so a
+    // kit update that brings the ungated buttons back fails here. Tests may
+    // render the kit's buttons.
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/auth/access-buttons.tsx", "src/**/*.test.{ts,tsx}"],
+    plugins: { local },
+    rules: {
+      "local/no-ungated-buttons": "error",
     },
   },
 ])

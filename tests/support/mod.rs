@@ -19,8 +19,13 @@
 //! - [`session_refresh`]: session tokens placed on the app clock's timeline
 //!   for the tests of the sliding refresh (ADR 0006 §1), and readers of the
 //!   cookie it sets.
+//! - [`authz_matrix`]: the role matrix harness, which calls every route of
+//!   a route table as each role, as no role, as each single grant and as
+//!   each all-but-one set, against what the route's requirement says
+//!   (ADR 0007 §5).
 
 pub mod admin_probe;
+pub mod authz_matrix;
 pub mod fixtures;
 pub mod openapi_schema;
 pub mod owned_file_probes;
@@ -596,7 +601,8 @@ pub const SITE_ORIGIN: &str = "https://verseghy-gimnazium.net";
 /// sends it too, or the route table's guard answers `403 origin_mismatch`
 /// before anything else (ADR 0006 §3, ADR 0044);
 /// `tests/requests/admin_origin.rs` checks that it matches the
-/// configuration.
+/// configuration. The role matrix's request builder sends it on every
+/// write ([`authz_matrix`]).
 pub const ADMIN_ORIGIN: &str = "http://localhost:5150";
 
 /// The header `name` of `response` as text, or `None` when it is absent.

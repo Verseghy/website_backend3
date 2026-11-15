@@ -18,7 +18,10 @@ import {
 } from "ra-core";
 import type { ReactElement, ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { CreateButton } from "@/components/admin/create-button";
+import {
+  CanAccessCreateButton,
+  ResourceAccessGate,
+} from "@/auth/access-buttons";
 import { ExportButton } from "@/components/admin/export-button";
 import { ListPagination } from "@/components/admin/list-pagination";
 import { FilterButton, FilterForm } from "@/components/admin/filter-form";
@@ -151,7 +154,7 @@ export const ListView = <RecordType extends RaRecord = RaRecord>(
           {actions ?? (
             <div className="flex items-center gap-2">
               {filters && filters.length > 0 ? <FilterButton /> : null}
-              {hasCreate ? <CreateButton /> : null}
+              {hasCreate ? <CanAccessCreateButton /> : null}
               {<ExportButton />}
             </div>
           )}
@@ -190,14 +193,14 @@ export const Empty = () => {
         })}
       </h2>
       {hasCreate ? (
-        <>
+        <ResourceAccessGate action="create">
           <p className="text-muted-foreground">
             {translate(`resources.${resource}.invite`, {
               _: inviteMessage,
             })}
           </p>
-          <CreateButton />
-        </>
+          <CanAccessCreateButton />
+        </ResourceAccessGate>
       ) : null}
     </div>
   );
