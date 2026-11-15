@@ -207,6 +207,18 @@ ADR 0005 (bindings) before changing anything here.
   `tests/domain/authz_cases.rs` both run; a rule that reads a field that
   can change also invalidates the cached answers after a save, since
   ra-core keys them by the record's id only.
+  No kit button asks `canAccess`, so the create, edit, delete and
+  bulk-delete buttons are the wrappers of `src/auth/access-buttons.tsx`
+  (`CanAccessCreateButton`, `CanAccessEditButton`,
+  `CanAccessDeleteButton`, `CanAccessBulkDeleteButton`), and a restore or
+  permanent-delete button goes inside `CanAccessRestoreButton` or
+  `CanAccessPurgeButton`. Each renders only on a yes: not while the
+  question is open, not when it failed. An action on a record asks about
+  that record, so its record-level rule decides; a bulk delete asks about
+  every selected record the list has loaded. The kit's own pages use them
+  too (`src/components/admin/LOCAL_CHANGES.md`), and the
+  `local/no-ungated-buttons` lint rule fails an import of the kit's four
+  buttons anywhere but that module and tests.
 - **Clean room (ADR 0011 §8, ADR 0018 §3.4).** Never install an
   `@react-admin/` package (react-admin's Enterprise Edition), and never read
   or copy Enterprise source, types, styles or examples. `npm run clean-room`
@@ -307,7 +319,7 @@ Run from `admin/`, with the Node.js major in `.node-version`:
 
 ```sh
 npm ci
-npm run lint        # ESLint, including local/no-ui-literals
+npm run lint        # ESLint, including local/no-ui-literals and local/no-ungated-buttons
 npm run typecheck   # tsc -b --noEmit over the app, the scripts and the E2E suite
 npm test            # Vitest: unit tests, i18n completeness checks, licence-policy tests
 npm run licenses    # the production-dependency licence check

@@ -20,7 +20,7 @@ import {
 } from "@/components/admin/breadcrumb";
 import { cn } from "@/lib/utils";
 import { ShowButton } from "@/components/admin/show-button";
-import { DeleteButton } from "./delete-button";
+import { CanAccessDeleteButton } from "@/auth/access-buttons";
 
 export interface EditProps extends EditViewProps, EditBaseProps {}
 
@@ -144,7 +144,7 @@ export const EditView = ({
         {actions ?? (
           <div className="flex justify-end items-center gap-2">
             {hasShow ? <ShowButton /> : null}
-            <DeleteButton />
+            <CanAccessDeleteButton />
           </div>
         )}
       </div>

@@ -235,7 +235,9 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    Whether the sidebar lists the resource and its pages open comes from the
    access map of `/auth/me`, through `authProvider.canAccess`: the slice
    adds its row to the access table (recipe 10 step 6), never a check of its
-   own in the admin.
+   own in the admin. So do its buttons: the access wrappers of
+   `admin/src/auth/access-buttons.tsx` (recipe 10 step 5), which pass the
+   record so its record-level rule decides.
 10. **Importer step** for the feature's legacy tables: recipe 4.
 11. **Tests at every layer**: domain unit tests and proptests, in-module;
     domain tests that need fixture files (such as the image corpus in
@@ -1158,14 +1160,45 @@ outside the table; its documentation lists what a text check cannot see.
    `Origin` and without a cookie, as a script does (ADR 0044 §2;
    `tests/requests/auth_token.rs`). The
    table's own test (`tests/requests/admin_routes.rs`) then sees the route,
-   and so does every other check that walks the table.
+   and so does every other check that walks the table. Among them is the
+   role matrix (`tests/requests/authz_matrix.rs`, with the harness
+   `tests/support/authz_matrix.rs`): it calls the route as each role, no
+   role, each single grant and each all-but-one set, with a full session,
+   no body, an absent id in every path parameter and, on a write, the
+   admin origin (`ADMIN_ORIGIN`, ADR 0006 §3, ADR 0044), and
+   fails where the answer differs from the requirement: `403` with the
+   `forbidden` code for an account that lacks it, anything else for one
+   that meets it, except a `5xx` and, on a route that needs a session, a
+   `401` (a `Public` route's `401` is its handler's own). So a handler
+   never answers `forbidden` itself (a record-level rule has its own code,
+   step 2). A request without a body or for an absent record may change
+   only the calling account's own data in the test database, such as the
+   logout, which ends the account's sessions (the harness signs a fresh
+   token after every request a handler may have answered); never another
+   record, and nothing outside the database. Every write route under
+   `/api/admin/users` must also refuse the account that holds every
+   permission but `edit users` (ADR 0007 §5); a slice that mounts a user,
+   role or extra-grant write anywhere else (such as a restore of the
+   global trash, ADR 0011 §8) extends `is_user_editor_write` of the
+   harness to that route in the same PR, with a probe test. The matrix
+   compares each answer with the route's declaration only: the
+   record-level rules, and whether the declared requirement is the one
+   ADR 0007 §4 names, are this step's request tests and step 6's access-row
+   tests. A layer added in front of the guard that reads more than the
+   session and the origin adds what it needs to the harness's one request
+   builder (`send`), so the matrix still reaches the guard.
 5. **The admin** gets the refusal as an envelope: a data-provider handler
    rejects a refused answer with `refusalError` of
    `admin/src/api/error-envelope.ts`, so ra-core's notification shows the
    Hungarian `errors.<code>` message, and a `403` keeps the user signed in
    (`checkError` signs out on `401` only) and makes the auth provider read
    `/auth/me` again, so the sidebar and the screens follow a role change
-   (ADR 0007 §7).
+   (ADR 0007 §7). The screens show only the buttons the account may use:
+   the create, edit, delete and bulk-delete buttons are the wrappers of
+   `admin/src/auth/access-buttons.tsx` (`CanAccessCreateButton` and the
+   rest; the restore and purge buttons go inside `CanAccessRestoreButton`
+   and `CanAccessPurgeButton`), never the kit's own, which the lint rule
+   `local/no-ungated-buttons` refuses.
 6. **The access row.** A route of an ra-core resource (the resource's
    list, record, write, trash and history routes) also gives the resource
    its row in `RESOURCE_ACCESS` of `src/domain/authz.rs` (ADR 0007 §4, §7),
