@@ -92,7 +92,7 @@
     "typescript": "~6.0.2",
     "typescript-eslint": "^8",
     "vite": "^8",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   },
   "overrides": {
     "prosemirror-model": "1.25.12",
