@@ -10,9 +10,13 @@
 //! - [`safety_net`]: the checks every admin-editable entity runs on its own
 //!   write methods (ADR 0011), and [`probe_notes`], the test-only entity
 //!   they are proven on.
+//! - [`owned_file_probes`]: a test-only entity that owns files in every
+//!   column shape, with its file-owner registrations, for the owned-files
+//!   model and the `DeleteOwnedFiles` worker (ADR 0011 §6, ADR 0016 §3).
 
 pub mod fixtures;
 pub mod openapi_schema;
+pub mod owned_file_probes;
 pub mod probe_notes;
 pub mod public_rules;
 pub mod public_samples;
