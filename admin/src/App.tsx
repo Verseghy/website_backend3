@@ -10,17 +10,19 @@
  * session it sends the visitor to the Hungarian sign-in screen
  * (`/admin/login`), which is the only page outside the session. After the
  * sign-in it returns to the page the visitor asked for.
+ *
+ * The signed-in pages keep the session alive while the user types or
+ * clicks (ADR 0006 §1): the layout mounts the activity tracker, which calls
+ * the auth provider's `refreshSession`, with the event target and the clock
+ * that `main.tsx` passes.
  */
-import { useMemo, type ReactNode } from "react"
-import {
-  CustomRoutes,
-  type AuthProvider,
-  type DataProvider,
-  type I18nProvider,
-} from "ra-core"
+import { useCallback, useMemo, type ReactNode } from "react"
+import { CustomRoutes, type DataProvider, type I18nProvider } from "ra-core"
 import { Route } from "react-router-dom"
 
 import { AboutPage } from "@/about/AboutPage"
+import type { ActivityEventTarget } from "@/auth/activity-refresh"
+import type { BackendAuthProvider } from "@/auth/auth-provider"
 import { createSignInPage } from "@/auth/SignInPage"
 import { Admin } from "@/components/admin"
 import { Dashboard } from "@/dashboard/Dashboard"
@@ -32,8 +34,11 @@ import { ADMIN_BASENAME } from "@/router"
 export interface AdminAppProps {
   /** The data provider (`createDataProvider`). */
   readonly dataProvider: DataProvider
-  /** The auth provider (`createAuthProvider`). */
-  readonly authProvider: AuthProvider
+  /**
+   * The auth provider (`createAuthProvider`), with the session refresh that
+   * the activity tracker calls.
+   */
+  readonly authProvider: BackendAuthProvider
   /** The Hungarian i18n provider (`createI18nProvider`). */
   readonly i18nProvider: I18nProvider
   /** The build's raw `VITE_SOURCE_COMMIT`, for the source links. */
@@ -45,6 +50,13 @@ export interface AdminAppProps {
    * none of their code.
    */
   readonly developmentRoutes?: ReactNode
+  /**
+   * Where the activity tracker listens for typing and clicking; `main.tsx`
+   * passes `window`, tests a stub.
+   */
+  readonly activityTarget: ActivityEventTarget
+  /** The current time in milliseconds; `main.tsx` passes `Date.now`. */
+  readonly now: () => number
 }
 
 /**
@@ -59,8 +71,18 @@ export function AdminApp({
   i18nProvider,
   sourceCommit,
   developmentRoutes,
+  activityTarget,
+  now,
 }: AdminAppProps) {
-  const layout = useMemo(() => createAppLayout(sourceCommit), [sourceCommit])
+  const refresh = useCallback(
+    () => authProvider.refreshSession(),
+    [authProvider]
+  )
+  const layout = useMemo(
+    () =>
+      createAppLayout(sourceCommit, { target: activityTarget, now, refresh }),
+    [sourceCommit, activityTarget, now, refresh]
+  )
   const signInPage = useMemo(
     () => createSignInPage(sourceCommit),
     [sourceCommit]

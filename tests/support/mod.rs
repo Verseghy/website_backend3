@@ -16,6 +16,9 @@
 //! - [`admin_probe`]: probe tables for the admin route table's guard
 //!   (ADR 0007 §5), with invented accounts, their grants and their session
 //!   tokens.
+//! - [`session_refresh`]: session tokens placed on the app clock's timeline
+//!   for the tests of the sliding refresh (ADR 0006 §1), and readers of the
+//!   cookie it sets.
 
 pub mod admin_probe;
 pub mod fixtures;
@@ -25,6 +28,7 @@ pub mod probe_notes;
 pub mod public_rules;
 pub mod public_samples;
 pub mod safety_net;
+pub mod session_refresh;
 
 use std::{
     collections::BTreeSet,

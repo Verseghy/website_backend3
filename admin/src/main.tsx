@@ -90,6 +90,11 @@ const router = createAdminRouter(
     i18nProvider={i18nProvider}
     sourceCommit={import.meta.env.VITE_SOURCE_COMMIT}
     developmentRoutes={developmentRoutes}
+    // The session's activity tracker (ADR 0006 §1) listens on the window and
+    // reads the browser's clock; one function for the app's lifetime, so
+    // the tracker is never restarted by a new identity.
+    activityTarget={window}
+    now={Date.now}
   />
 )
 

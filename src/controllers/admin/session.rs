@@ -49,6 +49,18 @@
 //! through which both places read a marker, fails to compile for a marker
 //! whose scopes hold `mfa`.
 //!
+//! The sliding refresh (ADR 0006 §1) is built here too. [`open_session`]
+//! notes where the token came from ([`TokenCarrier`]: the session cookie or
+//! the Bearer header, which is never refreshed, ADR 0006 §3). The guard asks
+//! `passive_refresh_cookie` for the passive refresh of every session it
+//! opens and adds the cookie to the answer with `with_passive_refresh`,
+//! unless the handler set the session cookie itself; the explicit refresh,
+//! `POST /api/admin/auth/refresh` (`super::auth::refresh`), builds its
+//! cookie with [`renewed_session_cookie`] as well. Both read the token's
+//! `auth_time` and `exp` with [`session_times`], "now" from the app clock
+//! and the absolute limit from [`session_limits`], and leave the arithmetic
+//! to [`crate::domain::session`].
+//!
 //! An admin handler that needs a signed-in account takes this extractor and
 //! never Loco's `JWT` or `JWTWithUser` directly: those check neither the
 //! account's state nor the version nor the scope, and no permission.
@@ -77,17 +89,29 @@ use std::{
     sync::Arc,
 };
 
-use axum::{extract::FromRequestParts, http::request::Parts};
-use loco_rs::{auth::jwt::UserClaims, prelude::*};
+use axum::{
+    extract::FromRequestParts,
+    http::{HeaderValue, header::SET_COOKIE, request::Parts},
+};
+use chrono::DateTime;
+use loco_rs::{
+    auth::jwt::UserClaims, controller::extractor::auth::extract_token_from_cookie, prelude::*,
+};
 
 use super::error_response;
 use crate::{
+    app::clock,
     domain::{
         authz::AccountGrants,
-        session::{SessionScope, check_session},
+        session::{
+            AbsoluteLimit, Renewal, SessionScope, SessionTimes, TokenCarrier, check_session,
+            passive_renewal,
+        },
+        session_cookie::{SESSION_COOKIE_NAME, names_session_cookie, session_cookie},
     },
     dtos::admin::error::ErrorCode,
     models::users,
+    settings::Settings,
 };
 
 /// The seal of [`AcceptedScopes`].
@@ -171,6 +195,8 @@ pub(super) struct OpenedSession {
     pub(super) grants: AccountGrants,
     /// The token's claims as Loco validated them.
     pub(super) claims: UserClaims,
+    /// Where the request carried the token.
+    pub(super) carrier: TokenCarrier,
 }
 
 impl OpenedSession {
@@ -204,6 +230,7 @@ pub(super) async fn open_session(
     ctx: &AppContext,
     scopes: &'static [SessionScope],
 ) -> Result<OpenedSession, Error> {
+    let carrier = token_carrier(parts);
     let auth::JWTWithUser { claims, user } =
         auth::JWTWithUser::<users::Model>::from_request_parts(parts, ctx)
             .await
@@ -232,7 +259,220 @@ pub(super) async fn open_session(
         scope,
         grants,
         claims,
+        carrier,
     })
+}
+
+/// Where a request carries its session token, as Loco reads it.
+///
+/// - `parts`: the request's head.
+///
+/// `auth.jwt.location` lists the session cookie first, then the Bearer
+/// header (checked at boot, `crate::domain::session_jwt::check_locations`),
+/// and Loco takes the first location that holds a token, with the same
+/// cookie parser as here (loco-rs 1.2.0 `extract_token`). So a request that
+/// sends the session cookie, even beside a Bearer header, is authenticated
+/// by the cookie, and one without it by the Bearer header.
+fn token_carrier(parts: &Parts) -> TokenCarrier {
+    if extract_token_from_cookie(SESSION_COOKIE_NAME, parts).is_ok() {
+        TokenCarrier::Cookie
+    } else {
+        TokenCarrier::Bearer
+    }
+}
+
+/// What the session refresh takes from the settings: the absolute limit of
+/// ADR 0006 §8.
+///
+/// `App::after_context` builds it once from the validated settings and puts
+/// it into the shared store; the guard and the refresh handler read it with
+/// [`session_limits`] and pass the limit to the pure arithmetic of
+/// `crate::domain::session` (ADR 0008 rules 2 and 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionLimits {
+    /// `settings.admin_auth.session_absolute_max_secs`.
+    pub absolute: AbsoluteLimit,
+}
+
+impl SessionLimits {
+    /// The limits of `settings`.
+    ///
+    /// - `settings`: the validated settings of the process.
+    #[must_use]
+    pub fn new(settings: &Settings) -> Self {
+        Self {
+            absolute: settings.admin_auth.session_absolute_max_secs,
+        }
+    }
+}
+
+/// The session limits of this app context.
+///
+/// - `ctx`: the request's app context.
+///
+/// # Errors
+///
+/// [`Error::Message`] when the context carries none: every context Loco
+/// builds has them (`App::after_context`), one built by hand does not.
+pub fn session_limits(ctx: &AppContext) -> Result<SessionLimits> {
+    ctx.shared_store.get::<SessionLimits>().ok_or_else(|| {
+        Error::string(
+            "the session limits are missing from the shared store; App::after_context registers \
+             them, so this context was not built by App::boot",
+        )
+    })
+}
+
+/// The `auth_time` and `exp` of a validated session token.
+///
+/// - `claims`: the claims Loco validated.
+///
+/// loco-rs 1.2.0 keeps `UserClaims::exp` private and has no getter for it,
+/// but `UserClaims` derives `Serialize`: serialised, it writes `pid`, `exp`
+/// and the custom claims side by side, which
+/// [`SessionTimes::from_claims`] reads.
+///
+/// # Errors
+///
+/// An internal error when the claims hold no integer `auth_time` or `exp`.
+/// Every token backend3 signs carries both, and only backend3 holds the
+/// secret, so either is a defect in the code that signed it.
+pub fn session_times(claims: &UserClaims) -> Result<SessionTimes> {
+    match serde_json::to_value(claims)? {
+        serde_json::Value::Object(all) => SessionTimes::from_claims(&all).map_err(Error::wrap),
+        other => Err(Error::string(&format!(
+            "Loco's UserClaims serialised to {other}, not to an object"
+        ))),
+    }
+}
+
+/// The `Set-Cookie` value that renews a full `admin` session (ADR 0006 §1):
+/// a new token for `user`, with the session's `auth_time`, that expires as
+/// `renewed` says.
+///
+/// - `user`: the account, as read for this request; the new token carries
+///   its current `token_version`, which the session check has just found
+///   equal to the token's.
+/// - `times`: the renewed token's times; its `auth_time` is kept, so the
+///   absolute limit still counts from the sign-in.
+/// - `renewed`: the renewal from `crate::domain::session`.
+/// - `ctx`: the app context, for the `auth.jwt` configuration.
+///
+/// Loco's `JWT::generate_token` sets `exp` to the system time plus the
+/// lifetime it is given (recipe 7 step 4 of the project skill), so the
+/// lifetime of `renewed` goes to Loco and to the cookie's `Max-Age` alike.
+/// In production the app clock is the system clock, read a few microseconds
+/// before Loco reads it, so `exp` is `renewed.expires_at`, or one second
+/// later when the system clock's second turns between the two reads. Either
+/// stays within `auth_time` plus the absolute limit: a capped renewal counts
+/// its lifetime from "now" rounded up (`crate::domain::session::renewal`).
+///
+/// # Errors
+///
+/// An internal error when the context has no `auth.jwt` section, when the
+/// `auth_time` is outside chrono's range, or when the token or its cookie
+/// cannot be built (a secret that is not base64, which the boot check rules
+/// out).
+pub fn renewed_session_cookie(
+    user: &users::Model,
+    times: SessionTimes,
+    renewed: Renewal,
+    ctx: &AppContext,
+) -> Result<String> {
+    let auth_time = DateTime::from_timestamp(times.auth_time, 0).ok_or_else(|| {
+        Error::string(&format!(
+            "the session's auth_time {} is outside chrono's range",
+            times.auth_time
+        ))
+    })?;
+    let jwt = ctx.config.get_jwt_config()?;
+    let token = user.generate_session_token(&jwt.secret, renewed.lifetime_secs, auth_time)?;
+    session_cookie(&token, renewed.lifetime_secs).map_err(Error::wrap)
+}
+
+/// The cookie of the passive refresh for an opened session, or `None` when
+/// the session gets none (ADR 0006 §1, "Sliding refresh, passive").
+///
+/// - `session`: the session the guard has just opened.
+/// - `ctx`: the app context, for the app clock, the session limits and the
+///   `auth.jwt` configuration.
+///
+/// [`passive_renewal`] decides: a full `admin` session that the session
+/// cookie carries, with less than 3,600 s left, and a renewal that ends
+/// later than its token. The guard reads "now" here, once per request.
+///
+/// # Errors
+///
+/// The errors of [`renewed_session_cookie`], and an internal error when the
+/// context has no app clock or no session limits. A token without an
+/// integer `auth_time` or `exp` is not one: it gets no refresh, and its
+/// request goes on (an ERROR line names the defect), because an optional
+/// renewal must not fail a request that its session admits.
+pub(super) fn passive_refresh_cookie(
+    session: &OpenedSession,
+    ctx: &AppContext,
+) -> Result<Option<HeaderValue>> {
+    // The two checks that need no claim come first, so a Bearer request or
+    // a restricted session reads neither the clock nor the claims.
+    if session.scope != SessionScope::Admin || session.carrier != TokenCarrier::Cookie {
+        return Ok(None);
+    }
+    let times = match session_times(&session.claims) {
+        Ok(times) => times,
+        Err(error) => {
+            tracing::error!(
+                user_id = session.user.id,
+                %error,
+                "a session token without auth_time or exp: no passive refresh"
+            );
+            return Ok(None);
+        }
+    };
+    let now = clock(ctx)?.now();
+    let limit = session_limits(ctx)?.absolute;
+    let Some(renewed) = passive_renewal(session.scope, session.carrier, now, times, limit) else {
+        return Ok(None);
+    };
+    tracing::debug!(
+        user_id = session.user.id,
+        expires_at = renewed.expires_at,
+        "passive session refresh"
+    );
+    let cookie = renewed_session_cookie(&session.user, times, renewed, ctx)?;
+    HeaderValue::from_str(&cookie)
+        .map(Some)
+        .map_err(Error::wrap)
+}
+
+/// `response` with the passive refresh's `cookie` added, unless the
+/// response sets, replaces or deletes the session cookie itself.
+///
+/// - `response`: the answer to a request whose session the guard opened:
+///   the handler's, or the guard's own `403`.
+/// - `cookie`: the `Set-Cookie` value of [`passive_refresh_cookie`], or
+///   `None`.
+///
+/// A browser keeps the last of two cookies with one name, so a renewal
+/// beside the handler's own session cookie would override it: the logout's
+/// deletion would leave a session behind (ADR 0006 §2), and the explicit
+/// refresh's cookie would be replaced by an equal one. The handler's
+/// cookie therefore wins, and is the answer's only session cookie.
+pub(super) fn with_passive_refresh(
+    mut response: Response,
+    cookie: Option<HeaderValue>,
+) -> Response {
+    let Some(cookie) = cookie else {
+        return response;
+    };
+    let sets_its_own = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .any(|value| names_session_cookie(value.as_bytes()));
+    if !sets_its_own {
+        response.headers_mut().append(SET_COOKIE, cookie);
+    }
+    response
 }
 
 /// A request's admin session: the signed-in account, opened and checked
@@ -254,10 +494,12 @@ pub struct AdminSession<A: AcceptedScopes = AdminScope> {
     /// The token's claims as Loco validated them: `pid`, and in its
     /// `claims` map the custom claims, such as the `auth_time` that the
     /// session refresh needs. loco-rs 1.2.0 keeps `exp` private and has no
-    /// getter for it, so code that needs the expiry reads it by serialising
-    /// this value (`UserClaims` derives `Serialize`) or decodes the token
-    /// itself.
+    /// getter for it; [`session_times`] reads it with `auth_time`.
     pub claims: UserClaims,
+    /// Where the request carried the token: the session cookie of a
+    /// browser, or the Bearer header of a script, which is never refreshed
+    /// (ADR 0006 §3).
+    pub carrier: TokenCarrier,
     /// The accepted scopes, in the type only. `fn() -> A` keeps the struct
     /// `Send` and `Sync` whatever `A` is.
     accepts: PhantomData<fn() -> A>,
@@ -321,6 +563,7 @@ where
             scope: opened.scope,
             grants: opened.grants,
             claims: opened.claims,
+            carrier: opened.carrier,
             accepts: PhantomData,
         }))
     }
@@ -350,7 +593,156 @@ mod tests {
     };
 
     use super::*;
-    use crate::dtos::admin::error::ErrorEnvelope;
+    use crate::{
+        domain::session_cookie::cleared_session_cookie, dtos::admin::error::ErrorEnvelope,
+    };
+
+    /// The head of a `GET` with `headers`.
+    fn head_with(headers: &[(&str, &str)]) -> Parts {
+        let mut request = Request::get("/api/admin/auth/me");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.body(()).expect("request").into_parts().0
+    }
+
+    #[test]
+    fn the_cookie_carries_the_token_whenever_the_request_sends_it() {
+        let cookie = format!("theme=dark; {SESSION_COOKIE_NAME}=a.b.c");
+        for (headers, carrier) in [
+            (vec![("cookie", cookie.as_str())], TokenCarrier::Cookie),
+            // Loco reads the cookie first, also beside a Bearer header.
+            (
+                vec![
+                    ("cookie", cookie.as_str()),
+                    ("authorization", "Bearer x.y.z"),
+                ],
+                TokenCarrier::Cookie,
+            ),
+            // An empty cookie is still the cookie Loco reads (and refuses).
+            (
+                vec![("cookie", "__Host-admin_session=")],
+                TokenCarrier::Cookie,
+            ),
+            (
+                vec![("authorization", "Bearer x.y.z")],
+                TokenCarrier::Bearer,
+            ),
+            // Another cookie is not the session's.
+            (
+                vec![
+                    ("cookie", "__Host-admin_mfa=a.b.c"),
+                    ("authorization", "Bearer x"),
+                ],
+                TokenCarrier::Bearer,
+            ),
+            (vec![], TokenCarrier::Bearer),
+        ] {
+            assert_eq!(token_carrier(&head_with(&headers)), carrier, "{headers:?}");
+        }
+    }
+
+    /// The `Set-Cookie` values of `response`.
+    fn set_cookies(response: &Response) -> Vec<&str> {
+        response
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().expect("ASCII"))
+            .collect()
+    }
+
+    #[test]
+    fn the_passive_refresh_never_overrides_the_handler_s_session_cookie() {
+        let renewed = HeaderValue::from_static("__Host-admin_session=new; Max-Age=7200");
+        // No refresh: the answer is left as it is.
+        let plain = with_passive_refresh(StatusCode::OK.into_response(), None);
+        assert_eq!(set_cookies(&plain), [] as [&str; 0]);
+        // A refresh joins an answer that sets no cookie, or another one.
+        let joined = with_passive_refresh(StatusCode::OK.into_response(), Some(renewed.clone()));
+        assert_eq!(
+            set_cookies(&joined),
+            ["__Host-admin_session=new; Max-Age=7200"]
+        );
+        let mut other = StatusCode::OK.into_response();
+        other
+            .headers_mut()
+            .append(SET_COOKIE, HeaderValue::from_static("theme=dark"));
+        let beside = with_passive_refresh(other, Some(renewed.clone()));
+        assert_eq!(
+            set_cookies(&beside),
+            ["theme=dark", "__Host-admin_session=new; Max-Age=7200"]
+        );
+        // An answer that deletes or sets the session cookie keeps its own.
+        for own in [
+            cleared_session_cookie(),
+            "__Host-admin_session=mine; Max-Age=60".to_owned(),
+        ] {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response.headers_mut().append(
+                SET_COOKIE,
+                HeaderValue::from_str(&own).expect("a header value"),
+            );
+            let kept = with_passive_refresh(response, Some(renewed.clone()));
+            assert_eq!(set_cookies(&kept), [own.as_str()]);
+        }
+    }
+
+    #[test]
+    fn session_times_read_loco_s_private_exp() {
+        let claims: UserClaims = serde_json::from_value(serde_json::json!({
+            "pid": "11111111-2222-3333-4444-555555555555",
+            "exp": 1_793_617_200_u64,
+            "tv": 0,
+            "scope": "admin",
+            "auth_time": 1_793_610_000,
+        }))
+        .expect("Loco's claims");
+        assert_eq!(
+            session_times(&claims).expect("both claims"),
+            SessionTimes {
+                auth_time: 1_793_610_000,
+                expires_at: 1_793_617_200,
+            }
+        );
+        let without_auth_time: UserClaims = serde_json::from_value(serde_json::json!({
+            "pid": "p",
+            "exp": 1_793_617_200_u64,
+        }))
+        .expect("Loco's claims");
+        let error = session_times(&without_auth_time).expect_err("no auth_time");
+        assert!(error.to_string().contains("auth_time"), "{error}");
+    }
+
+    #[test]
+    fn the_session_limits_come_from_the_settings() {
+        let settings = Settings::from_section(Some(&serde_json::json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": { "binding": "127.0.0.1", "port": 9464 },
+            "admin_auth": {
+                "totp_encryption_key": crate::domain::totp_secret::PUBLISHED_LOCAL_KEY,
+                "session_absolute_max_secs": 9000,
+                "reset_link_ttl_secs": 1,
+                "temp_password_ttl_secs": 1,
+                "force_change_short_legacy_password": true,
+            },
+            "image_optimisation": {
+                "pixel_budget": 50_000_000,
+                "png": { "threshold_pixels": 6_000_000, "large_preset": 0 },
+            },
+            "import": { "source_database_url": "" },
+            "media": {
+                "root": "target/media/test/public",
+                "tmp_dir": "target/media/test/tmp",
+                "trash_dir": "target/media/test/trash",
+                "min_free_bytes": 1,
+                "public_base_url": "http://localhost/storage",
+                "serve_storage": false,
+            },
+        })))
+        .expect("valid settings");
+        assert_eq!(SessionLimits::new(&settings).absolute.secs(), 9000);
+    }
 
     #[test]
     fn no_marker_accepts_an_mfa_token() {

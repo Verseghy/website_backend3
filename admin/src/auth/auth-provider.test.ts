@@ -8,13 +8,18 @@ import { describe, expect, it, vi } from "vitest"
 import { parseErrorEnvelope } from "@/api/error-envelope"
 import type { ErrorEnvelope } from "@/bindings/ErrorEnvelope"
 import type { MeResponse } from "@/bindings/MeResponse"
+import { hangingFetch } from "@/test/hanging-fetch"
 
+import { REFRESH_INTERVAL_MS } from "./activity-refresh"
 import {
   AuthProviderConfigError,
   createAuthProvider,
   isSignOutRequest,
   parseLoginResponse,
   parseMeResponse,
+  REFRESH_PATH,
+  REFRESH_TIMEOUT_MS,
+  refreshOutcome,
   SessionCheckError,
   SIGN_OUT_PARAMS,
   SignInError,
@@ -121,6 +126,33 @@ describe("createAuthProvider", () => {
         fetch: undefined as unknown as typeof globalThis.fetch,
       })
     ).toThrow(/fetch must be a function/)
+  })
+
+  it.each([0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "refuses the refreshTimeoutMs %d, which would give up at once or never",
+    (refreshTimeoutMs) => {
+      expect(() =>
+        createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch: vi.fn(),
+          refreshTimeoutMs,
+        })
+      ).toThrow(
+        /^refreshTimeoutMs must be a finite number of milliseconds, at least 1; got .*REFRESH_TIMEOUT_MS \(30 seconds\)/
+      )
+    }
+  )
+
+  it("accepts a refreshTimeoutMs of 1 millisecond or more", () => {
+    for (const refreshTimeoutMs of [1, 1.5, REFRESH_TIMEOUT_MS]) {
+      expect(() =>
+        createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch: vi.fn(),
+          refreshTimeoutMs,
+        })
+      ).not.toThrow()
+    }
   })
 })
 
@@ -500,6 +532,87 @@ describe("logout", () => {
       }),
       // The two that end it, and the other null-body statuses, every run.
       { examples: [[204], [401], [205], [304], [200]] }
+    )
+  })
+})
+
+describe("refreshSession", () => {
+  it("posts /auth/refresh and reports a renewed session on 204 (ADR 0006 §1)", async () => {
+    const { provider, fetch } = providerAnswering(
+      new Response(null, { status: 204 })
+    )
+    await expect(provider.refreshSession()).resolves.toBe("refreshed")
+    expect(REFRESH_PATH).toBe("/auth/refresh")
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = fetch.mock.calls[0]
+    expect(url).toBe("/api/admin/auth/refresh")
+    expect(init).toEqual({
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+      signal: expect.any(AbortSignal),
+    })
+  })
+
+  it("bounds the call by REFRESH_TIMEOUT_MS, well below the tracker's interval", async () => {
+    expect(REFRESH_TIMEOUT_MS).toBe(30 * 1000)
+    expect(REFRESH_TIMEOUT_MS).toBeLessThan(REFRESH_INTERVAL_MS)
+    const timeout = vi.spyOn(AbortSignal, "timeout")
+    try {
+      const { provider, fetch } = providerAnswering(
+        new Response(null, { status: 204 })
+      )
+      await provider.refreshSession()
+      expect(timeout).toHaveBeenCalledExactlyOnceWith(REFRESH_TIMEOUT_MS)
+      expect(fetch.mock.calls[0][1]?.signal).toBe(timeout.mock.results[0].value)
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it("gives up on a call that has no answer after the timeout, and reports a failure", async () => {
+    const { fetch, signals } = hangingFetch()
+    const provider = createAuthProvider({
+      apiBaseUrl: "/api/admin",
+      fetch,
+      refreshTimeoutMs: 20,
+    })
+    await expect(provider.refreshSession()).resolves.toBe("failed")
+    expect(signals).toHaveLength(1)
+    expect(signals[0].aborted).toBe(true)
+    expect((signals[0].reason as DOMException).name).toBe("TimeoutError")
+  })
+
+  it("reports an ended session on 401 and never rejects or signs out", async () => {
+    const { provider, fetch } = providerAnswering(
+      json(401, envelope("unauthorized"))
+    )
+    await expect(provider.refreshSession()).resolves.toBe("ended")
+    // Only the refresh was asked: no sign-out request follows.
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("reports a failure for any other answer and for no answer", async () => {
+    for (const answer of [
+      json(500, envelope("internal")),
+      json(403, envelope("forbidden")),
+      json(200, {}),
+      new TypeError("Failed to fetch"),
+    ]) {
+      const { provider } = providerAnswering(answer)
+      await expect(provider.refreshSession()).resolves.toBe("failed")
+    }
+  })
+})
+
+describe("refreshOutcome", () => {
+  it("is refreshed for 204, ended for 401 and failed for every other status", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 100, max: 599 }), (status) => {
+        const expected =
+          status === 204 ? "refreshed" : status === 401 ? "ended" : "failed"
+        expect(refreshOutcome(status)).toBe(expected)
+      })
     )
   })
 })

@@ -883,9 +883,12 @@ impl Model {
     ///
     /// - `secret`: the base64 JWT secret, `auth.jwt.secret`.
     /// - `expiration`: the token's lifetime in seconds, `auth.jwt.expiration`.
-    /// - `auth_time`: when the password step succeeded, the app clock's "now"
-    ///   that the caller read (ADR 0010 point 7). The claim holds it in whole
-    ///   seconds since the Unix epoch, a JWT `NumericDate` like `exp`.
+    /// - `auth_time`: when the password step succeeded: at sign-in the app
+    ///   clock's "now" that the caller read (ADR 0010 point 7), and at a
+    ///   sliding refresh the `auth_time` of the session it renews, so the
+    ///   absolute limit counts from the sign-in (ADR 0006 §1). The claim
+    ///   holds it in whole seconds since the Unix epoch, a JWT `NumericDate`
+    ///   like `exp`.
     ///
     /// The token is Loco's HS512 JWT: Loco's `pid` claim (this account's
     /// UUID) and `exp` (the current time plus `expiration`, which Loco

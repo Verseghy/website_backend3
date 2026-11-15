@@ -11,10 +11,13 @@
 //!   hand it down (ADR 0023 §9, ADR 0008 rule 3). It also stores the upload
 //!   handles ([`MediaUploads`]: the media settings and the process's one
 //!   image optimiser permit, ADR 0015 §7), which upload handlers take from
-//!   there, and the handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]:
-//!   the media settings and the file-owner registry, ADR 0011 §6). It checks
-//!   that registry before storing it and refuses to start on a name that is
-//!   not a plain identifier, because the worker writes the names into SQL.
+//!   there, the handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]:
+//!   the media settings and the file-owner registry, ADR 0011 §6), and the
+//!   session limits ([`SessionLimits`]: the absolute limit of ADR 0006 §8),
+//!   which the sliding refresh of the admin session reads. It checks the
+//!   file-owner registry before storing it and refuses to start on a name
+//!   that is not a plain identifier, because the worker writes the names
+//!   into SQL.
 //! - `load_config` runs the database-target guard of ADR 0024 §4 (layer 3)
 //!   and validates the typed settings, including that `settings.metrics.port`
 //!   is not `server.port`, and the admin session's `auth.jwt` section
@@ -109,7 +112,7 @@ use crate::tasks;
 use crate::{
     controllers::{
         self,
-        admin::media::MediaUploads,
+        admin::{media::MediaUploads, session::SessionLimits},
         admin_ui::{self, DistRequirement},
         metrics::{self, HttpMetrics, Metrics, runtime::RuntimeMetrics},
         not_found, storage,
@@ -408,7 +411,8 @@ impl Hooks for App {
     /// unused one costs a few allocations. Last, it stores the upload
     /// handles ([`MediaUploads`]), one optimiser permit per process, and the
     /// handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]), whose
-    /// file-owner registry it checks.
+    /// file-owner registry it checks, and the session limits that the
+    /// sliding refresh reads ([`SessionLimits`]).
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
         set_clock(&ctx, Arc::new(SystemClock));
         let mut registry = Registry::default();
@@ -430,6 +434,9 @@ impl Hooks for App {
         // plain identifier, because the worker writes the names into SQL.
         ctx.shared_store
             .insert(OwnedFiles::new(&settings).map_err(Error::wrap)?);
+        // The session refresh's absolute limit (ADR 0006 §1, §8), from the
+        // same validated settings.
+        ctx.shared_store.insert(SessionLimits::new(&settings));
         Ok(ctx)
     }
 

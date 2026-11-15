@@ -40,6 +40,15 @@
  *   and the user menu shows why: the cookie still holds a valid session, and
  *   a sign-out that only looked done would leave it to the next person at a
  *   shared computer.
+ * - `refreshSession`, which ra-core never calls, posts `/auth/refresh`, the
+ *   explicit sliding refresh (ADR 0006 §1): the server renews the session
+ *   cookie for two hours, up to the session's absolute limit. The activity
+ *   tracker (`activity-refresh.ts`) calls it on typing or clicking, at most
+ *   every 10 minutes, so a long edit without saves stays signed in. It never
+ *   rejects and never signs out: it reports a {@link RefreshOutcome}, and a
+ *   session that has ended meets its `401` on the next real request, where
+ *   `checkError` handles it. It gives up on an answer that has not come
+ *   after {@link REFRESH_TIMEOUT_MS}, so the tracker can call again.
  *
  * Configuration arrives as explicit options ({@link AuthProviderOptions}),
  * the `fetch` function included, so tests drive the provider against a stub
@@ -68,6 +77,8 @@ export const LOGIN_PATH = "/auth/login"
 export const ME_PATH = "/auth/me"
 /** The sign-out endpoint, relative to the API base path. */
 export const LOGOUT_PATH = "/auth/logout"
+/** The sliding session refresh, relative to the API base path. */
+export const REFRESH_PATH = "/auth/refresh"
 
 /** The message of a sign-in that failed for any reason but a refusal. */
 export const SIGN_IN_FAILED_KEY = "auth.sign_in.failed" satisfies MessageKey
@@ -125,7 +136,25 @@ export interface AuthProviderOptions {
    * tests pass a stub.
    */
   readonly fetch: typeof globalThis.fetch
+  /**
+   * How long `refreshSession` waits for an answer before it gives up, in
+   * milliseconds; at least 1. {@link REFRESH_TIMEOUT_MS} unless a test says
+   * otherwise.
+   */
+  readonly refreshTimeoutMs?: number
 }
+
+/**
+ * How long `refreshSession` waits for an answer: 30 seconds.
+ *
+ * Why it is bounded: the activity tracker starts no new refresh while one
+ * is open, and neither the browser nor backend3 (Loco's request timeout is
+ * off) ends a request that stalls, so one hung call would stop the refresh
+ * for good and end a long edit at the token's two hours. The refresh is a
+ * small request that answers at once; 30 seconds is far beyond a slow
+ * answer and far below the tracker's 10-minute interval.
+ */
+export const REFRESH_TIMEOUT_MS = 30 * 1000
 
 /**
  * Thrown by {@link createAuthProvider} when its options are invalid. The
@@ -207,6 +236,45 @@ export class SessionCheckError extends Error {
     this.name = "SessionCheckError"
     this.status = status
   }
+}
+
+/**
+ * What `refreshSession` found:
+ *
+ * - `refreshed`: `204`; the server renewed the session cookie, or kept it
+ *   unchanged at the session's absolute limit, where nothing is left to
+ *   renew;
+ * - `ended`: `401`; there is no session to renew;
+ * - `failed`: any other answer, or no answer (a network failure, or none
+ *   within {@link REFRESH_TIMEOUT_MS}); the session is as it was.
+ */
+export type RefreshOutcome = "refreshed" | "ended" | "failed"
+
+/**
+ * backend3's auth provider: ra-core's methods, and the explicit session
+ * refresh that the activity tracker calls (ADR 0006 §1).
+ */
+export interface BackendAuthProvider extends AuthProvider {
+  /**
+   * Posts `/auth/refresh`.
+   *
+   * @returns what the server answered; it never rejects.
+   */
+  refreshSession(): Promise<RefreshOutcome>
+}
+
+/**
+ * The outcome of an answer of `/auth/refresh`.
+ *
+ * @param status - the HTTP status.
+ * @returns `refreshed` for `204`, `ended` for `401`, `failed` otherwise
+ *   (a `200` too: the endpoint answers no body).
+ */
+export function refreshOutcome(status: number): RefreshOutcome {
+  if (status === 204) {
+    return "refreshed"
+  }
+  return status === 401 ? "ended" : "failed"
 }
 
 /** The identity ra-core shows for the signed-in account. */
@@ -370,16 +438,18 @@ async function readJson(response: Response): Promise<unknown> {
 /**
  * Builds backend3's auth provider.
  *
- * @param options - the API base path and the `fetch` to use; see
- *   {@link AuthProviderOptions}.
+ * @param options - the API base path, the `fetch` to use and the refresh's
+ *   timeout; see {@link AuthProviderOptions}.
  * @returns an ra-core `AuthProvider` with `login`, `logout`, `checkAuth`,
- *   `checkError` and `getIdentity`. It has no `getPermissions` or
- *   `canAccess` yet: the admin API decides every permission itself
- *   (ADR 0007), and the gated navigation comes with the authorization
- *   slices.
+ *   `checkError` and `getIdentity`, and backend3's `refreshSession`. It has
+ *   no `getPermissions` or `canAccess` yet: the admin API decides every
+ *   permission itself (ADR 0007), and the gated navigation comes with the
+ *   authorization slices.
  * @throws {AuthProviderConfigError} when the options are invalid.
  */
-export function createAuthProvider(options: AuthProviderOptions): AuthProvider {
+export function createAuthProvider(
+  options: AuthProviderOptions
+): BackendAuthProvider {
   const problem = basePathProblem("apiBaseUrl", options.apiBaseUrl)
   if (problem !== undefined) {
     throw new AuthProviderConfigError(problem)
@@ -387,6 +457,12 @@ export function createAuthProvider(options: AuthProviderOptions): AuthProvider {
   if (typeof options.fetch !== "function") {
     throw new AuthProviderConfigError(
       "fetch must be a function; main.tsx passes window.fetch bound to window."
+    )
+  }
+  const refreshTimeoutMs = options.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS
+  if (!Number.isFinite(refreshTimeoutMs) || refreshTimeoutMs < 1) {
+    throw new AuthProviderConfigError(
+      `refreshTimeoutMs must be a finite number of milliseconds, at least 1; got ${String(refreshTimeoutMs)}. The admin uses REFRESH_TIMEOUT_MS (30 seconds).`
     )
   }
   const { apiBaseUrl, fetch } = options
@@ -502,6 +578,24 @@ export function createAuthProvider(options: AuthProviderOptions): AuthProvider {
     async getIdentity(): Promise<AdminIdentity> {
       const me = await readMe()
       return { id: me.pid, fullName: me.name, email: me.email, scope: me.scope }
+    },
+
+    async refreshSession(): Promise<RefreshOutcome> {
+      let response: Response
+      try {
+        response = await fetch(`${apiBaseUrl}${REFRESH_PATH}`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+          // Bounded, so the activity tracker can call again after its
+          // interval (REFRESH_TIMEOUT_MS says why). A timed-out call
+          // rejects with a `TimeoutError` and counts as failed below.
+          signal: AbortSignal.timeout(refreshTimeoutMs),
+        })
+      } catch {
+        return "failed"
+      }
+      return refreshOutcome(response.status)
     },
   }
 }
