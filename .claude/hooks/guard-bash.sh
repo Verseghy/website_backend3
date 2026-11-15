@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # guard-bash.sh: the PreToolUse hook that screens every Bash command an agent
 # runs in this repository (layer 2 of the guardrails, ADR 0024 section 4 as
-# amended by ADR 0028 and ADR 0035).
+# amended by ADR 0028, ADR 0035 and ADR 0036).
 #
 # Why it exists
 #   Layer 1, the deny rules in .claude/settings.json, matches command text as
@@ -35,10 +35,17 @@
 #       (ADR 0028), read as the JSON or YAML decoder reads it, escapes
 #       included, or that replaces or removes a whole object or its whole
 #       metadata, and with it the finalizers (ADR 0035);
+#     - (since D110, ADR 0036) an `argocd app patch` with the same finalizer
+#       match, since an Application's finalizers decide what deleting it
+#       takes along (the reclaim-policy match does not apply: an Application
+#       has none);
 #     - (since D105) an `oc annotate`, an `oc patch` or any argocd command
 #       that names Argo CD's deletion-approved annotation: it is what `argocd
 #       app confirm-deletion` writes, so setting it another way releases the
-#       same deletions;
+#       same deletions; and (since D110, ADR 0036) an inline manifest that
+#       names it, which oc apply, oc create or oc replace reads from the
+#       command text: a heredoc, a here-string, piped echo or printf text or
+#       the echo or printf output of a process substitution;
 #     - Loco's data-wiping subcommands `db reset`, `db down`, `db truncate`
 #       and `db seed --reset` / `-r` of any binary: cargo loco, the app binary
 #       backend3-cli, or inside oc exec / oc rsh / oc debug;
@@ -49,23 +56,32 @@
 #     it blocks when the target host is not local (localhost, 127.0.0.1,
 #     ::1 or a Unix socket) or cannot be checked, and for cargo
 #     commands it checks the importer source IMPORT_SOURCE_DATABASE_URL the
-#     same way. Any listed command, and (since D105, ADR 0035) the Redis
-#     client redis-cli, run through oc exec, oc rsh or oc debug (also as a
+#     same way. Any listed command, and a Redis client (redis-cli since
+#     D105, ADR 0035; redis-benchmark, valkey-cli and keydb-cli since D110,
+#     ADR 0036), run through oc exec, oc rsh or oc debug (also as a
 #     heredoc, a here-string or an echo or printf script piped into them,
 #     through any further pipeline stages) runs in the cluster and is always
-#     blocked. A redis-cli on the agent's own host is not checked: the
-#     clusters' Redis answers there only through a port-forward, which this
-#     check blocks. Nor is one in a new pod that the agent starts (`oc run
-#     ... -- redis-cli -h <service>`, `oc create job`), which D105's answer,
-#     naming oc exec, oc rsh and oc debug, does not cover; a psql there is
-#     still caught by its target check. Only the command part of oc exec,
-#     oc rsh or oc debug counts: the words after `--`
-#     for exec and debug; for rsh the words after the pod, the program its
-#     --shell names, and with -f every word. So a pod, container or namespace
-#     named like a client (`oc exec deploy/mysql -- df -h`) is not blocked by
-#     its name, nor is a data path such as /var/lib/mysql. A pod looked up
-#     with an unquoted $(...) or `...` does not end the command part
-#     (`oc exec $(oc get pod -o name) -- psql` is blocked). It also blocks an
+#     blocked. (Since D110, ADR 0036) a Redis client is also blocked as the
+#     command of a pod that the agent starts: in the command part of `oc
+#     run` (`oc run tmp --image=redis -- redis-cli -h <service> FLUSHALL`),
+#     its --overrides JSON and the text it passes to the pod on stdin, in
+#     the command part of `oc create job|cronjob|deployment|deploymentconfig`,
+#     and in an inline manifest that oc apply, oc create or oc replace reads;
+#     a database command there keeps its target check, as before. A Redis
+#     client on the agent's own host is not checked: the clusters' Redis
+#     answers there only through a port-forward, which this check blocks.
+#     Only the command part of oc exec, oc rsh, oc debug, oc run or oc
+#     create counts: for exec and debug the words after `--`, or else the
+#     words after the target; for run and create the positional words after
+#     the pod's name, before `--` and after it (`oc run tmp --image=redis
+#     --command redis-cli -- -h <service> FLUSHALL` runs redis-cli); for
+#     rsh the words after the pod, the program its --shell names, and with
+#     -f every word. So a pod, container, namespace or image named like a
+#     client (`oc exec deploy/mysql -- df -h`, `oc run redis-cli
+#     --image=redis -- redis-server`) is not blocked by its name, nor is a
+#     data path such as /var/lib/mysql. A pod looked up with an unquoted
+#     $(...) or `...` does not end the command part (`oc exec $(oc get pod
+#     -o name) -- psql` is blocked). It also blocks an
 #     `oc port-forward` to a PostgreSQL, MySQL, MariaDB or (since D69) Redis
 #     port (ADR 0028), also written with a leading `+` (ADR 0035), because
 #     the forwarded database then answers on localhost, which this check
@@ -87,27 +103,26 @@
 #   fills in only part of the command name, `o$(echo c) delete ...`, or a
 #   double-quoted one with double quotes inside, is not, and each echo or
 #   printf output is read as a line of its own, also where bash prints it
-#   on one line, `printf oc; echo ' delete ...'`.) A heredoc that xargs
-#   or parallel read, directly or through cat (`xargs oc <<'EOF'`), and a
-#   here-string that cat passes on through a pipe (`cat <<< '...' | xargs oc`,
-#   `cat <<< '...' | oc exec -i pod -- sh`) are not read as the arguments or
-#   the script either, although a here-string or piped echo text is. Some
-#   routes are not checked at all, here or in website_k8s's hook: an
-#   `oc replace`, `oc apply` or `oc edit` that drops finalizers or replaces
-#   an object, `oc replace --raw` included; `argocd app sync --prune` and
-#   `argocd app set --auto-prune`; an ssh tunnel to a database (`ssh -L
-#   15432:<db>:5432 <host>`); file commands in a pod (`oc exec <pod> --
-#   rm -rf /var/lib/postgresql/data`); commands that an interpreter runs
+#   on one line, `printf oc; echo ' delete ...'`.) Some routes are not
+#   checked at all, here or in website_k8s's hook: an `oc replace`, `oc
+#   apply` or `oc edit` that drops finalizers, replaces an object or sets a
+#   reclaim policy, an inline manifest that does so included, and `oc
+#   replace --raw`; `argocd app sync --prune` and `argocd app set
+#   --auto-prune`; an ssh tunnel to a database (`ssh -L 15432:<db>:5432
+#   <host>`); file commands in a pod (`oc exec <pod> -- rm -rf
+#   /var/lib/postgresql/data`); commands that an interpreter runs
 #   (`python3 -c '...'`); and output redirected into a process substitution
-#   (`echo '...' > >(bash)`). The deletion-approved annotation is checked
-#   only in `oc annotate`, `oc patch` and argocd commands: a manifest that
-#   sets it is not checked when `oc apply`, `oc create` or `oc replace`
-#   reads it, even inline as a heredoc or as piped echo text, nor when it
-#   comes from a file, another command's output or an editor (`oc edit`,
-#   `argocd app edit`). The only Redis client the hook knows is redis-cli,
-#   the one the clusters' Redis image ships, and only through oc exec,
-#   oc rsh or oc debug, not in a pod the agent starts; ADR 0035, "Negative
-#   and risks", lists these paths.
+#   (`echo '...' > >(bash)`). The answer to D110 keeps these as gaps (ADR
+#   0036): a manifest in a file, in another command's output or in an
+#   editor (`oc apply -f job.yaml`, `oc edit`, `argocd app edit`); a Redis
+#   client patched into an existing pod spec (`oc patch deploy ...` that
+#   sets a container's command, `oc set probe ... -- redis-cli`); and a raw
+#   socket or any other program that speaks the Redis protocol (`nc`).
+#   ADR 0036 also records paths outside the verbs the answer names (`oc
+#   adm must-gather --image=... -- <command>`, `argocd app create -f -`)
+#   and spellings these readings miss (a cat here-string inside a group,
+#   a heredoc in a group that does not close on the line after its body).
+#   ADR 0035's and ADR 0036's "Negative and risks" list these paths.
 #
 # Contract with Claude Code (verified against the "Hooks reference" of the
 # Claude Code docs, 2026-10-25)
@@ -139,7 +154,9 @@
 #     assignments in scope for it, so the work grows linearly with the length
 #     of the command.
 #   - The policy is a jq program embedded below, so the hook depends only on
-#     bash and jq. jq's regular expressions do the tokenising in C.
+#     bash and jq. jq's regular expressions do the tokenising in C. jq reads
+#     it from a process substitution, because it is longer than one
+#     command-line argument may be on Linux (128 KiB).
 #   - oc's verb and argocd's subcommands are found the way cobra, which both
 #     use, finds them (see oc_verb_indices and argocd_subcommands), so an
 #     option written before them, a verb-local one included (`oc -p
@@ -156,9 +173,14 @@
 #     quotes), and a heredoc body counts as a script only when a shell reads
 #     it (the receiver is matched with quotes and backslashes removed, and a
 #     variable as the receiver counts as a shell), so commit messages and
-#     files that merely mention a command are not blocked. The cases it
-#     handles are pinned by scripts/tests/test-guard-bash.sh, which must pass
-#     before this file changes (it runs in the CI "Test" job).
+#     files that merely mention a command are not blocked. A heredoc is
+#     found on every line, after any `<`, and inside the scripts above
+#     (ADR 0036); a `<<` that may stand inside quotes makes the hook read
+#     the command twice, once with it as a heredoc and once as text (see
+#     heredoc_texts), so a quoted `<<WORD` cannot hide the commands after
+#     it. The cases it handles are pinned by scripts/tests/test-guard-bash.sh,
+#     which must pass before this file changes (it runs in the CI "Test"
+#     job).
 #   - ADR 0035 section 2 reads command text the way the programs read it,
 #     for every check: options before the oc verb, oc get's value options,
 #     escapes and whole-object operations in a patch, $'...' and $"..."
@@ -238,10 +260,11 @@ IFS= read -r -d '' GUARD_JQ <<'JQ' || true
 #   $check - the check number of ADR 0024 section 4 (1 or 2);
 #   $text  - what was refused and what to do instead.
 def msg($check; $text):
-  "Blocked by .claude/hooks/guard-bash.sh (ADR 0024 section 4 as amended by ADR 0028 and ADR 0035, check \($check)): \($text)\n"
+  "Blocked by .claude/hooks/guard-bash.sh (ADR 0024 section 4 as amended by ADR 0028, ADR 0035 and ADR 0036, check \($check)): \($text)\n"
   + "The guardrails are described in docs/design/adr/0024-ai-maintainability-instruction-files-the-loco-skill-guardrai.md, section 4, "
-  + "docs/design/adr/0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md "
-  + "and docs/design/adr/0035-guardrails-for-in-cluster-redis-argo-cd-patches-and-deletion.md.";
+  + "docs/design/adr/0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md, "
+  + "docs/design/adr/0035-guardrails-for-in-cluster-redis-argo-cd-patches-and-deletion.md "
+  + "and docs/design/adr/0036-guardrails-for-redis-clients-in-new-pods-argocd-app-patch-an.md.";
 
 # Advice for a block that may be a false positive caused by text that only
 # mentions a command, for example in a commit message.
@@ -249,6 +272,17 @@ def text_only_hint:
   " If the words only appear as text (a commit message, a PR body, a search), "
   + "write the text to a file and pass the file (git commit -F <file>, gh pr create --body-file <file>), "
   + "or use the Grep tool for searches.";
+
+# Advice for a block of an inline manifest or of a pod's stdin text (ADR
+# 0036) that may be a false positive: the receiving line of a heredoc is
+# read with its quotes removed, so a commit, PR or issue title that names
+# `oc apply` or `oc run` makes the body that follows count as a manifest or
+# as the pod's stdin. It names only the text-file options of git and gh,
+# not a manifest file: a manifest in a file is a gap that ADR 0036 records,
+# not a way around this check.
+def manifest_text_hint:
+  " If the text is only a commit message, PR or issue body on a command line that also names oc run, oc apply, oc create or oc replace "
+  + "(in a title, say), pass the body from a file (git commit -F <file>, gh pr create --body-file <file>).";
 
 # ------------------------------------------------------------------ helpers
 
@@ -260,6 +294,16 @@ def basename: sub("^.*/"; "");
 # `argocd-windows-amd64.exe`; ADR 0035). Any name that starts with `argocd`
 # and goes on with `-`, `_` or `.` counts, which errs towards blocking.
 def is_argocd_name: test("^argocd(?:[-_.]|$)");
+
+# The Redis clients that check 2 knows, by program name: redis-cli (D105,
+# ADR 0035), the client that the clusters' Redis image ships, and (D110, ADR
+# 0036) redis-benchmark, which ships in the same image and sends any command
+# it is given (`redis-benchmark -n 1 FLUSHALL` empties the database), and
+# valkey-cli and keydb-cli, the clients of Redis's two protocol-compatible
+# forks. Each one is blocked where it runs in the cluster, and none is
+# checked on the agent's own host (see redis_clients). Other programs that
+# speak the protocol, a raw socket (`nc`) among them, are a recorded gap.
+def redis_client_names: ["redis-cli", "redis-benchmark", "valkey-cli", "keydb-cli"];
 
 def is_assignment: test("^[A-Za-z_][A-Za-z0-9_]*=");
 
@@ -314,16 +358,22 @@ def first_positional($valopts):
 # global options of `oc options` (oc 4.22) and the value options of the verbs
 # whose positional words the checks read: get (`--sort-by`, `--chunk-size`,
 # `-L`, `--label-columns` and `--subresource` among them, ADR 0035), delete,
-# exec, rsh, debug and port-forward. (check_oc_patch and
+# exec, rsh, debug and port-forward, and (ADR 0036) run, create and the
+# create subcommands whose command part check_in_cluster reads (job,
+# cronjob, deployment and deploymentconfig: `--overrides`, `--restart`,
+# `--env`, `--schedule`, `--from`, `-r` and the others). (check_oc_patch and
 # check_deletion_approval read every word of an oc patch or oc annotate, and
-# an oc replace counts only by its verb.) An option that pflag gives a value
-# of its own when it stands alone (NoOptDefVal: delete's --cascade, the
-# --dry-run of delete and debug) takes no separate value and is not listed.
+# an oc apply or oc replace counts only by its verb.) An option that pflag
+# gives a value of its own when it stands alone (NoOptDefVal: the --cascade
+# of delete and run, the --dry-run of delete, debug, run and create, and
+# create's --validate) takes no separate value and is not listed.
 # A boolean option must never be listed: the word after it would be skipped,
 # and a pod taken for its value would let the next word, the command, pass
-# for the pod in check_in_cluster. That is why patch's -p is not listed: it
-# is the boolean --previous of `oc logs -p`. scripts/tests/test-guard-bash.sh
-# compares the list with the oc 4.22 client when that client is on PATH.
+# for the pod in check_in_cluster (`oc run --rm tmp redis-cli`, were --rm
+# listed, would read redis-cli as the pod's name). That is why patch's -p is
+# not listed: it is the boolean --previous of `oc logs -p`.
+# scripts/tests/test-guard-bash.sh compares the list with the oc 4.22 client
+# when that client is on PATH.
 def oc_value_options:
   ["-n", "--namespace", "-l", "--selector", "-f", "--filename", "-o", "--output",
    "--field-selector", "--context", "--cluster", "--kubeconfig", "--kuberc", "--server", "-s",
@@ -334,7 +384,9 @@ def oc_value_options:
    "--profile", "--profile-output", "-c", "--container", "--shell",
    "--pod-running-timeout", "--image", "--image-stream", "--node-name", "--to-namespace",
    "--as-user", "--address", "--chunk-size", "-L", "--label-columns", "--sort-by",
-   "--subresource"];
+   "--subresource",
+   "--annotations", "--env", "--field-manager", "--from", "--image-pull-policy", "--labels",
+   "--override-type", "--overrides", "--port", "-r", "--replicas", "--restart", "--schedule"];
 
 # The options that oc itself defines as booleans (`oc options`, oc 4.22), and
 # its help flag. Before the verb, cobra reads every other option without `=`
@@ -403,17 +455,34 @@ def oc_verbs:
   | $s[$i + 1:] as $w
   | $w | oc_verb_indices | $w[.];
 
-# The first `oc exec`, `oc rsh` or `oc debug` in a list of words, as
-# {verb, i} with the index i of its `oc`, or null. Options may stand between
-# oc and the verb (see oc_verb_indices).
-def in_cluster_oc:
+# The first `oc` in a list of words that may run one of $verbs, as
+# {verb, i} with the verb and the index i of its `oc`, or null. Options may
+# stand between oc and the verb (see oc_verb_indices).
+#   $verbs - the oc verbs to look for, for example ["exec", "rsh", "debug"].
+def oc_with_verb($verbs):
   . as $s
   | first(range(0; $s | length) as $i
       | select(($s[$i] | basename) == "oc")
       | $s[$i + 1:] as $w
       | $w | oc_verb_indices | $w[.]
-      | select(IN("exec", "rsh", "debug"))
+      | select(IN($verbs[]))
       | {verb: ., i: $i}) // null;
+
+# The first `oc exec`, `oc rsh` or `oc debug` in a list of words (see
+# oc_with_verb): what it reads on stdin runs in the cluster as a script.
+def in_cluster_oc: oc_with_verb(["exec", "rsh", "debug"]);
+
+# The first `oc run` in a list of words (ADR 0036): what it reads on stdin
+# goes to the pod it starts (`oc run -i tmp --image=redis -- sh`), so check 2
+# looks for a Redis client in it (see check_in_cluster).
+def pod_stdin_oc: oc_with_verb(["run"]);
+
+# The first `oc apply`, `oc create` or `oc replace` in a list of words (ADR
+# 0036): what it reads on stdin is an inline manifest (`oc apply -f - <<'EOF'`),
+# which check 1 reads for the deletion-approved annotation and check 2 for a
+# Redis client. Every text it gets on stdin counts, whatever its -f says, as
+# ADR 0028 reads every text that oc exec gets; that errs towards blocking.
+def manifest_oc: oc_with_verb(["apply", "create", "replace"]);
 
 # The words of a text, cut at blanks with plain string splits. Their cost
 # grows linearly with the text; a regex split (splits) rescans the string for
@@ -453,7 +522,25 @@ def shell_option_values:
 #     --shell names the program it starts when no command follows, so that
 #     value counts too. With -f the target comes from the file, and every
 #     positional word is the command (rsh.go: `o.Command = args[0:]`).
-#   $verb - exec, rsh or debug.
+#   - (ADR 0036) run, whose first positional word is the name of the pod it
+#     starts, reads its options interspersed, and gives every positional
+#     word after the name to the container as its arguments, or with
+#     --command as its command (k8s.io/kubectl pkg/cmd/run: `params["args"]
+#     = args[1:]`). cobra drops the `--` from those words and keeps the
+#     ones before it, and run checks where the `--` stood only to refuse
+#     one right after `run` ("NAME is required for run"), so the command
+#     part is every positional word after the name before `--` and every
+#     word after it: `oc run tmp --image=redis --command redis-cli -- -h
+#     <service> FLUSHALL` runs redis-cli, and so does `oc run tmp
+#     --image=redis redis-cli -- ...`, because the image's entrypoint runs
+#     a first argument that is not an option as the command. An image
+#     named like a client (`--image redis-cli`) is not one, and neither is
+#     the pod's own name (`oc run redis-cli --image=redis -- redis-server`).
+#     The create subcommands that start pods are read the same way (see
+#     in_cluster_parts); they refuse a second word before `--` ("exactly
+#     one NAME is required"), so there the words before it only err
+#     towards blocking.
+#   $verb - exec, rsh, debug or run.
 def in_cluster_command($verb):
   . as $a
   | ($a | index("--")) as $dash
@@ -466,9 +553,39 @@ def in_cluster_command($verb):
            elif $t != null then $a[$t + 1:]
            elif $dash != null then $a[$dash + 2:]
            else [] end)
+    elif $verb == "run" then
+      (if $t == null then [] else $a[$t + 1:($dash // ($a | length))] | positionals(oc_value_options) end)
+      + (if $dash == null then [] else $a[$dash + 1:] end)
     elif $dash != null then $a[$dash + 1:]
-    elif $t != null then $a[$t + 1:]
-    else [] end;
+    elif $t == null then []
+    else $a[$t + 1:] end;
+
+# The `oc create` subcommands that make objects whose pods run a command
+# given after `--` (D110, ADR 0036; `oc create --help`, oc 4.22), with their
+# aliases: `job NAME --image=image -- [COMMAND] [args...]`, and cronjob (cj),
+# deployment (deploy) and deploymentconfig (dc) the same way. Each takes
+# exactly one NAME before `--` ("exactly one NAME is required"), and the
+# words after it are the command of the pod's container.
+def pod_create_types: ["job", "cronjob", "cj", "deployment", "deploy", "deploymentconfig", "dc"];
+
+# The command parts of one reading of an oc verb that runs a command in the
+# cluster, as a stream of {verb, part} (see in_cluster_command). For `oc
+# create`, the subcommand is found as oc's verb is found, in both readings
+# (see oc_verb_indices), so an option before it that the hook does not list
+# cannot hide it (`oc create --schedule '*/5 * * * *' cronjob x -- ...`), and
+# each reading that names one of pod_create_types gives the words after it,
+# which create reads as run reads its own: the NAME, then the command. Any
+# other subcommand (`oc create configmap ...`) runs no command and gives no
+# part. The verb in the result names the subcommand too (`create job`), for
+# the block reason.
+#   $verb - exec, rsh, debug, run or create.
+def in_cluster_parts($verb):
+  if $verb == "create" then
+    . as $a
+    | $a | oc_verb_indices as $ty
+    | select($a[$ty] | IN(pod_create_types[]))
+    | {verb: "create \($a[$ty])", part: ($a[$ty + 1:] | in_cluster_command("run"))}
+  else {verb: $verb, part: in_cluster_command($verb)} end;
 
 # The synthetic segment for text that oc exec, oc rsh or oc debug reads on
 # stdin, which runs in the cluster: `oc <verb> stdin -- sh -c '<text>'`. The
@@ -476,6 +593,33 @@ def in_cluster_command($verb):
 # in_cluster_command) holds `sh -c '<text>'` for every verb, rsh included.
 #   $verb - exec, rsh or debug.
 def in_cluster_script($verb): ["oc", $verb, "stdin", "--", "sh", "-c", .];
+
+# The first word of a synthetic segment that carries a text the shell does
+# not run as commands (ADR 0036): an inline manifest that oc apply, oc create
+# or oc replace reads (kind "manifest"), or the text that oc run passes to
+# the pod it starts (kind "pod-stdin"). Its text is base64-encoded, so that
+# no other check reads it as words: a manifest is data, and a ConfigMap that
+# quotes `oc exec pod -- psql` must not count as that command. The NUL keeps
+# it from colliding with a word the lexer gets from shell text (a NUL ends a
+# $'...' part, and bash itself cannot pass one in a word); a forged one only
+# makes the checks read a text as such a text, which errs towards blocking.
+# It holds the word oc, so that the fast path (see may_matter) lexes a chunk
+# that strip_heredocs filled with such a line.
+def synthetic_marker: "\u0000oc-guard-synthetic";
+
+# The synthetic segment for a text (see synthetic_marker), as a list of
+# words: [marker, kind, verb, base64 of the text].
+#   $kind - "manifest" or "pod-stdin";
+#   $verb - the oc verb that reads the text (apply, create, replace or run).
+def synthetic_segment($kind; $verb): [synthetic_marker, $kind, $verb, @base64];
+
+# The kind, verb and decoded text of a synthetic segment (see
+# synthetic_segment), or empty for any other segment. A forged segment whose
+# text is not base64 decodes to "", which names nothing.
+#   $kind - "manifest" or "pod-stdin".
+def synthetic_text($kind):
+  select(length == 4 and .[0] == synthetic_marker and .[1] == $kind)
+  | {verb: .[2], text: (.[3] | try @base64d catch "")};
 
 # How xargs or GNU parallel among the words before a command passes its input
 # on to that command: null when neither runs it, or when xargs reads its
@@ -670,6 +814,25 @@ def var_receiver_re:
 def in_cluster_receiver_re:
   "(?:^|[\\s;&|(])(?:[^\\s;&|()]*/)?oc\\s(?:[^;&|()\\n]*\\s)?(?<verb>exec|rsh|debug)(?=[\\s;&|)]|$)";
 
+# `oc run` on the receiving line (ADR 0036): the heredoc body goes to the pod
+# it starts, so check 2 reads it for a Redis client (see pod_stdin_oc).
+def pod_stdin_receiver_re:
+  "(?:^|[\\s;&|(])(?:[^\\s;&|()]*/)?oc\\s(?:[^;&|()\\n]*\\s)?run(?=[\\s;&|)]|$)";
+
+# `oc apply`, `oc create` or `oc replace` on the receiving line (ADR 0036):
+# the heredoc body is an inline manifest (see manifest_oc), also when `cat`
+# passes it on (`cat <<'EOF' | oc apply -f -`). The verb is the first one
+# after the oc, for the block reason.
+def manifest_receiver_re:
+  "(?:^|[\\s;&|(])(?:[^\\s;&|()]*/)?oc\\s(?:[^;&|()\\n]*?\\s)?(?<verb>apply|create|replace)(?=[\\s;&|)]|$)";
+
+# xargs or GNU parallel on the receiving line (ADR 0036, the fix that ADR
+# 0035's "Follow-up work" names): they read the heredoc body as the
+# arguments of the command they run, directly or through cat (`xargs oc
+# <<'EOF'`, `cat <<'EOF' | xargs oc`), as they read a here-string.
+def runner_receiver_re:
+  "(?:^|[\\s;&|(`])(?:[^\\s;&|()`]*/)?(?:xargs|parallel)(?=[\\s;&|)`]|$)";
+
 # The words a shell would see in a text, joined, which is close enough for
 # the receiver tests above and for check_in_cluster, as a stream of one or
 # two readings. The callers count a match in either (ADR 0035):
@@ -693,28 +856,239 @@ def unquoted_texts:
 # Quotes a text as one single-quoted shell word.
 def sq_quote: "'" + gsub("'"; "'\\''") + "'";
 
-# Removes heredoc bodies that are data, so that a commit message or a file
-# written with `cat <<'EOF'` cannot trip check 1. A body is kept when a shell
-# reads it, and only its $(...) and `...` are kept when the delimiter is
-# unquoted (the shell expands those even in data). A body that oc exec,
-# oc rsh or oc debug reads is kept as the -c script of a synthetic
-# `oc <verb> stdin -- sh -c '<body>'` line (see in_cluster_script), so that
-# check 2 sees the database commands in it next to the oc that runs them in
-# the cluster. lex does the same for here-strings and piped echo or printf
-# text.
-def strip_heredocs:
-  gsub("(?<pre>^[^\\n<]*)<<-?[ \\t]*(?<q>['\"]?)(?<d>[A-Za-z0-9_.-]+)\\k<q>(?<rest>[^\\n]*)\\n(?:(?<body>[\\s\\S]*?)\\n)?[ \\t]*\\k<d>[ \\t]*(?=\\n|$)";
-    (.pre + " " + .rest) as $line
-    # Each reading of the line counts (see unquoted_texts).
-    | [$line | unquoted_texts] as $plain
-    | (first($plain[] | select(test(in_cluster_receiver_re)) | capture(in_cluster_receiver_re).verb) // null) as $verb
-    | (.body // "") as $body
-    | $line + "\n"
-      + if $verb != null then
-          "oc \($verb) stdin -- sh -c \($body | sq_quote)"
-        elif any($plain[]; test(shell_receiver_re) or test(var_receiver_re)) then $body
-        elif .q == "" then ([$body | scan("\\$\\([\\s\\S]*?\\)|`[^`]*`")] | join("\n"))
-        else "" end);
+# A text with every ; & | ( ) inside a quoted string replaced by `_`, for
+# the receiver tests (ADR 0036): the receiver patterns stop at a separator
+# between oc and its verb, so a quoted option value that holds one (`oc
+# --selector='a|b' apply -f -`) would otherwise hide the verb. Only the
+# receiving line of a heredoc is read this way, so the gsub's cost per match
+# stays small.
+def quoted_separators_blanked:
+  gsub("(?<s>'[^']*'|\"(?:\\\\[\\s\\S]|[^\"\\\\])*\")"; .s | gsub("[;&|()]"; "_"));
+
+# ------------------------------------------------------------------ heredocs
+#
+# A heredoc is found on its receiving line, the line that holds the `<<`
+# operator; its body is the lines after that line, up to a line that holds
+# only the delimiter (blanks around it allowed, which ends a body early only
+# where a `<<-` would, and errs towards reading more text as commands). A
+# `<<` inside quotes is no operator: `echo '<<X'` prints <<X, and the lines
+# after it are commands. The hook reads every command twice where that is
+# not sure (see heredoc_texts), and these patterns tell where it is sure: a
+# small model of bash's quoting, line by line. It knows single and double
+# quotes, a $(...) with plain content and simple strings, `$` before
+# anything else, and a comment that starts a word; a line with anything it
+# does not model (a backslash, a backtick, $'...', a nested or unbalanced
+# $(...)) makes the quoting "unknown" from there on. The patterns use
+# possessive loops, and each item starts at a different character, so each
+# line is read once.
+
+# The content of a $(...) that the model reads: plain text and simple
+# strings, with no parentheses, `$`, backslash, backtick or comment.
+def heredoc_sub_content_re: "(?:[^'\"\\\\`$()#\\n]|'[^'\\n]*'|\"[^\"\\\\`$\\n]*\")";
+
+# A $(...) with such content, or an arithmetic $((...)) with plain content
+# (`$((1<<2))`, whose `<<` is a shift), which leaves the quoting where it
+# was.
+def heredoc_sub_re:
+  "\\$\\((?:" + heredoc_sub_content_re + "*|\\([^'\"\\\\`$()#\\n]*\\))\\)";
+
+# One character, `$` or $(...) inside a double-quoted string.
+def heredoc_dq_content_re: "(?:[^\"\\\\`$\\n]|\\$(?![('\"])|" + heredoc_sub_re + ")";
+
+# One item outside quotes: a plain character, a `$` that starts no quote or
+# $( (`$1`, `${x}`), a whole single- or double-quoted string, a `#` inside a
+# word (`a#b`, `$#`), or a modelled $(...).
+def heredoc_out_item_re:
+  "(?:[^'\"\\\\`$#\\n]|\\$(?![('\"])|'[^'\\n]*'|\"" + heredoc_dq_content_re + "*\"|(?<=[^\\s;&|()<>])#|" + heredoc_sub_re + ")";
+
+# An open double-quoted string with an open $( in it, at the end of a text:
+# `git commit -m "$(cat ` before `<<'EOF'`. Inside the $( the quoting starts
+# afresh, so a `<<` there is an operator.
+def heredoc_dqsub_tail_re: "\"" + heredoc_dq_content_re + "*\\$\\(" + heredoc_sub_content_re + "*";
+
+# How a line that the model reads ends, after its items: with nothing, a
+# comment, an open single-quoted string, an open "$( or an open
+# double-quoted string. The names of the captures say which.
+def heredoc_line_end_re:
+  "(?:|(?:^|(?<=[\\s;&|()<>]))#[^\\n]*|(?<sq>')[^'\\n]*|(?<ds>" + heredoc_dqsub_tail_re + ")|(?<dq>\")"
+  + heredoc_dq_content_re + "*)$";
+
+# The start of a line, by the quoting it starts in, up to the point where
+# it is outside quotes again: at once ("out"), after the `'` that closes a
+# string ("sq") or the `"` that closes one ("dq"), or after the `)"` that
+# closes an open "$( ("dqsub", whose content is read as heredoc_sub_content_re
+# reads it).
+#   $st - "out", "sq", "dq" or "dqsub".
+def heredoc_state_prefix_re($st):
+  if $st == "out" then "^"
+  elif $st == "sq" then "^[^'\\n]*'"
+  elif $st == "dq" then "^" + heredoc_dq_content_re + "*\""
+  else "^" + heredoc_sub_content_re + "*\\)\"" end;
+
+# The quoting at the end of a line, from the quoting at its start: "out",
+# "sq", "dq", "dqsub" or "unknown" (see the notes above). A line with none
+# of ' " \ ` $ # leaves "out" as it is, without a regex. "unknown" stays.
+#   $st - the quoting at the start of the line.
+def heredoc_next_state($st):
+  . as $l
+  | if $st == "unknown" then "unknown"
+    elif $st == "out" and (test("['\"\\\\`$#]") | not) then "out"
+    else
+      (first(capture(heredoc_state_prefix_re($st) + "(?:" + heredoc_out_item_re + ")*+" + heredoc_line_end_re))
+       | if .sq != null then "sq" elif .ds != null then "dqsub" elif .dq != null then "dq" else "out" end)
+      // (if $st == "sq" and test("^[^'\\n]*$") then "sq"
+          elif $st == "dq" and test("^" + heredoc_dq_content_re + "*$") then "dq"
+          elif $st == "dqsub" and test("^" + heredoc_sub_content_re + "*$") then "dqsub"
+          else "unknown" end)
+    end;
+
+# Whether the text before a `<<` on a line, which starts in quoting $st,
+# leaves the `<<` surely outside quotes: the model reads it to its end
+# outside quotes, or inside an open "$( (a `<<` in the content of an open
+# "$( started on an earlier line counts too).
+#   $st - the quoting at the start of the line.
+def heredoc_operator_is_sure($st):
+  if $st == "unknown" then false
+  else test(heredoc_state_prefix_re($st) + "(?:" + heredoc_out_item_re + ")*+(?:" + heredoc_dqsub_tail_re + ")?$")
+       or ($st == "dqsub" and test("^" + heredoc_sub_content_re + "*$"))
+  end;
+
+# The heredoc operators on a line, as a stream of {offset, length, q, d}: the
+# `<<` or `<<-`, the quote q around the delimiter ('', ' or ") and the
+# delimiter d. A `<<<` (a here-string) is none: its first `<<` is followed
+# by a `<`, which no delimiter starts with, and the look-behind keeps its
+# last two from counting. Neither is a `<<` whose delimiter is not a plain
+# word (`<<\EOF`, `<<"$X"`): its body is then read as commands, which errs
+# towards blocking.
+def heredoc_operators:
+  match("(?<!<)<<-?[ \\t]*(?<q>['\"]?)(?<d>[A-Za-z0-9_.-]+)\\k<q>"; "g")
+  | {offset, length, q: .captures[0].string, d: .captures[1].string};
+
+# Whether a line ends a heredoc with delimiter $d.
+#   $d - the delimiter.
+def is_heredoc_delimiter($d):
+  contains($d) and (sub("^[ \\t]+"; "") | sub("[ \\t]+$"; "")) == $d;
+
+# What a receiving line becomes once its heredocs are read, from the line
+# itself, its heredocs $taken in order, each with its body, and the line
+# $next after the last body. A body is kept when a shell reads it, and only
+# its $(...) and `...` are kept when the delimiter is unquoted (the shell
+# expands those even in data), so a commit message or a file written with
+# `cat <<'EOF'` cannot trip check 1. A body that oc exec, oc rsh or oc debug
+# reads is kept as the -c script of a synthetic `oc <verb> stdin -- sh -c
+# '<body>'` line (see in_cluster_script), so that check 2 sees the database
+# commands in it next to the oc that runs them in the cluster. lex does the
+# same for here-strings and piped echo or printf text. ADR 0036 adds three
+# receivers, each read in addition to the above:
+#   - oc run: the body is the text the pod gets, kept as a synthetic
+#     "pod-stdin" segment for check 2's Redis client rule (see
+#     synthetic_marker), and not as commands, since the pod's program need
+#     not be a shell (a shell receiver keeps it as a script, as before);
+#   - oc apply, oc create or oc replace: the body is an inline manifest, kept
+#     as a synthetic "manifest" segment;
+#   - xargs or GNU parallel: the body is also put on the receiving line as a
+#     here-string, in place of the heredoc, which lex passes on as their
+#     input (and cat passes on as its output, see cat_here_strings), so that
+#     `xargs oc <<'EOF'` with `delete ns web` in the body reads as `xargs oc
+#     delete ns web`.
+# The receivers are found on the line with its operators taken out, in each
+# reading of unquoted_texts, also with the separators inside quoted strings
+# blanked (see quoted_separators_blanked). Every receiver on the line reads
+# every body on it, which errs towards blocking: bash gives a command the
+# last of its heredocs (`oc apply -f - <<'A' <<'B'` reads B) and each
+# command its own. When the pipeline goes on after the bodies, because the
+# line ends in `|` or `|&` (`cat <<'EOF' |`, the body, `EOF`, then `oc apply
+# -f -`), or when $next closes a group (`( cat <<'EOF'`, the body, `EOF`,
+# then `) | oc apply -f -`), $next is part of the receiving text too, since
+# its command reads what the receiving line prints. The result is
+# {line, readings, joined}: the receiving line without its operators (with
+# here-strings in their place for xargs or parallel), the reading lines,
+# each after a line break, and whether $next is part of the receiving text.
+#   $taken - the heredocs, as heredoc_operators gives them, with .body;
+#   $next  - the line after the last body, or null at the end of the text.
+def heredoc_replacement($taken; $next):
+  . as $l
+  | (reduce ($taken | reverse[]) as $op ($l; .[:$op.offset] + " " + .[$op.offset + $op.length:])) as $line
+  | (($next != null) and (($line | test("\\|&?[ \\t]*$")) or ($next | test("^[ \\t]*[)}]")))) as $joined
+  | ($line + (if $joined then " " + $next else "" end)) as $recv
+  # Each reading of the line counts (see unquoted_texts).
+  | [$recv | unquoted_texts, (select(test("['\"]")) | quoted_separators_blanked | unquoted_texts)] as $plain
+  | (first($plain[] | select(test(in_cluster_receiver_re)) | capture(in_cluster_receiver_re).verb) // null) as $verb
+  | any($plain[]; test(pod_stdin_receiver_re)) as $pod
+  | (first($plain[] | select(test(manifest_receiver_re)) | capture(manifest_receiver_re).verb) // null) as $manifest
+  | any($plain[]; test(runner_receiver_re)) as $runner
+  | any($plain[]; test(shell_receiver_re) or test(var_receiver_re)) as $shell
+  | {joined: $joined,
+     line: (if $runner then
+              reduce ($taken | reverse[]) as $op ($l; .[:$op.offset] + " <<< " + ($op.body | sq_quote) + " " + .[$op.offset + $op.length:])
+            else $line end),
+     readings: ([$taken[] | .body as $body
+        | (if $verb != null then "oc \($verb) stdin -- sh -c \($body | sq_quote)"
+           elif $shell then $body
+           elif .q == "" then [$body | scan("\\$\\([\\s\\S]*?\\)|`[^`]*`")] | join("\n")
+           else "" end),
+          (if $pod then $body | synthetic_segment("pod-stdin"; "run") | join(" ") else empty end),
+          (if $manifest != null then $body | synthetic_segment("manifest"; $manifest) | join(" ") else empty end)
+        | "\n" + .] | join(""))};
+
+# Reads the heredocs of a text (see heredoc_replacement), line by line.
+# Every operator on a line counts, in order (ADR 0036), each taking the
+# lines up to its delimiter; one whose delimiter never comes is not a
+# heredoc, and the search goes on with the next. A heredoc counts on every
+# line of the command, also after a `<` (`oc apply -f <(cat <<'EOF'`, ADR
+# 0036 fixes this): before, a pattern anchored with jq's `^`, which matches
+# only at the start of the whole text, found one only on the first line,
+# and only before any `<` there, so a script that oc exec read on a later
+# line (`echo hi`, then `oc exec -i pg-0 -- sh <<'EOF'` and `psql`) ran on
+# the host for the checks.
+#   $aware - false to take every operator; true to take only the operators
+#            that the quoting model says stand surely outside quotes (see
+#            heredoc_operator_is_sure), and to keep the others as command
+#            text. heredoc_texts reads both ways.
+def strip_heredocs($aware):
+  split("\n") as $lines
+  | ($lines | length) as $n
+  | reduce range(0; $n) as $i ({out: [], st: "out", skip: -1};
+      if $i <= .skip then .
+      else
+        $lines[$i] as $l
+        | .st as $st
+        | [if $l | contains("<<") then $l | heredoc_operators else empty end
+           | select(($aware | not) or ($l[:.offset] | heredoc_operator_is_sure($st)))] as $ops
+        # Each operator takes the lines from the end of the previous body.
+        | (reduce $ops[] as $op ({c: ($i + 1), taken: []};
+             .c as $c
+             | (first(range($c; $n) as $j | select($lines[$j] | is_heredoc_delimiter($op.d)) | $j) // null) as $j
+             | if $j == null then . else .taken += [$op + {body: ($lines[$c:$j] | join("\n"))}] | .c = $j + 1 end)) as $h
+        | (if $aware then .st = ($l | heredoc_next_state($st)) else . end)
+        | if ($h.taken | length) == 0 then .out += [$l]
+          else
+            $lines[$h.c] as $next
+            | ($l | heredoc_replacement($h.taken; $next)) as $r
+            # When the next line goes on with the pipeline, it comes right
+            # after the receiving line, and the readings after both, so that
+            # a reading does not stand between them as a stage of its own
+            # (`cat <<< '...' |&`, then `xargs oc`). A next line with an
+            # operator of its own is read as a receiving line instead.
+            | if $r.joined and ($next | contains("<<") | not) then
+                .out += [$r.line + "\n" + $next + $r.readings] | .skip = $h.c
+                | (if $aware then .st as $s2 | .st = ($next | heredoc_next_state($s2)) else . end)
+              else .out += [$r.line + $r.readings] | .skip = $h.c - 1 end
+          end
+      end)
+  | .out | join("\n");
+
+# The texts the checks lex for a command (ADR 0036): the command with every
+# heredoc operator read as one (see strip_heredocs), and, when that differs,
+# also with only those that surely stand outside quotes read as one. So a
+# `<<` that may be quoted (`echo '<<X'`, a commit message that mentions
+# `<<EOF`, a heredoc after a line with a backslash) neither hides the
+# commands after it nor keeps a real heredoc's body from its receiver; both
+# readings are checked, which errs towards blocking. A text without `<<` is
+# itself.
+def heredoc_texts:
+  if test("<<") then strip_heredocs(false) as $a | $a, (strip_heredocs(true) | select(. != $a))
+  else . end;
 
 # Cuts a string at every $sep that is outside quotes, as a stream of pieces.
 # A piece ends only where the counts of ' and " so far are both even. That
@@ -768,12 +1142,14 @@ def is_shell_word: (sub("^.*/"; "") | IN(shell_words[])) or test("^\\$\\{?(?:SHE
 def shell_value_options: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"];
 
 # A command can only be blocked if it contains one of these words, so every
-# other command is allowed without being parsed. redis-cli (D105) is blocked
-# only next to an oc, but it is a trigger word too: a long pipeline is cut
-# into chunks, and a chunk without a trigger word is skipped, so the echo
-# that pipes `redis-cli FLUSHALL` into an oc exec in a later chunk would be
-# lost (see lex).
-def trigger_re: "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|mariadb|sea-orm-cli|redis-cli|cargo|argocd";
+# other command is allowed without being parsed. The Redis clients (D105,
+# D110; see redis_client_names) are blocked only next to an oc, but they are
+# trigger words too: a long pipeline is cut into chunks, and a chunk without
+# a trigger word is skipped, so the echo that pipes `redis-cli FLUSHALL` into
+# an oc exec in a later chunk would be lost (see lex).
+def trigger_re:
+  "kubectl|grace-period|\\boc\\b|\\bdb\\b|psql|pg_restore|mysql|mariadb|sea-orm-cli|cargo|argocd|"
+  + (redis_client_names | join("|"));
 
 # The variables check 2 reads.
 def watched_var_re: "DATABASE_URL|PGHOST|PGSERVICE|MYSQL_HOST";
@@ -805,11 +1181,18 @@ def echo_operands:
   (first(range(0; length) as $i | select(.[$i] | test("^-[neE]+$") | not) | $i) // length) as $k
   | .[$k:];
 
+# The index of the command word of a segment, or null: the first word that
+# is not an assignment, nor the `{` that opens a brace group (ADR 0036), so
+# that `{ echo ...; } | oc apply -f -` prints what its echo prints.
+#   $seg - the words of the segment.
+def command_word_index($seg):
+  first(range(0; $seg | length) | select($seg[.] | is_assignment or . == "{" | not)) // null;
+
 # The words that the command of a segment prints when it is an echo or a
 # printf (see echo_operands; printf's format is not applied), or null.
 #   $seg - the words of the segment, assignments before the command included.
 def printed_words($seg):
-  (first(range(0; $seg | length) | select($seg[.] | is_assignment | not)) // null) as $j
+  command_word_index($seg) as $j
   | if $j == null then null
     elif ($seg[$j] | basename) == "echo" then $seg[$j + 1:] | echo_operands
     elif ($seg[$j] | basename) == "printf" then $seg[$j + 1:]
@@ -823,6 +1206,23 @@ def printed_text:
   [.[] | printed_words(.) | values
    | [.[] | split("\\n") | join("\n") | split("\\t") | join("\t")] | join(" ")]
   | if length == 0 then null else join("\n") end;
+
+# The here-strings that a `cat` segment prints (ADR 0036, the fix that ADR
+# 0035's "Follow-up work" names), as one piped word, or null: cat with no
+# file operand copies its stdin, the here-string, to the next stage of the
+# pipeline (`cat <<< 'delete ns web' | xargs oc`, `cat <<< 'redis-cli
+# flushall' | oc exec -i redis-0 -- sh`), where lex reads it as it reads
+# piped echo text. A cat that also names files counts too, which errs
+# towards blocking. Several here-strings are joined line by line, as lex
+# joins them for a segment's stdin.
+#   $seg  - the words of the segment, assignments before the command included;
+#   $hstr - its here-strings.
+def cat_here_strings($seg; $hstr):
+  if ($hstr | length) == 0 then null
+  else
+    command_word_index($seg) as $j
+    | if $j != null and ($seg[$j] | basename) == "cat" then [$hstr | join("\n")] else null end
+  end;
 
 # Whether a word stands where the command name goes, from the words of the
 # segment before it, as check_kubectl reads that place (ADR 0035): every one
@@ -895,6 +1295,13 @@ def substitution_use($sh):
 #     `echo confirm-deletion x | xargs argocd app` becomes the segment
 #     `xargs argocd app confirm-deletion x` (see fed_segments). Read by any
 #     other program, the text stays data;
+#   - (ADR 0036) a here-string of a `cat` in a pipeline, which reaches the
+#     next stage as piped echo text does (see cat_here_strings);
+#   - (ADR 0036) the same text read by an oc run, which it passes to the
+#     pod it starts, or by an oc apply, oc create or oc replace, which reads
+#     it as an inline manifest, and the echo or printf output of a process
+#     substitution that one of the latter reads as its file: each is kept
+#     as a synthetic segment (see synthetic_marker), not split as commands;
 #   - (ADR 0035) the echo or printf output of an unquoted substitution that
 #     the shell runs (see substitution_use): a process substitution that a
 #     shell, `source` or `.` reads, and a $(...) or `...` in place of the
@@ -923,6 +1330,15 @@ def lex($depth; $all):
   def quoted_command_text($content):
     $content | dq_unescape | capture("^(?:\\$\\((?<a>[\\s\\S]*)\\)|`(?<b>[^`]*)`)$") | (.a // .b)
     | lex($depth + 1; true) | printed_text | values | sub("\\n+$"; "");
+  # The segments of a text that a shell runs as a script: a -c string, the
+  # arguments of eval, ssh or watch, a here-string or piped text that a
+  # shell reads, what oc exec, oc rsh or oc debug read on stdin, the output
+  # of a substitution that the shell runs, and a $(...) or `...` inside
+  # double quotes. Its heredocs are read first (ADR 0036, see
+  # heredoc_texts), as for the whole command, so that `sh -c 'oc apply -f -
+  # <<EOF ... EOF'` reads the manifest, and a script for oc exec inside `ssh
+  # host '...'` runs in the cluster.
+  def script_segments: gsub("\\\\\\n"; "") | heredoc_texts | lex($depth + 1; false)[];
   # Ends the current segment at separator $sep and resets the per-segment
   # state. When the segment reads text on stdin, from an echo or printf
   # earlier in its pipeline or from its here-strings, that text is handled as
@@ -948,10 +1364,10 @@ def lex($depth; $all):
            elif $oc != null then
              runner_feed($cur[:$oc.i]; $cur[$oc.i:]) as $feed
              | if $feed == null then
-                 .nested += [$stdin | in_cluster_script($oc.verb)] + ($stdin | lex($depth + 1; false))
+                 .nested += [$stdin | in_cluster_script($oc.verb)] + [$stdin | script_segments]
                else .nested += ($stdin | fed_segments($cur; $oc.i; $feed)) end
            elif .pipe != null and .sh then
-             .nested += [$piped_in[] | select(test("\\S")) | lex($depth + 1; false)[]]
+             .nested += [$piped_in[] | select(test("\\S")) | script_segments]
            else . end)
         # Not exclusive with the shell case: `echo x | xargs sh -c '...'`
         # finds no fed program, and a fed program after a shell word gets
@@ -960,9 +1376,27 @@ def lex($depth; $all):
            else runner_feed($args[:$fed]; $args[$fed:]) as $feed
              | if $feed == null then . else .nested += ($stdin | fed_segments($args; $fed; $feed)) end
            end)
+        # (ADR 0036) The same text read by an oc run goes to the pod it
+        # starts, and read by an oc apply, oc create or oc replace it is an
+        # inline manifest: each becomes a synthetic segment (see
+        # synthetic_marker), unless xargs or parallel run that oc, which
+        # then gets the text as its arguments (see $fed above). Neither is
+        # lexed as commands here; a shell in the segment still reads it as
+        # a script, as above. An oc exec in the same segment takes it as
+        # well (`echo ... | oc exec -i pod -- oc apply -f -`).
+        | (if $depth >= 6 or $stdin == "" then .
+           else
+             ($cur | pod_stdin_oc) as $pod
+             | ($cur | manifest_oc) as $manifest
+             | (if $pod != null and runner_feed($cur[:$pod.i]; $cur[$pod.i:]) == null
+                then .nested += [$stdin | synthetic_segment("pod-stdin"; "run")] else . end)
+             | (if $manifest != null and runner_feed($cur[:$manifest.i]; $cur[$manifest.i:]) == null
+                then .nested += [$stdin | synthetic_segment("manifest"; $manifest.verb)] else . end)
+           end)
         # The words an echo or printf pipes on (see printed_words), without
-        # an echo's options and the assignments before it.
-        | .pipe = (if $piped then (printed_words(.cur) // .pipe) else null end)
+        # an echo's options and the assignments before it, or the
+        # here-strings of a cat (see cat_here_strings).
+        | .pipe = (if $piped then (printed_words(.cur) // cat_here_strings(.cur; .hstr) // .pipe) else null end)
         | .segs += [.cur] | .cur = []
       # A line break right after a separator does not end the pipeline:
       # `echo psql |` and `oc exec -i pod -- sh` on the next line are one.
@@ -993,9 +1427,30 @@ def lex($depth; $all):
     | .stack |= .[:-1]
     | (if $depth >= 6 then null else $o.cur | substitution_use($o.sh) end) as $use
     | (if $use == null then null else .segs[$o.segn:] | printed_text end) as $text
-    | . + ($o | del(.kind, .segn))
+    # (ADR 0036) A process substitution that an oc apply, oc create or oc
+    # replace reads as its file (`oc apply -f <(echo '...')`) holds an
+    # inline manifest: the echo or printf text it prints becomes a
+    # synthetic "manifest" segment (see synthetic_marker).
+    | (if $depth >= 6 or ($o.cur[-1] // "") != "/dev/fd/63" then null else $o.cur[:-1] | manifest_oc end) as $manifest
+    | (if $manifest == null then .
+       else (.segs[$o.segn:] | printed_text) as $m
+         | if $m == null then . else .nested += [$m | synthetic_segment("manifest"; $manifest.verb)] end
+       end)
+    # (ADR 0036) A process substitution that a bare `<` redirects to the
+    # command's stdin (`oc exec -i pod -- sh < <(echo '...')`, `oc run -i
+    # ... < <(echo ...)`) gives it the echo or printf text it prints, as a
+    # here-string would, so finish_segment reads that text as the stdin of
+    # oc exec, oc rsh, oc debug, oc run, oc apply, oc create, oc replace,
+    # or xargs (a shell reads it as a script, see substitution_use). Its
+    # /dev/fd/63 is then a redirection's target, not an argument, so it
+    # leaves the words once substitution_use has seen it: `xargs oc <
+    # <(echo delete ns web)` runs `oc delete ns web`.
+    | (if $depth >= 6 or $o.stdin != true then null else .segs[$o.segn:] | printed_text end) as $stdin_text
+    | . + ($o | del(.kind, .segn, .stdin))
+    | (if $o.stdin == true and .cur[-1] == "/dev/fd/63" then .cur |= .[:-1] else . end)
+    | (if $stdin_text == null then . else .hstr += [$stdin_text] end)
     | if $text == null then .
-      else .nested += [$text | lex($depth + 1; false)[]]
+      else .nested += [$text | script_segments]
         | if $use == "command" then
             [$text | blank_words] as $words
             # After a runner's own words (`timeout 30 $(echo oc) ...`) the
@@ -1026,6 +1481,14 @@ def lex($depth; $all):
   #   .dl, .ps: whether the token just read is a word that ends in `$`, or a
   #   bare < or > redirection, so that a `(` right after it opens a $(...) or
   #   a process substitution rather than a subshell;
+  #   .lt, .psin (ADR 0036): whether the token just read is a bare `<`, and
+  #   whether it followed another one, so that the process substitution of
+  #   `< <(...)` is read as the command's stdin (see close_sub);
+  #   .gpipe, .braces (ADR 0036): the text that the echo and printf commands
+  #   of a subshell group `( ... )` or brace group `{ ...; }` print, set
+  #   when the group has just closed, so that a `|` right after it (also
+  #   after a redirection) passes it on as piped text, and the starts in
+  #   .segs of the open brace groups;
   #   .stack: the open substitutions and subshell groups, innermost last
   #   (see open_sub). An unquoted $(...) leaves its `$` in the word before
   #   it, a `...` leaves the word "`" and a process substitution the path
@@ -1035,25 +1498,41 @@ def lex($depth; $all):
   def lex_chunk($pipe):
     reduce scan(token_re) as $t
       ({segs: [], cur: [], nested: [], pipe: $pipe, copt: false, cskip: false, hs: false, hstr: [],
-        sh: false, rw: false, dl: false, ps: false, stack: []};
-       .dl as $dl | .ps as $ps | .dl = false | .ps = false
+        sh: false, rw: false, dl: false, ps: false, lt: false, psin: false, rd: false, gpipe: null, braces: [], stack: []};
+       .dl as $dl | .ps as $ps | .lt as $lt | .psin as $psin | .rd as $rd | .gpipe as $gpipe
+       | .dl = false | .ps = false | .lt = false | .psin = false | .rd = false | .gpipe = null
        | ((.stack | last // {}) | .kind) as $open
        | if $t[2] == "(" then
            if $dl then open_sub("sub")
-           elif $ps then .cur += ["/dev/fd/63"] | open_sub("sub")
-           else finish_segment("(") | .stack += [{kind: "group"}] end
+           elif $ps then .cur += ["/dev/fd/63"] | open_sub("sub") | (if $psin then .stack[-1].stdin = true else . end)
+           else finish_segment("(") | .stack += [{kind: "group", segn: (.segs | length)}] end
          elif $t[2] == ")" then
            if $open == "sub" then close_sub
-           elif $open == "group" then finish_segment(")") | .stack |= .[:-1]
+           elif $open == "group" then
+             finish_segment(")") | .stack[-1].segn as $sn | .stack |= .[:-1] | .gpipe = (.segs[$sn:] | printed_text)
            else finish_segment(")") end
          elif $t[2] == "`" then
            if $open == "tick" then close_sub else .cur += ["`"] | open_sub("tick") end
-         elif $t[2] != null then finish_segment($t[2])
-         elif $t[1] != null then .hs = ($t[1] | test("<<<$")) | .ps = ($t[1] | test("^[<>]$"))
+         elif $t[2] != null then
+           finish_segment($t[2]) | (if $gpipe != null and ($t[2] == "|" or $t[2] == "|&") then .pipe = [$gpipe] else . end)
+         elif $t[1] != null then
+           .hs = ($t[1] | test("<<<$")) | .ps = ($t[1] | test("^[<>]$"))
+           | .psin = ($lt and $t[1] == "<") | .lt = ($t[1] == "<") | .rd = true | .gpipe = $gpipe
          elif $t[3] != null then (
          [$t[3] | scan(part_re)] as $parts
          | ($parts | map(.[0] // (.[1] | values | dq_unescape) // .[2] // .[3] // (.[4] | values | ansi_c_text))
             | join("")) as $text
+         # (ADR 0036) A `{` in the command name's place opens a brace group
+         # and a `}` there closes it; what the group's echo and printf
+         # commands print is then what a `|` right after it passes on, as
+         # for a subshell group (see .gpipe), also after the target word of
+         # a redirection (`( ... ) 2>/dev/null | sh`).
+         | (if $rd then .gpipe = $gpipe
+            elif (.cur | length) > 0 then .
+            elif $text == "{" then .braces += [.segs | length]
+            elif $text == "}" and (.braces | length) > 0 then
+              .braces[-1] as $sn | .braces |= .[:-1] | .gpipe = (.segs[$sn:] | printed_text)
+            else . end)
          # (ADR 0035) One double-quoted $(...) or `...` in the command name's
          # place is the echo or printf output it runs (see
          # quoted_command_text). The cheap tests on the word come first, so
@@ -1092,12 +1571,12 @@ def lex($depth; $all):
          | .sh = ($in_shell or any($words[]; is_shell_word))
          | .rw = (.rw or any($words[]; basename | IN(reparse_words[])))
          | if $depth >= 6 then .
-           elif $reparse then .nested += [$text | select(test("\\S")) | lex($depth + 1; false)[]]
+           elif $reparse then .nested += [$text | select(test("\\S")) | script_segments]
            else .nested += [
              $parts[] | .[1] | values | dq_unescape
              | scan("\\$\\(([\\s\\S]*)\\)|`([^`]*)`") | (.[0] // .[1])
              | select(test("\\S"))
-             | lex($depth + 1; false)[]
+             | script_segments
            ]
            end)
            | .dl = ($t[3] | endswith("$"))
@@ -1300,18 +1779,22 @@ def check_generated_delete:
 # and `argocd app confirm-deletion` (-N, --app-namespace;
 # cmd/argocd/commands/app.go), and `argocd app delete-resource` and `argocd
 # app patch-resource` (--patch and --patch-type are patch-resource's own;
-# cmd/argocd/commands/app_resources.go); `argocd appset delete` has only the
-# boolean -y (cmd/argocd/commands/applicationset.go). The list serves every
-# argocd command line, so a boolean option of any subcommand must never be
-# listed: the subcommand after it would be taken for its value. No argocd
-# subcommand defines --patch or --patch-type as a boolean.
+# cmd/argocd/commands/app_resources.go), and (ADR 0036) `argocd app patch`
+# (--patch and --type, NewApplicationPatchCommand in app.go); `argocd appset
+# delete` has only the boolean -y (cmd/argocd/commands/applicationset.go).
+# The list serves every argocd command line, so a boolean option of any
+# subcommand must never be listed: the subcommand after it would be taken
+# for its value. No argocd subcommand defines --patch, --patch-type or
+# --type as a boolean (--type is a string in `app patch`, `repo add` and
+# `repocreds add`).
 def argocd_value_options:
   ["--config", "--server", "--server-crt", "--client-crt", "--client-crt-key", "--auth-token",
    "--grpc-web-root-path", "--logformat", "--loglevel", "--header", "-H", "--port-forward-namespace",
    "--http-retry-max", "--argocd-context", "--server-name", "--controller-name",
    "--redis-haproxy-name", "--redis-name", "--repo-server-name", "--redis-compress", "--kube-context",
    "--propagation-policy", "-p", "--selector", "-l", "--app-namespace", "-N",
-   "--resource-name", "--kind", "--group", "--namespace", "--project", "--patch", "--patch-type"];
+   "--resource-name", "--kind", "--group", "--namespace", "--project", "--patch", "--patch-type",
+   "--type"];
 
 # Every argocd subcommand of $subs that a segment runs, as a stream of
 # {command: "<parent> <subcommand>", words: <every word after argocd>}.
@@ -1531,16 +2014,26 @@ def tag_only_path_re:
 # line break that ends a YAML value (`path: /metadata` before the next key),
 # which the second reading keeps. A tag with no value counts only as written
 # (see tag_only_path_re).
-def patch_hazard:
+#   $reclaim - whether the reclaim-policy match applies. It does for oc patch
+#              and argocd app patch-resource, which can reach a
+#              PersistentVolume; `argocd app patch` gets only the finalizer
+#              match (D110, ADR 0036): the names and the whole-object or
+#              whole-metadata operations, which ADR 0035 counts as finalizer
+#              changes. It patches only an Application, which has no reclaim
+#              policy.
+def patch_hazard($reclaim):
   decoded_text as $written
   | ($written, ($written | without_spaces))
   | if contains("finalizers") then "changes finalizers"
-    elif contains("persistentvolumereclaimpolicy") and test("delete|recycle|[$`]") then
+    elif $reclaim and contains("persistentvolumereclaimpolicy") and test("delete|recycle|[$`]") then
       "sets a PersistentVolume's reclaim policy to Delete or Recycle (or to a value only the shell knows)"
     elif test(whole_metadata_patch_re) or (. == $written and test(tag_only_path_re)) then
       "replaces or removes a whole object or its whole metadata (a JSON patch on the path \"\" or \"/metadata\", "
       + "or a strategic merge `$patch: replace`, `$patch: delete` or `$retainKeys`), and with it the finalizers"
     else empty end;
+
+# The whole patch rule, for oc patch and argocd app patch-resource.
+def patch_hazard: patch_hazard(true);
 
 # Why a finalizer or reclaim-policy patch is blocked, and what is allowed.
 def patch_advice:
@@ -1573,6 +2066,23 @@ def check_argocd_patch_resource:
   first(argocd_subcommands({app: ["patch-resource"]}) | .words[] | patch_hazard) as $what
   | msg(1; "this `argocd app patch-resource` \($what). It sends the patch through the Argo CD API to a resource that an Application manages, "
            + "and the same patch through `oc patch` is blocked too. " + patch_advice);
+
+# An `argocd app patch` that changes an Application's own finalizers (D110,
+# ADR 0036): the finalizer match of the patch rule (see patch_hazard), read
+# the same way, in every word after argocd, so the patch counts wherever
+# --patch stands and for both --type values (json, merge). The Argo CD
+# server applies the patch to the Application and keeps the finalizers of
+# the result (server/application/application.go, updateApp: `app.Finalizers
+# = newApp.Finalizers`), and they decide what a later deletion of the
+# Application takes along: with Argo CD's resources finalizer, every
+# resource it manages. An addition counts too, as it does for oc patch. It
+# is found like the blocked subcommands (see argocd_subcommands); a patch of
+# anything else (`--patch '{"spec":...}'`) stays allowed.
+def check_argocd_app_patch:
+  first(argocd_subcommands({app: ["patch"]}) | .words[] | patch_hazard(false)) as $what
+  | msg(1; "this `argocd app patch` \($what) of an Argo CD Application. An Application's finalizers decide what deleting it takes along: "
+           + "with Argo CD's resources finalizer, every resource it manages, its PersistentVolumeClaims included, so agents never change them, "
+           + "additions included, and the same patch through `oc patch` is blocked too. Stop and ask the maintainer." + text_only_hint);
 
 # Whether a word names Argo CD's deletion-approved annotation (D105). The key
 # is argocd.argoproj.io/deletion-approved; only its last part is matched, in
@@ -1688,6 +2198,26 @@ def check_deletion_approval:
            + "On an Application it releases the prunes and deletions that a Prune=confirm or Delete=confirm sync option holds back, "
            + "whoever sets it, so agents never set or remove it. "
            + deletion_approval_advice + text_only_hint);
+
+# The annotation in an inline manifest (D110, ADR 0036): a manifest that oc
+# apply, oc create or oc replace reads from the command text, as a heredoc
+# (also through cat), a here-string, piped echo or printf text, or the echo
+# or printf output of a process substitution (see the synthetic "manifest"
+# segments of strip_heredocs and lex). Argo CD documents applying the
+# annotation as the manual approval, and an apply, create or replace of an
+# Application with it sets it as an annotate does. The manifest is read as
+# check_deletion_approval reads a word (see names_deletion_approval), so a
+# YAML or JSON escape or a key folded across lines counts, and so does a
+# manifest that only mentions the key, a `--dry-run=server` one included,
+# which errs towards blocking. A manifest in a file, in another command's
+# output or in an editor is not read (ADR 0036, "Negative and risks").
+def check_manifest_deletion_approval:
+  first(synthetic_text("manifest") | select(.text | names_deletion_approval) | .verb) as $verb
+  | msg(1; "this `oc \($verb)` reads a manifest from the command text that names Argo CD's argocd.argoproj.io/deletion-approved annotation, "
+           + "the one `argocd app confirm-deletion` writes. Applied to an Application, it releases the prunes and deletions "
+           + "that a Prune=confirm or Delete=confirm sync option holds back, so agents never apply such a manifest. "
+           + "The hook does not tell a manifest that sets the key from one that only mentions it, a --dry-run one included. "
+           + deletion_approval_advice + manifest_text_hint);
 
 def check_db_wipe:
   . as $s
@@ -1846,21 +2376,47 @@ def db_commands:
     else empty end;
 
 # Every Redis client in a segment, as {kind, name, args} like db_commands:
-# redis-cli (D105, ADR 0035), the client that the redis images of the
-# clusters ship. It runs any Redis command, FLUSHALL included, so in the
-# cluster it is blocked whatever its options and arguments, `redis-cli ping`
-# too. It is not one of db_commands, because those also get the target check
-# on the agent's own host, and the answer to D105 keeps a redis-cli there
-# allowed: the clusters' Redis answers on this host only through a
-# port-forward, which check_port_forward blocks. Other Redis-protocol
-# programs (valkey-cli, keydb-cli, redis-benchmark) are not listed; ADR
-# 0035 records them as open.
+# a program of redis_client_names (redis-cli since D105, ADR 0035; the
+# others since D110, ADR 0036). Each one sends any Redis command, FLUSHALL
+# included, so in the cluster it is blocked whatever its options and
+# arguments, `redis-cli ping` and a benchmark too. None is one of
+# db_commands, because those also get the target check on the agent's own
+# host, and the answers to D105 and D110 keep a Redis client there allowed:
+# the clusters' Redis answers on this host only through a port-forward,
+# which check_port_forward blocks.
 def redis_clients:
   . as $s
   | range(0; $s | length) as $i
   | ($s[$i] | basename) as $b
-  | select($b == "redis-cli")
+  | select($b | IN(redis_client_names[]))
   | {kind: "redis", name: $b, args: $s[$i + 1:]};
+
+# The Redis client (see redis_client_names) that a text names, or empty
+# (D110, ADR 0036): for an inline manifest, an `oc run --overrides` JSON,
+# which set a pod's command in fields the hook does not parse (`"command":
+# ["redis-cli", "FLUSHALL"]`, `args: [sh, -c, "redis-cli flushall"]`), and
+# the text that oc run passes to its pod, whatever program reads it
+# (`subprocess.run(["redis-cli", "FLUSHALL"])`). A name counts as a word:
+# not after a letter, digit, `_`, `.` or `-`, and not before a letter,
+# digit, `_` or `-`, so `/usr/local/bin/redis-cli` and `"redis-cli"` count,
+# and `my-redis-cli` and a pod `redis-cli-0` do not. Each of three readings
+# of the text counts:
+#   - the text as a patch decoder reads it (see decoded_text, which also
+#     lower-cases it), so a YAML or JSON escape counts;
+#   - the same with every blank removed (see without_blanks), because a
+#     YAML escaped line break in a double-quoted scalar folds a name across
+#     lines, and the lexer leaves the next line's indentation inside it
+#     (`"redis-\`, then `   cli"`, see decoded_text);
+#   - the text with its quotes and backslashes removed (see unquoted_texts),
+#     in lower case, because a shell in the pod removes them from a script
+#     that a manifest or the JSON holds (`"redis-c'l'i FLUSHALL"`,
+#     `redis-c\"l\"i`), as the hook reads a `sh -c` string.
+# A text that only mentions a client (a ConfigMap, a file name such as
+# `redis-cli.log`) counts too, which errs towards blocking.
+def redis_client_in_text:
+  first((decoded_text | (., without_blanks)), (first(unquoted_texts) | ascii_downcase)
+        | capture("(?:^|[^a-z0-9_.-])(?<c>" + (redis_client_names | join("|")) + ")(?![a-z0-9_-])")
+        | .c);
 
 # Every database target of one command (sources 1 to 4 of ADR 0024 section 4,
 # check 2). Explicit sources are always checked: every inline variable the
@@ -1945,34 +2501,120 @@ def may_name_program:
 # a space (`sh -c 'cd tmp;psql'`). Elsewhere they are not, because ( ) | < >
 # in a search pattern or a message are text: `grep -E "oc (exec|rsh) .* psql"`
 # names no verb, and `rg "oc exec [^ ]+ -- (psql|mysql)"` no client.
+#
+# (D110, ADR 0036) A Redis client is also blocked as the command of a pod
+# that the agent starts: in the command part of `oc run` and of `oc create
+# job|cronjob|deployment|deploymentconfig` (see in_cluster_command and
+# in_cluster_parts), and in the text that oc run passes to its pod (the
+# synthetic "pod-stdin" segments of strip_heredocs and lex, read here as
+# `oc run stdin -- sh -c '<text>'`, see in_cluster_script). Only the Redis
+# clients count there: the answer names them, and a database command in
+# such a pod keeps the target check that check_db_target gives every
+# command word (`oc run ... -- psql -h postgres` is blocked there). Each
+# family takes the first oc that has one of its verbs: the command part of
+# that oc runs to the end of the segment, so it holds every later one, and
+# an oc run before an oc exec cannot keep the exec's part from counting
+# whole (`oc run x --image=y -- oc exec pod -- psql`).
+#   $s - the words of a segment.
 def check_in_cluster:
-  . as $s
+  # The readings of the first oc in the word list $f that has one of
+  # $verbs, as a list of {verb, part} (see in_cluster_parts), or [] when no
+  # oc has one. An oc create of any other type has no part, so the search
+  # goes on to the next oc.
+  #   $verbs - the oc verbs of one family.
+  def readings($verbs):
+    . as $f
+    | first(range(0; $f | length) as $i
+        | select(($f[$i] | basename) == "oc")
+        | $f[$i + 1:] as $rest
+        | [$rest | oc_verb_indices | select($rest[.] | IN($verbs[])) as $v
+           | $rest | oc_verb_words($v) | in_cluster_parts($rest[$v])]
+        | select(length > 0)) // [];
+  ((synthetic_text("pod-stdin") | .text | in_cluster_script("run")) // .) as $s
   | first(
-      ([$s[] | first(unquoted_texts) | blank_words],
-       (select(any($s[]; test("\\$['\"]"))) | [$s[] | last(unquoted_texts) | blank_words]))
-      | . as $f
-      | first(range(0; $f | length) as $i
-          | select(($f[$i] | basename) == "oc")
-          | $f[$i + 1:] as $rest
-          | [$rest | oc_verb_indices | select($rest[.] | IN("exec", "rsh", "debug"))]
-          | select(length > 0)
-          | [.[] as $v | $rest | oc_verb_words($v) | {verb: $rest[$v], part: in_cluster_command($rest[$v])}]) as $readings
-      | $readings[] | .verb as $verb | .part
+      (([$s[] | first(unquoted_texts) | blank_words],
+        (select(any($s[]; test("\\$['\"]"))) | [$s[] | last(unquoted_texts) | blank_words]))
+       | (readings(["exec", "rsh", "debug"])[] | .pod = false),
+         (readings(["run", "create"])[] | .pod = true)),
+      # The pod-start verbs also read the words as the lexer gives them,
+      # with only their command part cut at blanks: their options often
+      # hold a value with blanks (`--schedule '*/5 * * * *'`, `--env 'A=b
+      # c'`), which the blank-split readings above cut into words, so the
+      # option's value would take a word of its value's and the rest would
+      # pass for the subcommand or the pod's name.
+      ($s | readings(["run", "create"])[] | .pod = true | .part |= [.[] | first(unquoted_texts) | blank_words])
+      | .verb as $verb | .pod as $pod | .part
       | (first(to_entries[] | select(.value | is_shell_word) | .key) // null) as $shell
       | (if $shell == null then .
          else .[:$shell + 1] + [.[$shell + 1:][] | splits("[;&|()`<>]+") | select(length > 0)] end)
-      | first(map(select(may_name_program)) | (db_commands, redis_clients))
-      | {verb: $verb, name, kind}) as $c
-  | if $c.kind == "redis" then
+      | first(map(select(may_name_program)) | ((if $pod then empty else db_commands end), redis_clients))
+      | {verb: $verb, name, kind, pod: $pod}) as $c
+  | if $c.pod then
+      msg(2; "`\($c.name)` runs in the cluster as the command of the pod that `oc \($c.verb)` starts, so it reaches the Redis there "
+             + "with any command, FLUSHALL included, whatever its options say. Agents never run a Redis client in the cluster, "
+             + "in a pod they start included (`redis-cli ping` and a benchmark too); stop and ask the maintainer. "
+             + "A Redis client on this host is not blocked."
+             + text_only_hint)
+    elif $c.kind == "redis" then
       msg(2; "`\($c.name)` runs inside the cluster through `oc \($c.verb)`, so it reaches the Redis there with any command, FLUSHALL included, "
              + "whatever its options say. Agents never run a Redis client in the cluster, `redis-cli ping` included; stop and ask the maintainer. "
-             + "A redis-cli on this host is not blocked."
+             + "A Redis client on this host is not blocked."
              + text_only_hint)
     else
       msg(2; "`\($c.name)` runs inside the cluster through `oc \($c.verb)`, so its database is not local, whatever its options say. "
              + "Agents never run database commands in the cluster; stop and ask the maintainer."
              + text_only_hint)
     end;
+
+# The values of the --overrides options in a list of words (`--overrides X`
+# or `--overrides=X`), the JSON that `oc run` merges into the pod it makes.
+def overrides_values:
+  . as $a
+  | range(0; $a | length) as $i
+  | if $a[$i] == "--overrides" then ($a[$i + 1] // empty)
+    elif ($a[$i] | startswith("--overrides=")) then $a[$i][12:]
+    else empty end;
+
+# A Redis client set as a pod's command or arguments in the --overrides JSON
+# of `oc run` (D110, ADR 0036; `--overrides='{"spec":{"containers":[{...,
+# "command":["redis-cli","FLUSHALL"]}]}}'`), found by its name in the JSON
+# (see redis_client_in_text). Every word of the oc run counts, options
+# before the verb included, as oc reads them (see oc_verb_args).
+def check_run_overrides:
+  first(oc_verb_args("run") | .words | overrides_values | redis_client_in_text) as $name
+  | msg(2; "this `oc run` names `\($name)`, a Redis client, in its --overrides, which sets the command of the pod it starts, "
+           + "so the client would reach the Redis in the cluster with any command, FLUSHALL included. "
+           + "Agents never run a Redis client in the cluster; stop and ask the maintainer. A Redis client on this host is not blocked.");
+
+# A Redis client named in the text that `oc run` passes to the pod it starts
+# (D110, ADR 0036): a heredoc, a here-string, piped echo or printf text or
+# `< <(echo ...)` (see the synthetic "pod-stdin" segments of strip_heredocs
+# and lex), and a heredoc whose cat output fills in its --overrides (`oc run
+# ... --overrides="$(cat <<'EOF'`, whose receiving line names oc run). The
+# text is found by name (see redis_client_in_text), whatever program the pod
+# runs, so a list (`["redis-cli", "FLUSHALL"]` in a Python script) or JSON
+# without blanks counts too, besides the shell words that check_in_cluster
+# reads in it.
+def check_pod_stdin_redis_client:
+  first(synthetic_text("pod-stdin") | .text | redis_client_in_text) as $name
+  | msg(2; "the text that this `oc run` passes to the pod it starts names `\($name)`, a Redis client, which would reach the Redis in the cluster "
+           + "with any command, FLUSHALL included. The hook does not tell a text that runs it from one that only mentions it. "
+           + "Agents never run a Redis client in the cluster, in a pod they start included; stop and ask the maintainer. "
+           + "A Redis client on this host is not blocked." + manifest_text_hint);
+
+# A Redis client in an inline manifest (D110, ADR 0036): a manifest that oc
+# apply, oc create or oc replace reads from the command text (see
+# check_manifest_deletion_approval for the forms), found by its name (see
+# redis_client_in_text), so a Pod, Job or Deployment that runs one is
+# blocked, and so is a manifest that only mentions one, a `--dry-run=server`
+# one included, which errs towards blocking.
+def check_manifest_redis_client:
+  first(synthetic_text("manifest") | {verb, name: (.text | redis_client_in_text)}) as $c
+  | msg(2; "this `oc \($c.verb)` reads a manifest from the command text that names `\($c.name)`, a Redis client, "
+           + "so a pod it describes would run the client in the cluster, where it reaches the Redis with any command, FLUSHALL included. "
+           + "The hook does not tell a manifest that runs it from one that only mentions it, a --dry-run one included. "
+           + "Agents never run a Redis client in the cluster; stop and ask the maintainer. A Redis client on this host is not blocked."
+           + manifest_text_hint);
 
 # Whether the remote part of an `oc port-forward` port spec
 # ([LOCAL_PORT:]REMOTE_PORT) reaches a database: PostgreSQL's 5432, MySQL's
@@ -2056,11 +2698,13 @@ def verdict:
     else
       # lex cuts a long command into chunks and skips those that cannot
       # matter, which keeps long commands cheap.
-      [$cmd | gsub("\\\\\\n"; "") | (if test("<<") then strip_heredocs else . end) | lex(0)[]] as $segs
+      [$cmd | gsub("\\\\\\n"; "") | heredoc_texts | lex(0)[]] as $segs
       | (first(($segs | scoped_segments[] | .vars as $vars | .seg
                 | (check_kubectl, check_force_delete, check_oc_delete, check_oc_delete_raw, check_argocd_blocked, check_oc_patch,
-                   check_argocd_patch_resource, check_deletion_approval, check_db_wipe, check_sea_orm_wipe,
-                   check_in_cluster, check_port_forward, check_db_target($vars), check_import_source($vars))),
+                   check_argocd_patch_resource, check_argocd_app_patch, check_deletion_approval,
+                   check_manifest_deletion_approval, check_db_wipe, check_sea_orm_wipe,
+                   check_in_cluster, check_run_overrides, check_pod_stdin_redis_client, check_manifest_redis_client, check_port_forward,
+                   check_db_target($vars), check_import_source($vars))),
                ($segs | check_generated_delete)) // null) as $why
       | if $why == null then "allow" else "block\n\($why)" end
     end;
@@ -2069,8 +2713,15 @@ verdict
 JQ
 
 # jq reads the hook input from this script's stdin. A parse error or an empty
-# input fails closed.
-if ! result="$(jq -r "$GUARD_JQ" 2>&1)"; then
+# input fails closed. The program goes in as a file that a process
+# substitution fills, not as an argument: Linux limits one argument to 128
+# KiB (MAX_ARG_STRLEN), and the commented program is longer than that (ADR
+# 0036), so `jq -r "$GUARD_JQ"` would fail with "Argument list too long" and
+# block every command. printf is a bash builtin, so no exec limit applies
+# to it, and the substitution is a pipe, so unlike a here-string of this
+# size it needs no temporary file. A /dev/fd path that cannot be opened
+# makes jq fail, which blocks too.
+if ! result="$(jq -r -f <(printf '%s' "$GUARD_JQ") 2>&1)"; then
   block "Blocked by .claude/hooks/guard-bash.sh: could not read the hook input as JSON, so the command was blocked to be safe. jq said: ${result}"
 fi
 

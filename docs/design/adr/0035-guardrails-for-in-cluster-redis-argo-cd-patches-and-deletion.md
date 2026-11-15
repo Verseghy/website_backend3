@@ -1,6 +1,6 @@
 # 0035. Guardrails for in-cluster Redis, Argo CD patches and deletion approval
 
-- Status: Accepted (2026-10-26)
+- Status: Amended by [0036](0036-guardrails-for-redis-clients-in-new-pods-argocd-app-patch-an.md) (2026-10-26)
 - Decision questions: none: amends [ADR 0028](0028-guardrails-as-built-wider-checks-and-a-fail-closed-hook.md) §3 to §7 and its "Negative and risks", which amend ADR 0024 §4. It records the maintainer's answers of 2026-10-26 to D105 and D106 of the third decision register (research: DECISIONS R16), and to D109 (research: DECISIONS R18), which confirms this ADR's reading of D105's "annotation spelling".
 
 ## Context
