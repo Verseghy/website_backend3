@@ -62,7 +62,10 @@
 #      (normal edges, the release target, no procedural macros) is in the
 #      notices, so about.toml's graph filters cannot drop a linked crate.
 #      cargo-about also lists the procedural macros, which the binary does not
-#      link; listing more costs nothing.
+#      link; listing more costs nothing. The script reads cargo tree's output
+#      without colour and line by line (tree_crates), so the "(*)" that marks
+#      a package printed before, coloured or not, never changes a crate's
+#      name; a line it cannot read fails rather than being misread.
 #   6. The toolchain carries COPYRIGHT-library.html.
 #
 #   Licence files of bundled code below a crate's root are checked only where
@@ -302,7 +305,8 @@ read_clarifications() {
 
 # Prints its input without ANSI colour sequences: cargo-about's logger colours
 # its level names even with --color never, which only governs the
-# diagnostics.
+# diagnostics, and tree_crates must read cargo tree's output alike whatever
+# its colour setting.
 strip_colour() {
   sed $'s/\x1b\[[0-9;]*m//g'
 }
@@ -388,14 +392,61 @@ own_texts() {
     | [(.text | @base64), (.used_by[] | "\(.crate.name) v\(.crate.version)")] | @tsv' "$1"
 }
 
-# Prints "name vVERSION" for every third-party crate that `cargo tree` links
-# into the binary for the release target, sorted and unique: normal edges
-# only and no procedural macros, without the workspace's own crates (whose
-# lines carry their path in parentheses).
+# Prints `cargo tree`'s list of the packages that the binary links for the
+# release target: normal edges only and no procedural macros, one package
+# per line in the `{p}` form that tree_crates reads. --color never, because
+# CI sets CARGO_TERM_COLOR=always, and cargo then wraps the "(*)" marker in
+# colour sequences, which made every crate that cargo tree marks with it
+# look like a crate the notices leave out (tree_crates drops colour
+# sequences as well).
 linked_crates() {
-  cargo tree --frozen --manifest-path "$repo_root/Cargo.toml" \
-    -e normal,no-proc-macro --target "$RELEASE_TARGET" --prefix none --format '{p}' |
-    sed -e 's/ (\*)$//' -e '/ (/d' | LC_ALL=C sort -u
+  cargo tree --frozen --color never --manifest-path "$repo_root/Cargo.toml" \
+    -e normal,no-proc-macro --target "$RELEASE_TARGET" --prefix none --format '{p}'
+}
+
+# Reads the output of `cargo tree --prefix none --format '{p}'` and prints one
+# tab-separated line for each line that is not empty:
+#   crate<TAB>name vVERSION       a third-party crate, which check 5 looks up;
+#   local<TAB>name vVERSION       a path crate: the workspace's own crates;
+#   unreadable<TAB>LINE           any other line, which check 5 reports
+#                                 instead of misreading it.
+# Cargo 1.99.1 (cargo@5f94df4:src/ops/cargo_tree/) writes `{p}` as
+# "name vVERSION", then " (proc-macro)" for a procedural macro, then
+# " (SOURCE)" unless the crate comes from crates.io: the absolute directory of
+# a path crate, or the git URL, `registry ...` or `dir ...` of another source
+# (deny.toml refuses those, but such a crate is still third-party code; the
+# notices list it by name and version like any other). cargo tree then
+# appends " (*)" to a package whose dependencies it printed before, coloured
+# unless the colour is off. Colour sequences are dropped first, so the result
+# does not depend on CARGO_TERM_COLOR or --color.
+#   stdin - cargo tree's output.
+tree_crates() {
+  local re_package='^([A-Za-z0-9_-]+) v([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)(.*)$'
+  local re_source='^ \((.+)\)$'
+  local line key rest
+  strip_colour | while IFS= read -r line || [[ -n $line ]]; do
+    [[ -n $line ]] || continue
+    rest=${line%' (*)'}
+    if ! [[ $rest =~ $re_package ]]; then
+      printf 'unreadable\t%s\n' "$line"
+      continue
+    fi
+    key="${BASH_REMATCH[1]} v${BASH_REMATCH[2]}" rest=${BASH_REMATCH[3]}
+    rest=${rest#' (proc-macro)'}
+    if [[ -z $rest ]]; then
+      printf 'crate\t%s\n' "$key"
+    elif [[ $rest =~ $re_source ]]; then
+      # The forms of cargo's SourceId display; anything else in parentheses
+      # (a second "(*)", a feature node's "(command-line)") is no source.
+      case ${BASH_REMATCH[1]} in
+        /*) printf 'local\t%s\n' "$key" ;;
+        *://* | 'registry `'*'`' | 'dir /'*) printf 'crate\t%s\n' "$key" ;;
+        *) printf 'unreadable\t%s\n' "$line" ;;
+      esac
+    else
+      printf 'unreadable\t%s\n' "$line"
+    fi
+  done
 }
 
 # Writes README.txt, the index of the output directory.
@@ -637,13 +688,22 @@ main() {
     done < <(find "$dir" -mindepth 2 -type f -iname 'notice*' -print0 | LC_ALL=C sort -z)
   done
 
-  # Check 5.
-  local linked
-  linked=$(linked_crates) || die "'cargo tree' failed; see the cargo error above."
-  while IFS= read -r name; do
-    [[ -n $name && -z ${listed[$name]-} ]] || continue
-    problem "$name is linked into the binary (cargo tree -e normal,no-proc-macro --target $RELEASE_TARGET) but the notices leave it out; check about.toml's targets and ignore-* settings."
-  done <<<"$linked"
+  # Check 5. cargo tree writes into a file first, so that its exit status
+  # is checked before any line is read.
+  local kind
+  local -A linked=()
+  linked_crates >"$work/tree.txt" || die "'cargo tree' failed; see the cargo error above."
+  while IFS=$'\t' read -r kind key; do
+    case $kind in
+      crate) linked[$key]=1 ;;
+      local) ;;
+      *) problem "cannot read the line '$key' of cargo tree's output (cargo tree -e normal,no-proc-macro --target $RELEASE_TARGET --prefix none --format '{p}'), so check 5 cannot tell which crate it names; teach tree_crates in scripts/crate-notices.sh the line's form." ;;
+    esac
+  done < <(tree_crates <"$work/tree.txt")
+  while IFS= read -r key; do
+    [[ -n $key && -z ${listed[$key]-} ]] || continue
+    problem "$key is linked into the binary (cargo tree -e normal,no-proc-macro --target $RELEASE_TARGET) but the notices leave it out; check about.toml's targets and ignore-* settings."
+  done < <(printf '%s\n' "${!linked[@]}" | LC_ALL=C sort)
 
   # Check 6.
   local sysroot copyright

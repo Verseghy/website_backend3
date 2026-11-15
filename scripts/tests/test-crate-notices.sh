@@ -266,8 +266,8 @@ check "cargo-about runs frozen, with --fail, the release target and about.toml" 
 check "cargo-about runs twice: JSON for the checks, the template for the file" \
   test "$(grep -c '^cargo-about ' "$d/calls.log")" -eq 2
 check "the template run uses about.hbs" grep -q -- "--output-file $d/out/crates.html $d/repo/about.hbs" "$d/calls.log"
-check "cargo tree reads the linked crates of the release target" \
-  grep -q -- "tree --frozen --manifest-path $d/repo/Cargo.toml -e normal,no-proc-macro --target x86_64-unknown-linux-gnu --prefix none --format {p}" "$d/calls.log"
+check "cargo tree reads the linked crates of the release target, without colour" \
+  grep -q -- "tree --frozen --color never --manifest-path $d/repo/Cargo.toml -e normal,no-proc-macro --target x86_64-unknown-linux-gnu --prefix none --format {p}" "$d/calls.log"
 
 d=$(fixture no-notices)
 add_crate "$d" alpha 1.0.0 LICENSE "$MIT_TEXT"
@@ -488,6 +488,74 @@ printf '%s\n' "alpha v1.0.0" "windows-sys v0.61.2" "alpha v2.0.0" >"$d/tree.txt"
 run_case "a linked crate missing from the notices fails" 1 \
   --contains "windows-sys v0.61.2 is linked into the binary" \
   --contains "alpha v2.0.0 is linked into the binary" --lacks "alpha v1.0.0 is linked" -- run "$d"
+
+# cargo tree's " (*)" for a package printed before, exactly as the CI log of
+# the cargo-deny job showed it under CARGO_TERM_COLOR=always: yellow and dim.
+# The stub prints tree.txt whatever --color says, so these cases hold even if
+# a cargo ignored --color never.
+STAR=$' \033[33m\033[2m(*)\033[39m\033[22m'
+
+d=$(fixture tree-coloured)
+add_crate "$d" alpha 1.0.0 LICENSE "$MIT_TEXT"
+add_crate "$d" bravo 2.0.0 LICENSE "$MIT_TEXT"
+notices_json "$d" alpha:1.0.0:LICENSE bravo:2.0.0:LICENSE
+printf '%s\n' "backend3 v0.1.0 ($d/repo)" "alpha v1.0.0" "bravo v2.0.0 (proc-macro)" "alpha v1.0.0$STAR" \
+  "bravo v2.0.0 (proc-macro)$STAR" "migration v0.1.0 ($d/repo/migration)$STAR" >"$d/tree.txt"
+run_case "coloured (*) markers and (proc-macro) suffixes leave the crates' names as they are" 0 \
+  --lacks "is linked into the binary" --lacks "problem" -- run "$d"
+
+d=$(fixture tree-coloured-missing)
+add_crate "$d" alpha 1.0.0 LICENSE "$MIT_TEXT"
+notices_json "$d" alpha:1.0.0:LICENSE
+printf '%s\n' "alpha v1.0.0$STAR" "windows-sys v0.61.2" "windows-sys v0.61.2$STAR" "zeta v3.0.0$STAR" >"$d/tree.txt"
+run_case "a missing crate that cargo tree marks with a coloured (*) is named once, without colour" 1 \
+  --contains "windows-sys v0.61.2 is linked into the binary" --contains "zeta v3.0.0 is linked into the binary" \
+  --contains "2 problem(s)" --lacks $'\033' -- run "$d"
+
+d=$(fixture tree-other-source)
+add_crate "$d" alpha 1.0.0 LICENSE "$MIT_TEXT"
+notices_json "$d" alpha:1.0.0:LICENSE
+printf '%s\n' "alpha v1.0.0" "gamma v1.0.0 (registry \`example\`)" \
+  "delta v0.1.0 (https://example.org/delta.git?rev=1234abcd#1234abcd)$STAR" >"$d/tree.txt"
+run_case "a crate from another source than crates.io is third-party code and is checked too" 1 \
+  --contains "gamma v1.0.0 is linked into the binary" --contains "delta v0.1.0 is linked into the binary" -- run "$d"
+
+d=$(fixture tree-unreadable)
+add_crate "$d" alpha 1.0.0 LICENSE "$MIT_TEXT"
+notices_json "$d" alpha:1.0.0:LICENSE
+printf '%s\n' "alpha v1.0.0" "[build-dependencies]" "beta v1.0.0 (feature)x" >"$d/tree.txt"
+run_case "a cargo tree line of another form fails instead of being misread" 1 \
+  --contains "cannot read the line '[build-dependencies]' of cargo tree's output" \
+  --contains "cannot read the line 'beta v1.0.0 (feature)x' of cargo tree's output" \
+  --contains "teach tree_crates in scripts/crate-notices.sh" --lacks "is linked into the binary" -- run "$d"
+
+# tree_crates on its own: each pair is a line of cargo tree's output and the
+# line that tree_crates prints for it ("-" for none), with every form of a
+# `{p}` line that cargo 1.99 prints, coloured and not.
+tree_pairs=(
+  "aho-corasick v1.1.5$STAR" $'crate\taho-corasick v1.1.5'
+  "aho-corasick v1.1.5" $'crate\taho-corasick v1.1.5'
+  "hybrid-array v0.4.15 (*)" $'crate\thybrid-array v0.4.15'
+  "serde_derive v1.0.228 (proc-macro)" $'crate\tserde_derive v1.0.228'
+  "async-trait v0.1.92 (proc-macro)$STAR" $'crate\tasync-trait v0.1.92'
+  "icu v2.0.0-beta.1+build.7" $'crate\ticu v2.0.0-beta.1+build.7'
+  "backend3 v0.1.0 (/src)" $'local\tbackend3 v0.1.0'
+  "migration v0.1.0 (/src/migration)$STAR" $'local\tmigration v0.1.0'
+  "gamma v1.0.0 (registry \`example\`)" $'crate\tgamma v1.0.0'
+  "epsilon v1.0.0 (dir /vendor/epsilon-1.0.0)" $'crate\tepsilon v1.0.0'
+  "delta v0.1.0 (https://example.org/delta.git#1234abcd)" $'crate\tdelta v0.1.0'
+  "" "-"
+  "[dev-dependencies]" $'unreadable\t[dev-dependencies]'
+  "alpha v1.0.0 (*) (*)" $'unreadable\talpha v1.0.0 (*) (*)'
+  "alpha 1.0.0" $'unreadable\talpha 1.0.0'
+)
+tree_input="" tree_expected=""
+for ((i = 0; i < ${#tree_pairs[@]}; i += 2)); do
+  tree_input+="${tree_pairs[i]}"$'\n'
+  [[ ${tree_pairs[i + 1]} == - ]] || tree_expected+="${tree_pairs[i + 1]}"$'\n'
+done
+tree_actual=$(bash -c 'source "$1" && tree_crates' _ "$SCRIPT" <<<"$tree_input" 2>&1) || true
+check "tree_crates reads each form of cargo tree's {p} lines" test "$tree_actual" = "${tree_expected%$'\n'}"
 
 # --- Check 6 and cargo-about's messages and failures -------------------------
 
