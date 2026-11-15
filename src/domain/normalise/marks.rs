@@ -128,9 +128,13 @@
 //! - Line feeds at the start of an unwrapped `big` or `span[dir]` that was
 //!   the first child of a `pre` or `listing` become the first text of that
 //!   element. The parser drops one line feed there at each parse, and
-//!   html5ever's serialiser does not write one back, so one such line feed
-//!   is lost (N7 unwraps the `pre` anyway), and a body with two or more no
-//!   longer settles and is refused (data-migration.md §7.4, D140).
+//!   html5ever's serialiser does not write one back. N7's parse in the same
+//!   pass drops the first one, and its sanitiser unwraps the `pre` or
+//!   `listing`, which content-v1 does not have, so the other line feeds
+//!   stay as text and the body settles; the unwrapped element is an
+//!   unplanned removal that an editor reviews. Before N7 ran in the pass, a
+//!   body with two or more such line feeds did not settle and was refused
+//!   (data-migration.md §7.4).
 //! - A heading in an unwrapped `big` or `span[dir]` inside another heading
 //!   ends the outer heading when it is parsed again, which leaves that one
 //!   empty: `<h2><span dir="ltr"><h3>x</h3></span></h2>` becomes
@@ -299,11 +303,17 @@ fn without_class(classes: &str, class: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{MAX_PASSES, NormaliseError, Rule, normalise};
+    use super::super::{Rule, normalise};
     use super::*;
     use crate::domain::rich_text::{SanitizePolicy, Sanitizer};
     use proptest::prelude::*;
     use scraper::Node;
+    use std::sync::LazyLock;
+
+    /// The content-v1 sanitiser, built once for the tests of this module:
+    /// the whole normaliser runs it as N7, and the proptests normalise
+    /// thousands of bodies.
+    static SANITIZER: LazyLock<Sanitizer> = LazyLock::new(sanitizer);
 
     /// N5's inline rules alone over `body`: the output and the report.
     fn n5(body: &str) -> (String, NormaliseReport) {
@@ -541,7 +551,7 @@ mod tests {
         let sanitizer = sanitizer();
         for style in ["font-family: Arial", "color: nope", "/* */", "\u{a0}"] {
             let raw = format!(r#"<p><span dir="ltr" style="{style}">x</span></p>"#);
-            let out = normalise(&raw).expect("a body that settles");
+            let out = normalise(&raw, &SANITIZER).expect("a body that settles");
             assert_eq!(out.html, "<p>x</p>", "{style:?}");
             assert_eq!(
                 out.report.hits().collect::<Vec<_>>(),
@@ -635,7 +645,7 @@ mod tests {
             r#"<CENTER><B>Fontos</B></CENTER>"#,
             r#"<p><span class="marker">s&aacute;rga</span> <big>nagy</big> <span dir="ltr">sz&ouml;veg</span></p>"#,
         );
-        let out = normalise(raw).expect("a body that settles");
+        let out = normalise(raw, &SANITIZER).expect("a body that settles");
         assert_eq!(
             out.html,
             concat!(
@@ -655,7 +665,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            normalise(&out.html).map(|again| again.html),
+            normalise(&out.html, &SANITIZER).map(|again| again.html),
             Ok(out.html.clone())
         );
         assert_eq!(
@@ -683,7 +693,7 @@ mod tests {
                 Rule::SpanDirUnwrapped,
             ),
         ] {
-            let out = normalise(raw).expect("a body that settles");
+            let out = normalise(raw, &SANITIZER).expect("a body that settles");
             assert_eq!(out.html, block, "{raw:?}");
             assert_eq!(
                 out.report.hits().collect::<Vec<_>>(),
@@ -702,13 +712,21 @@ mod tests {
         // N5's block rules run first in the pass: the italic-heading rule
         // unwraps the bare `i` inside its new `em` before the `i` rule sees
         // it, so only the `i` with an attribute, which it keeps, counts as
-        // `i_to_em`. Pinned, so that a change of the order fails here.
+        // `i_to_em`. Pinned, so that a change of the order fails here. N7
+        // then removes the kept `class` as nothing planned (D146).
         let raw = r#"<h2 style="font-style: italic"><i>a</i> <i class="x">b</i></h2>"#;
-        let out = normalise(raw).expect("a body that settles");
-        assert_eq!(out.html, r#"<h2><em>a <em class="x">b</em></em></h2>"#);
+        let out = normalise(raw, &SANITIZER).expect("a body that settles");
+        assert_eq!(out.html, "<h2><em>a <em>b</em></em></h2>");
         assert_eq!(
             out.report.hits().collect::<Vec<_>>(),
             [(Rule::ItalicHeadingToEm, 1), (Rule::IToEm, 1)]
+        );
+        assert_eq!(
+            out.report
+                .unplanned_removals()
+                .map(|(removal, count)| (removal.to_string(), count))
+                .collect::<Vec<_>>(),
+            [("attribute_not_allowed em[class]".to_owned(), 1)]
         );
     }
 
@@ -725,49 +743,65 @@ mod tests {
         // either into `<h2><em>a</em></h2>`. Pinned, so that a change of
         // the order fails here too.
         let raw = r#"<h2 style="font-style: italic"><span dir="ltr"> </span>a</h2>"#;
-        let out = normalise(raw).expect("a body that settles");
+        let out = normalise(raw, &SANITIZER).expect("a body that settles");
         assert_eq!(out.html, "<h2><em> a</em></h2>");
         assert_eq!(
             out.report.hits().collect::<Vec<_>>(),
             [(Rule::ItalicHeadingToEm, 1), (Rule::SpanDirUnwrapped, 1)]
         );
-        let again = normalise(&out.html).expect("the output settles");
+        let again = normalise(&out.html, &SANITIZER).expect("the output settles");
         assert_eq!(again.html, out.html);
         assert!(!again.report.has_hits(), "{:?}", again.report);
     }
 
     #[test]
     fn an_unwrap_can_leave_markup_that_the_next_parse_reads_differently() {
-        let normalised = |raw: &str| normalise(raw).map(|out| out.html);
-        let refused = Err(NormaliseError::NotNormalisable { passes: MAX_PASSES });
+        let normalised = |raw: &str| normalise(raw, &SANITIZER).map(|out| out.html);
         // Line feeds that an unwrap puts first in a `pre` or `listing`: the
         // parser drops one there at each parse, and html5ever's serialiser
-        // does not write it back. One is lost; with two or more the body
-        // does not settle.
-        assert_eq!(
-            normalised("<pre><big>\nx</big></pre>"),
-            Ok("<pre>x</pre>".to_owned())
-        );
-        assert_eq!(
-            normalised("<pre><span dir=\"ltr\">\nx</span></pre>"),
-            Ok("<pre>x</pre>".to_owned())
-        );
-        for raw in [
-            "<pre><big>\n\nx</big></pre>",
-            "<pre><span dir=\"ltr\">\n\n\nx</span></pre>",
-            "<listing><big>\n\nx</big></listing>",
+        // does not write it back. N7's parse in the same pass drops the
+        // first one, and its sanitiser unwraps the `pre` or `listing`,
+        // which content-v1 does not have, so the rest stay as text and the
+        // body settles. Before N7 ran in the pass, two or more kept the
+        // body from settling; the unwrapped element is an unplanned
+        // removal, which puts the body in front of an editor.
+        for (raw, out, unwrapped) in [
+            ("<pre><big>\nx</big></pre>", "x", "pre"),
+            ("<pre><span dir=\"ltr\">\nx</span></pre>", "x", "pre"),
+            ("<pre><big>\n\nx</big></pre>", "\nx", "pre"),
+            (
+                "<pre><span dir=\"ltr\">\n\n\nx</span></pre>",
+                "\n\nx",
+                "pre",
+            ),
+            ("<listing><big>\n\nx</big></listing>", "\nx", "listing"),
         ] {
-            assert_eq!(normalised(raw), refused, "{raw:?}");
+            let normalised = normalise(raw, &SANITIZER).expect("a body that settles");
+            assert_eq!(normalised.html, out, "{raw:?}");
+            assert_eq!(
+                normalised
+                    .report
+                    .unplanned_removals()
+                    .map(|(removal, count)| (removal.to_string(), count))
+                    .collect::<Vec<_>>(),
+                [(format!("element_unwrapped {unwrapped}"), 1)],
+                "{raw:?}"
+            );
+            assert_eq!(
+                normalise(&normalised.html, &SANITIZER).map(|again| again.html),
+                Ok(normalised.html.clone()),
+                "{raw:?}"
+            );
         }
         // Not first in the `pre`, the line feeds stay.
         assert_eq!(
             normalised("<pre>a<big>\n\nx</big></pre>"),
-            Ok("<pre>a\n\nx</pre>".to_owned())
+            Ok("a\n\nx".to_owned())
         );
         // A renamed mark stays an element, so it moves nothing.
         assert_eq!(
             normalised("<pre><b>\n\n\nx</b></pre>"),
-            Ok("<pre><strong>\n\n\nx</strong></pre>".to_owned())
+            Ok("<strong>\n\n\nx</strong>".to_owned())
         );
         // A heading in an unwrapped mark inside another heading ends the
         // outer one when parsed again, which is left empty.
@@ -907,7 +941,7 @@ mod tests {
                 .new_tree(&mut runner)
                 .expect("the generator always produces a value")
                 .current();
-            match normalise(&raw) {
+            match normalise(&raw, &SANITIZER) {
                 Err(_) => refused += 1,
                 Ok(out) => {
                     for (rule, hits) in out.report.hits() {
@@ -977,8 +1011,8 @@ mod tests {
         // same observations.
         #[test]
         fn normalising_twice_equals_normalising_once(raw in arb_legacy()) {
-            if let Ok(once) = normalise(&raw) {
-                let twice = normalise(&once.html).map_err(|error| {
+            if let Ok(once) = normalise(&raw, &SANITIZER) {
+                let twice = normalise(&once.html, &SANITIZER).map_err(|error| {
                     TestCaseError::fail(format!("{raw:?}: the output was refused: {error}"))
                 })?;
                 prop_assert_eq!(&twice.html, &once.html, "{:?}", raw);
@@ -992,7 +1026,7 @@ mod tests {
         // `dir` or the marker class, whatever the input.
         #[test]
         fn no_legacy_mark_is_left(raw in arb_legacy()) {
-            if let Ok(out) = normalise(&raw) {
+            if let Ok(out) = normalise(&raw, &SANITIZER) {
                 let html = dom::parse(&out.html);
                 let left = count(&html, |name, element| {
                     matches!(name, "b" | "i" | "ins" | "strike" | "del" | "big")
@@ -1016,7 +1050,7 @@ mod tests {
         // V5(c) through the whole normaliser: text(source) == text(target).
         #[test]
         fn the_text_a_reader_reads_is_unchanged(raw in arb_plain_legacy()) {
-            let out = normalise(&raw).map_err(|error| {
+            let out = normalise(&raw, &SANITIZER).map_err(|error| {
                 TestCaseError::fail(format!("{raw:?} was refused: {error}"))
             })?;
             prop_assert_eq!(text(&dom::parse(&out.html)), text(&dom::parse(&raw)), "{:?}", out.html);

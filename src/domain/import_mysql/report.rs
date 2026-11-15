@@ -473,7 +473,8 @@ impl RunSummary {
             "Checked: {}. Instances: {} (covered by a valid entry: {}, imported unchanged: {}, \
              given the default without an optional entry: {}, not covered by the resolution file: \
              {}, the entry's precondition does not hold: {}). Entries for rows that the rules no \
-             longer find: {} that hold for a row fixed in the source as signed, {} stale.",
+             longer find: {} that hold for a row fixed in the source as signed, {} no longer \
+             needed, {} stale.",
             checked.join(", "),
             defects.instances(),
             defects.count(DefectOutcome::Covered),
@@ -482,6 +483,7 @@ impl RunSummary {
             defects.uncovered(),
             defects.count(DefectOutcome::Changed),
             defects.count(DefectOutcome::FixedInSource),
+            defects.count(DefectOutcome::EntryUnused),
             defects.count(DefectOutcome::Stale),
         );
         if !defects.is_complete() {
@@ -622,7 +624,7 @@ mod tests {
             testing::{Given, any_part},
         },
         options::{CanteenAuditLocalBefore, Mode},
-        resolutions::{PageHidden, PostDateShift, PostIndexImage, parse},
+        resolutions::{FileDigest, N7Accept, PageHidden, PostDateShift, PostIndexImage, parse},
         source_session::{AutoIncrement, SOURCE_TIMESTAMPS, SourceTimestamp},
     };
     use proptest::prelude::*;
@@ -958,6 +960,53 @@ mod tests {
     }
 
     #[test]
+    fn an_n7_entry_no_longer_needed_is_counted_and_listed_without_a_problem() {
+        // N7's own entry policy (research: DECISIONS R38 (D161)): the body
+        // is the one signed, and N7 no longer removes anything unplanned
+        // from it, so the entry is listed and the run has no problem.
+        let digest = [7_u8; 32];
+        let signed = parse(&format!(
+            "version = 1\n\n[[N7-accept]]\npage_id = 9\nexpect_content_sha256 = \"{}\"\n",
+            FileDigest(digest)
+        ))
+        .expect("a valid synthetic file");
+        let bodies = Given::<N7Accept>::new(Vec::new(), Some(Value::Sha256(digest)));
+        let mut part = DefectsPart::default();
+        DefectDetector::new(Mode::Apply, &signed)
+            .run(&bodies, &[], &mut part)
+            .expect("an entry no longer needed stops nothing");
+        part.conclude().expect("no problem");
+        let mut run = summary(Outcome::Completed);
+        run.parts.defects = part;
+        let markdown = run.to_markdown();
+        assert!(
+            markdown.contains(
+                "Entries for rows that the rules no longer find: 0 that hold for a row fixed in \
+                 the source as signed, 1 no longer needed, 0 stale.\n"
+            ),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains(&format!(
+                "| N7 | page 9 | entry\\_unused | 9 | N7-accept\\[1\\] | {} | {} | source value \
+                 kept |\n",
+                FileDigest(digest),
+                FileDigest(digest)
+            )),
+            "{markdown}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&run.to_json()).expect("JSON");
+        assert_eq!(json["defects"]["records"][0]["outcome"], "entry_unused");
+        assert_eq!(
+            (
+                json["defects"]["uncovered"].clone(),
+                json["defects"]["refused"].clone()
+            ),
+            (serde_json::json!(0), serde_json::json!(0))
+        );
+    }
+
+    #[test]
     fn the_defects_part_lists_every_instance_and_every_entry_without_one() {
         let run = concluded_dry_run();
         let json: serde_json::Value = serde_json::from_str(&run.to_json()).expect("JSON");
@@ -1041,8 +1090,8 @@ mod tests {
                  unchanged: 1, given the default without an optional entry: 1, not covered by the \
                  resolution file: 1, the entry's precondition does not hold: 1). Entries for rows \
                  that the rules no longer find: 1 that hold for a row fixed in the source as \
-                 signed, 1 stale.\n\n| Defect | Subject | Outcome | Rows | Entry | Expected | \
-                 Found | Proposed |\n\
+                 signed, 0 no longer needed, 1 stale.\n\n| Defect | Subject | Outcome | Rows | \
+                 Entry | Expected | Found | Proposed |\n\
                  |---|---|---|---|---|---|---|---|\n\
                  | D1 | post 12 | covered | 12 | post\\_date\\_shift\\[1\\] | 2019-05-02 | \
                  2019-05-02 | 2019-05-02 |\n\
@@ -1113,8 +1162,8 @@ mod tests {
         let mut run = summary(Outcome::Completed);
         run.parts.defects = dry_run_defects();
         assert!(run.to_markdown().contains(
-            "fixed in the source as signed, 1 stale. The run stopped before it had checked every \
-             defect.\n"
+            "fixed in the source as signed, 0 no longer needed, 1 stale. The run stopped before \
+             it had checked every defect.\n"
         ),);
     }
 

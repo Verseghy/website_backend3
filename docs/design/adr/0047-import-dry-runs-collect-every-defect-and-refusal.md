@@ -34,10 +34,12 @@ In `mode:apply`, the first of these problems stops the run and rolls everything 
 | Problem | The message names |
 |---|---|
 | a defect instance that no entry of the resolution list covers, where the defect needs one (every defect but D10, whose entries are optional, §4) | the defect id and the row id |
-| an entry whose precondition does not hold: the row changed since the sign-off, no longer has its defect, or is gone; for D3, whose entry pins the fix that editors made in the source (§4), the post has another index image than the signed one, still has none, or is gone | the defect id, the row id, the expected and the found value |
+| an entry whose precondition does not hold: the row changed since the sign-off, no longer has its defect, or is gone; for D3, whose entry pins the fix that editors made in the source (§4), the post has another index image than the signed one, still has none, or is gone; an N7 entry whose body is unchanged but no longer has an unplanned removal is no problem: it is no longer needed, and the run lists it and goes on (§4) | the defect id, the row id, the expected and the found value |
 | a row that violates a target `NOT NULL`, `CHECK`, unique or foreign-key rule | the table, the row id and the rule |
 
 The cut-over, the dress rehearsals and the nightly's `apply` step never commit a resolution that the editors did not sign.
+
+The N7 clause of the second row corrects this section under [ADR 0001](0001-record-architecture-decisions.md) §5 and §6, to the maintainer's answer of 2026-11-15 (research: DECISIONS R38 (D161)), which §4 quotes.
 
 ### 2. A dry run collects every problem and fails at its end
 
@@ -66,22 +68,25 @@ How a defect's entries work comes from data-migration.md §8.1, so it belongs to
 
 | Policy | Defects | An instance without an entry | An entry for a row the rule no longer finds |
 |---|---|---|---|
-| required | D1, D2, D5, D6, D8, D9, N7 | a problem (§1, §2) | a problem: the row no longer has its defect, or is gone |
+| required | D1, D2, D5, D6, D8, D9 | a problem (§1, §2) | a problem: the row no longer has its defect, or is gone |
+| acceptance | N7 | a problem (§1, §2) | no problem when the source has the signed value: the body is unchanged, but a later normaliser rule plans what the entry accepted, so the entry is no longer needed; the run lists it, applies nothing and goes on. Otherwise a problem: the body changed since the sign-off, or the row has no body |
 | optional | D10 | no problem: it takes the default, `published`, in both modes, and is listed | a problem, as under required |
 | source fix | D3 | a problem: the editors have not fixed it yet | holds, and applies nothing, when the source has the value the entry pins (the post has the signed index image); otherwise a problem: the fix differs, or the post is gone |
 | listed | D4, D7 | no problem: imported unchanged and listed | none: no section |
 
 An instance that an entry covers is judged the same under every policy: the entry's resolution when its precondition holds, otherwise a problem.
 
+The acceptance row, and N7's place in it rather than under required, correct this table under [ADR 0001](0001-record-architecture-decisions.md) §5 and §6, to the maintainer's answer of 2026-11-15 (research: DECISIONS R38 (D161)). The table had put N7 under required: the decision register D49 that this ADR records said nothing about N7's entries, and this ADR had not foreseen point 5 of the review of `N7-accept` entries that normaliser-n7-plan built later ([data-migration.md](../data-migration.md) §7.4), by which an entry whose unchanged body no longer has an unplanned removal outlives its defect as no longer needed. The register asked (research: third decision register D161): "An `N7-accept` entry lets `apply` go on past a body's unplanned sanitiser removals. Its precondition is the SHA-256 of the source body. data-migration.md §7.4 describes how the import judges these entries (five points, below) and says this review waits for your confirmation. Do you confirm all five as built? Or should each entry also pin what the editors accepted, either as the reviewed removals or as the SHA-256 of the output, so that a later normaliser or sanitiser change that removes more gets reviewed again?" The maintainer answered "Confirm all as built", the recommended option, whose consequence includes: "ADR 0047 §4 sends every defect through one detector, so #318's rebase gives N7 an entry policy of its own in defects.rs, with tests: an entry whose precondition holds but whose body no longer has an unplanned removal is listed, not counted as a problem. ADR 0047 §1, §4's N7 row and §5, and data-migration.md §4.2 and §8.2, get an editorial correction that cites this answer. D49 said nothing about N7 entries, so this is a correction under ADR 0001 §5-§6, as with D157, not an amending ADR." The policy is `EntryPolicy::Acceptance`, whose outcome for such an entry is `entry_unused`. An entry accepts whatever N7 removes from the bytes it was signed for, so a later change to the sanitiser, the normaliser or a dependency that removes more from an accepted body goes through without a new review; only the dry run's per-body diff shows it, and V5(c) still stops on lost text (data-migration.md §7.4, §10).
+
 ### 5. What this ADR amends
 
 | Amended text | Change |
 |---|---|
 | ADR 0017 §3, the second bullet: "A changed row stops the import until the entry is re-signed." | "In `apply`, a changed row stops the import until the entry is re-signed; a dry run lists it and goes on with the defect's proposed default (ADR 0047)." |
-| ADR 0017 §3, the third bullet: "An instance the list does not cover stops the import, so the nightly rehearsal reports it long before the window." | "In `apply`, an instance the list does not cover stops the import (D10's entries are optional, so an unlisted page is imported as published), and so does an entry for a row that no longer has its defect (except a D3 entry whose post has the index image it pins, which holds). A dry run lists every such instance and entry, goes on with the defect's proposed default and fails at its end, so one nightly report shows them all long before the window (ADR 0047)." |
+| ADR 0017 §3, the third bullet: "An instance the list does not cover stops the import, so the nightly rehearsal reports it long before the window." | "In `apply`, an instance the list does not cover stops the import (D10's entries are optional, so an unlisted page is imported as published), and so does an entry for a row that no longer has its defect (except a D3 entry whose post has the index image it pins, which holds, and an N7 entry whose body is unchanged but no longer has an unplanned removal, which is no longer needed and only listed). A dry run lists every such instance and entry, goes on with the defect's proposed default and fails at its end, so one nightly report shows them all long before the window (ADR 0047)." |
 | ADR 0017 §3, the fourth bullet: "A row that still violates one fails the import." | "A row that still violates one fails the import; a dry run lists every such row, goes on without it and fails at its end (ADR 0047)." |
 
-[data-migration.md](../data-migration.md) §4.2, §8.2, §11.1, §11.3 and §12 follow this ADR. The policies of §4 add no rule of their own: D10's optional entries and D3's entry that pins the fix made in the source are those of data-migration.md §8.1 and of the first paragraph of ADR 0017 §3, which the amended bullets now name.
+[data-migration.md](../data-migration.md) §4.2, §8.2, §11.1, §11.3 and §12 follow this ADR. The policies of §4 add no rule of their own: D10's optional entries and D3's entry that pins the fix made in the source are those of data-migration.md §8.1 and of the first paragraph of ADR 0017 §3, which the amended bullets now name. N7's acceptance is the review of `N7-accept` entries in data-migration.md §7.4, which the maintainer confirmed as built (research: DECISIONS R38 (D161)); the N7 clause of the third bullet's new text corrects this section under [ADR 0001](0001-record-architecture-decisions.md) §5 and §6, as §4 says.
 
 ## Consequences
 
@@ -118,6 +123,7 @@ An instance that an entry covers is judged the same under every policy: the entr
 ## References
 
 - research: DECISIONS R9 (D49, the answer of 2026-10-25); research: decision register D49 (the question, its context and the options)
-- [data-migration.md](../data-migration.md) §4.2, §7.1, §8.1, §8.2, §11.1, §11.3; [cutover.md](../cutover.md) §5.2, P2
-- `src/domain/import_mysql/defects.rs`, `src/domain/import_mysql/signoff.rs`, `src/domain/import_mysql/report.rs`, `src/tasks/import_mysql/mod.rs`
+- research: DECISIONS R38 (D161, the answer of 2026-11-15, which corrects §1, §4 and §5 for N7); research: third decision register D161 (the question, its context and the options)
+- [data-migration.md](../data-migration.md) §4.2, §7.1, §7.4, §8.1, §8.2, §11.1, §11.3; [cutover.md](../cutover.md) §5.2, P2
+- `src/domain/import_mysql/defects.rs`, `src/domain/import_mysql/n7_review.rs`, `src/domain/import_mysql/signoff.rs`, `src/domain/import_mysql/report.rs`, `src/tasks/import_mysql/mod.rs`
 - Amended: [ADR 0017](0017-legacy-data-import-normalisation-and-defect-resolution.md) §3, its second, third and fourth bullets

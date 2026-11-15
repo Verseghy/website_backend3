@@ -13,7 +13,12 @@
 //! `/information/<slug>`) and the resolution the import proposes: the
 //! entry's resolution where a valid entry covers the instance, otherwise the
 //! defect's proposed default. It also lists the rows the editors fixed in
-//! the source as their entry pins (D3), so they see what they signed.
+//! the source as their entry pins (D3), so they see what they signed. An
+//! `N7-accept` entry that is no longer needed, because N7 now removes
+//! nothing unplanned from the unchanged body it was signed for, is not an
+//! instance and asks nothing of the editors: like a stale entry, it is the
+//! maintainer's to remove, and only the report lists it (research:
+//! DECISIONS R38 (D161)).
 //! Nothing else: no person's name, no content, no error text and no path of
 //! the machine. Every cell comes from the types of [`super::defects`],
 //! which cannot hold free text, or is a fixed phrase of this module, and the
@@ -94,7 +99,8 @@ const INTRO_END: &str = ", with the legacy row ids, the pages to open on the liv
 /// table row per instance and per row fixed in the source as signed, in
 /// subject order; a stale entry (its row is gone, no longer has the
 /// defect, or holds another fix than the one signed) is the maintainer's
-/// to fix, and only the report lists it.
+/// to fix, and an N7 entry that is no longer needed the maintainer's to
+/// remove, so only the report lists them.
 #[must_use]
 pub fn render(snapshot_at: DateTime<Utc>, defects: &DefectsPart) -> String {
     let mut sheet = format!(
@@ -138,9 +144,13 @@ pub fn render(snapshot_at: DateTime<Utc>, defects: &DefectsPart) -> String {
 }
 
 /// Whether `record` gets a row on the sheet: every instance, and every row
-/// fixed in the source as signed; not a stale entry.
+/// fixed in the source as signed; not a stale entry, nor an N7 entry that
+/// is no longer needed.
 fn on_sheet(record: &DefectRecord) -> bool {
-    record.outcome != DefectOutcome::Stale
+    !matches!(
+        record.outcome,
+        DefectOutcome::Stale | DefectOutcome::EntryUnused
+    )
 }
 
 /// The row ids of an instance, `12, 13`, or [`NOTHING`].
@@ -190,10 +200,14 @@ mod tests {
     use crate::domain::import_mysql::{
         defects::{
             DefectDetector, DefectId, DefectRule, Instance, PageSlug, Proposal, PublicPath,
-            Subject, Value, Word, testing::any_part,
+            Subject, Value, Word,
+            testing::{N7Body, UnplannedRemovals, any_part},
         },
         options::Mode,
-        resolutions::{PostAuthor, PostIndexImage, ResolutionFile, is_index_image_path, parse},
+        resolutions::{
+            BodyRow, FileDigest, PostAuthor, PostIndexImage, ResolutionFile, is_index_image_path,
+            parse,
+        },
     };
 
     fn snapshot() -> DateTime<Utc> {
@@ -426,6 +440,54 @@ mod tests {
         assert!(!sheet.contains("| 71 |"), "{sheet}");
     }
 
+    #[test]
+    fn an_n7_entry_no_longer_needed_is_not_on_the_sheet() {
+        // Post 91's body is the one its entry was signed for, but N7 no
+        // longer removes anything unplanned from it: the entry is no longer
+        // needed (research: DECISIONS R38 (D161)), which asks nothing of
+        // the editors. Post 92's body still has an unplanned removal that
+        // its entry accepts, so the editors see it.
+        let rows = [
+            N7Body {
+                row: BodyRow::Post(id(91)),
+                source: "<p>91</p>",
+                unplanned: false,
+            },
+            N7Body {
+                row: BodyRow::Post(id(92)),
+                source: "<p>92</p>",
+                unplanned: true,
+            },
+        ];
+        let signed = parse(&format!(
+            "version = 1\n[[N7-accept]]\npost_id = 91\nexpect_content_sha256 = \"{}\"\n\
+             [[N7-accept]]\npost_id = 92\nexpect_content_sha256 = \"{}\"\n",
+            FileDigest::of(rows[0].source.as_bytes()),
+            FileDigest::of(rows[1].source.as_bytes())
+        ))
+        .expect("a valid synthetic file");
+        let mut part = DefectsPart::default();
+        DefectDetector::new(Mode::Apply, &signed)
+            .run(&UnplannedRemovals, &rows, &mut part)
+            .expect("neither entry is a problem");
+        assert_eq!(
+            part.records()
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            [DefectOutcome::EntryUnused, DefectOutcome::Covered]
+        );
+        let sheet = render(snapshot(), &part);
+        assert!(
+            sheet.ends_with(&format!(
+                "## N7: Unplanned sanitiser removals in a body\n\n{TABLE_HEAD}| 92 | /posts/92 | \
+                 accepted |\n"
+            )),
+            "{sheet}"
+        );
+        assert!(!sheet.contains("| 91 |"), "{sheet}");
+    }
+
     /// Whether `cell` is a list of legacy ids, `12` or `12, 13`.
     fn is_id_list(cell: &str) -> bool {
         cell.split(", ").all(|id| {
@@ -536,7 +598,8 @@ mod tests {
             for line in sheet.lines() {
                 prop_assert!(allowed(line), "{:?} in\n{}", line, sheet);
             }
-            // One table row per instance, none for a stale entry.
+            // One table row per instance and per row fixed in the source,
+            // none for a stale entry or an N7 entry no longer needed.
             let instances = part
                 .records()
                 .iter()

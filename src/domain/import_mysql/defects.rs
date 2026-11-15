@@ -18,17 +18,25 @@
 //!    changed since the sign-off is a problem;
 //! 3. an entry for a row that the rule no longer finds is a problem too:
 //!    the row lost its defect (or the row is gone), and the entry would
-//!    resolve something that is not there. The one exception is D3, whose
+//!    resolve something that is not there. There are two exceptions. D3's
 //!    defect the editors fix in the source before the final dump: its entry
 //!    pins that fix, so it holds exactly when the rule no longer finds the
-//!    post and the source has the signed value.
+//!    post and the source has the signed value. An N7 entry accepts what
+//!    the sanitiser removes unplanned from the body it was signed for: when
+//!    a later normaliser rule plans those removals, the rule no longer
+//!    finds the body, and an entry whose body is unchanged is listed as no
+//!    longer needed and applies nothing, as the import's review of N7
+//!    (`super::n7_review`) has it (data-migration.md §7.4; research:
+//!    DECISIONS R38 (D161)).
 //!
 //! The defect's [`EntryPolicy`] ([`DefectId::entry_policy`], after
 //! data-migration.md §8.1) says which of these rules apply: every instance
-//! needs an entry (D1, D2, D5, D6, D8, D9, N7), entries are optional (D10),
-//! the entry pins a fix made in the source (D3), or the defect has no
-//! entries and is only listed (D4, D7). The policy belongs to the defect,
-//! not to the rule, so no table step can choose another one.
+//! needs an entry (D1, D2, D5, D6, D8, D9), entries are optional (D10), the
+//! entry pins a fix made in the source (D3), the entry accepts the instance
+//! and is no longer needed once the rule stops finding its unchanged row
+//! (N7), or the defect has no entries and is only listed (D4, D7). The
+//! policy belongs to the defect, not to the rule, so no table step can
+//! choose another one.
 //!
 //! A table step brings the rule, a [`DefectRule`]: which source rows have
 //! the defect ([`DefectRule::detect`]), what the precondition reads for a
@@ -58,10 +66,11 @@
 //! stale entry changes nothing. At the end of the run,
 //! [`DefectsPart::conclude`] fails it, naming every problem, so the run
 //! still exits non-zero, and one nightly report shows every defect at once
-//! instead of one a night. Two outcomes are no problem in either mode: an
+//! instead of one a night. Three outcomes are no problem in either mode: an
 //! instance of an optional defect that no entry lists takes the default
-//! ([`DefectOutcome::Defaulted`]), and a D3 entry whose post the editors
-//! fixed as signed applies nothing ([`DefectOutcome::FixedInSource`]).
+//! ([`DefectOutcome::Defaulted`]), a D3 entry whose post the editors fixed
+//! as signed applies nothing ([`DefectOutcome::FixedInSource`]), and neither
+//! does an N7 entry that is no longer needed ([`DefectOutcome::EntryUnused`]).
 //!
 //! # What the report and the sign-off sheet may show
 //!
@@ -213,12 +222,13 @@ impl DefectId {
     #[must_use]
     pub const fn entry_policy(self) -> EntryPolicy {
         match self {
-            Self::D1 | Self::D2 | Self::D5 | Self::D6 | Self::D8 | Self::D9 | Self::N7 => {
+            Self::D1 | Self::D2 | Self::D5 | Self::D6 | Self::D8 | Self::D9 => {
                 EntryPolicy::Required
             }
             Self::D3 => EntryPolicy::SourceFix,
             Self::D10 => EntryPolicy::Optional,
             Self::D4 | Self::D7 => EntryPolicy::Listed,
+            Self::N7 => EntryPolicy::Acceptance,
         }
     }
 }
@@ -234,11 +244,28 @@ pub enum EntryPolicy {
     /// The defect has no section (D4, D7): every instance is imported
     /// unchanged and listed ([`DefectOutcome::Unchanged`]).
     Listed,
-    /// Every instance needs a signed entry (D1, D2, D5, D6, D8, D9, N7): an
+    /// Every instance needs a signed entry (D1, D2, D5, D6, D8, D9): an
     /// instance without one is a problem ([`DefectOutcome::Uncovered`]), and
     /// so is an entry for a subject the rule no longer finds
     /// ([`DefectOutcome::Stale`]).
     Required,
+    /// Every instance needs a signed entry that accepts it, as under
+    /// [`Self::Required`], but an entry for a subject the rule no longer
+    /// finds is no problem while the source still has the value it was
+    /// signed for: it is listed as no longer needed and applies nothing
+    /// ([`DefectOutcome::EntryUnused`]). It is a problem when the value
+    /// differs or the row is gone ([`DefectOutcome::Stale`]).
+    ///
+    /// That is N7: an `N7-accept` entry accepts whatever the sanitiser
+    /// removes unplanned from the body bytes it was signed for, so once a
+    /// later normaliser rule plans those removals, the body has no instance
+    /// left and its entry can go at the next sign-off, while the run goes on
+    /// (point 5 of the review of entries in data-migration.md §7.4, the
+    /// verdicts of `super::n7_review`). The maintainer confirmed the review
+    /// as built, point 5 kept, on 2026-11-15 (research: DECISIONS R38
+    /// (D161)), which corrects ADR 0047 §4's table, where N7 stood under
+    /// [`Self::Required`].
+    Acceptance,
     /// The editors may list instances, and an instance that no entry lists
     /// takes the defect's default, which is no problem
     /// ([`DefectOutcome::Defaulted`]): D10, whose pages are imported as
@@ -295,6 +322,17 @@ impl fmt::Display for Subject {
             Self::LabelGroup(id) => write!(f, "label group {id}"),
             Self::MenuLevel(Some(id)) => write!(f, "menu parent {id}"),
             Self::MenuLevel(None) => f.write_str("menu root level"),
+        }
+    }
+}
+
+impl From<BodyRow> for Subject {
+    /// The post or page whose body `row` names: what N7 and its
+    /// `N7-accept` entries are about.
+    fn from(row: BodyRow) -> Self {
+        match row {
+            BodyRow::Post(id) => Self::Post(id),
+            BodyRow::Page(id) => Self::Page(id),
         }
     }
 }
@@ -747,10 +785,7 @@ impl SignedEntry for N7Accept {
     }
 
     fn subject(&self) -> Subject {
-        match self.body {
-            BodyRow::Post(id) => Subject::Post(id),
-            BodyRow::Page(id) => Subject::Page(id),
-        }
+        self.body.into()
     }
 
     fn expected(&self) -> Value {
@@ -945,21 +980,29 @@ pub enum DefectOutcome {
     /// (D3): the rule no longer finds its subject, and the source has the
     /// pinned value, so the entry holds and nothing is applied. No problem.
     FixedInSource,
+    /// An entry of a defect whose entries accept their instances (N7,
+    /// [`EntryPolicy::Acceptance`]): the rule no longer finds its subject,
+    /// and the source still has the value the entry was signed for, so the
+    /// entry is no longer needed. It is listed, applies nothing and can go
+    /// at the next sign-off. No problem.
+    EntryUnused,
     /// An entry that does not hold for a subject the rule no longer finds:
     /// the row no longer has the defect, or is gone, or (D3) its fix in the
-    /// source differs from the one signed. A problem.
+    /// source differs from the one signed, or (N7) its body changed since
+    /// the sign-off. A problem.
     Stale,
 }
 
 impl DefectOutcome {
     /// Every outcome.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Covered,
         Self::Unchanged,
         Self::Defaulted,
         Self::Uncovered,
         Self::Changed,
         Self::FixedInSource,
+        Self::EntryUnused,
         Self::Stale,
     ];
 
@@ -973,6 +1016,7 @@ impl DefectOutcome {
             Self::Uncovered => "uncovered",
             Self::Changed => "changed",
             Self::FixedInSource => "fixed_in_source",
+            Self::EntryUnused => "entry_unused",
             Self::Stale => "stale",
         }
     }
@@ -986,10 +1030,10 @@ impl DefectOutcome {
 
     /// Whether the record is an instance the rule found, rather than an
     /// entry whose subject the rule no longer finds
-    /// ([`Self::FixedInSource`], [`Self::Stale`]).
+    /// ([`Self::FixedInSource`], [`Self::EntryUnused`], [`Self::Stale`]).
     #[must_use]
     pub const fn is_instance(self) -> bool {
-        !matches!(self, Self::FixedInSource | Self::Stale)
+        !matches!(self, Self::FixedInSource | Self::EntryUnused | Self::Stale)
     }
 }
 
@@ -1024,8 +1068,8 @@ pub struct DefectRecord {
     /// How the detector judged it.
     pub outcome: DefectOutcome,
     /// The legacy row ids it touches: an instance's, or the subject's own
-    /// for an entry that holds for a row fixed in the source; none for a
-    /// stale entry, whose row may be gone.
+    /// for an entry that holds for a row fixed in the source or that is no
+    /// longer needed; none for a stale entry, whose row may be gone.
     pub rows: Vec<NonZeroU32>,
     /// Where the editors can see it on the live site, given as the rows
     /// are.
@@ -1061,7 +1105,8 @@ impl DefectRecord {
                 DefectOutcome::Covered
                 | DefectOutcome::Unchanged
                 | DefectOutcome::Defaulted
-                | DefectOutcome::FixedInSource,
+                | DefectOutcome::FixedInSource
+                | DefectOutcome::EntryUnused,
                 _,
             ) => None,
             (DefectOutcome::Uncovered, _) => {
@@ -1100,6 +1145,23 @@ impl DefectRecord {
                     "{defect} {subject}: the precondition of {}, which pins the fix made in the \
                      source, does not hold: {} is {}, but the source has {found}. The row changed \
                      since the sign-off: sign the entry again (data-migration.md §8.1, §8.2)",
+                    entry.name(),
+                    precondition_field(entry.section),
+                    entry.expected
+                ))
+            }
+            // An entry that accepts its instance, for a row that is still
+            // there but that the rule no longer finds: had the row kept the
+            // signed value, the entry would only be no longer needed, so the
+            // row changed since the sign-off and lost its defect with it.
+            (DefectOutcome::Stale, Some(entry))
+                if defect.entry_policy() == EntryPolicy::Acceptance && self.found.is_some() =>
+            {
+                Some(format!(
+                    "{defect} {subject}: the precondition of {} does not hold: {} is {}, but the \
+                     source has {found}, and the {defect} rule no longer finds the row. The row \
+                     changed since the sign-off and no longer has the defect: remove the entry \
+                     (data-migration.md §7.4, §8.2)",
                     entry.name(),
                     precondition_field(entry.section),
                     entry.expected
@@ -1333,7 +1395,10 @@ impl<'a> DefectDetector<'a> {
     /// instance of a defect whose entries are optional, and that no entry
     /// lists, gets the default (or keeps the source value); an entry that
     /// pins a fix made in the source holds when the rule no longer finds its
-    /// subject and the source has the pinned value. The rest are problems
+    /// subject and the source has the pinned value, and an entry that
+    /// accepts its instance is no longer needed when the rule no longer
+    /// finds its subject and the source has the signed value. The rest are
+    /// problems
     /// ([`DefectOutcome::is_problem`]): `apply` returns the first, while a
     /// dry run records it, gives the instance the rule's proposed default
     /// (or keeps the source value) and goes on.
@@ -1470,7 +1535,7 @@ fn judge<D: DefectRule>(
                 let (shown, decision) = fallback();
                 (DefectOutcome::Defaulted, None, shown, decision)
             }
-            EntryPolicy::Required | EntryPolicy::SourceFix => {
+            EntryPolicy::Required | EntryPolicy::SourceFix | EntryPolicy::Acceptance => {
                 let (shown, decision) = fallback();
                 (DefectOutcome::Uncovered, None, shown, decision)
             }
@@ -1511,9 +1576,12 @@ fn judge<D: DefectRule>(
 /// the editors fixed the row in the source, so the rule no longer finds it,
 /// and the entry holds when the source has the value it pins
 /// ([`DefectOutcome::FixedInSource`], with the subject's rows and paths, so
-/// the sign-off sheet lists it). Every other entry for a subject the rule
-/// does not find, and a D3 entry whose value differs or whose row is gone,
-/// is stale ([`DefectOutcome::Stale`]).
+/// the sign-off sheet lists it). Under [`EntryPolicy::Acceptance`] (N7) an
+/// entry whose row still has the value it was signed for is no longer
+/// needed ([`DefectOutcome::EntryUnused`], with the subject's rows and
+/// paths, so the report names the row). Every other entry for a subject
+/// the rule does not find, and one of those two whose value differs or
+/// whose row is gone, is stale ([`DefectOutcome::Stale`]).
 ///
 /// - `rule`: the defect's rule, which reads what the precondition finds.
 /// - `rows`: every source row the rule reads.
@@ -1526,17 +1594,22 @@ fn judge_entry<D: DefectRule>(
     entry: EntryRef,
 ) -> DefectRecord {
     let found = rule.found(rows, subject);
-    let fixed = D::DEFECT.entry_policy() == EntryPolicy::SourceFix
-        && found
-            .as_ref()
-            .is_some_and(|value| value.matches(&entry.expected));
-    let (outcome, (rows, paths)) = if fixed {
-        (
+    let signed = found
+        .as_ref()
+        .is_some_and(|value| value.matches(&entry.expected));
+    let (outcome, (rows, paths)) = match D::DEFECT.entry_policy() {
+        EntryPolicy::SourceFix if signed => (
             DefectOutcome::FixedInSource,
             subject_rows_and_paths(subject),
-        )
-    } else {
-        (DefectOutcome::Stale, (Vec::new(), Vec::new()))
+        ),
+        EntryPolicy::Acceptance if signed => {
+            (DefectOutcome::EntryUnused, subject_rows_and_paths(subject))
+        }
+        EntryPolicy::Listed
+        | EntryPolicy::Required
+        | EntryPolicy::Optional
+        | EntryPolicy::SourceFix
+        | EntryPolicy::Acceptance => (DefectOutcome::Stale, (Vec::new(), Vec::new())),
     };
     DefectRecord {
         defect: D::DEFECT,
@@ -1555,6 +1628,7 @@ mod tests {
     use super::*;
     use crate::domain::import_mysql::resolutions::{AuthorChoice, parse};
     use proptest::{collection, prelude::*};
+    use testing::{N7Body, UnplannedRemovals};
 
     fn id(number: u32) -> NonZeroU32 {
         NonZeroU32::new(number).expect("a row id")
@@ -2303,6 +2377,192 @@ set_author = 7
         }
     }
 
+    /// The bytes the editors signed post 91's entry for.
+    const SIGNED_BODY: &str = r#"<div class="doboz"><p>Szöveg</p></div>"#;
+
+    /// A resolution file whose one `N7-accept` entry was signed for
+    /// [`SIGNED_BODY`] of post 91.
+    fn accepted() -> ResolutionFile {
+        file(&format!(
+            "version = 1\n[[N7-accept]]\npost_id = 91\nexpect_content_sha256 = \"{}\"\n",
+            FileDigest::of(SIGNED_BODY.as_bytes())
+        ))
+    }
+
+    fn post_body(source: &'static str, unplanned: bool) -> N7Body {
+        N7Body {
+            row: BodyRow::Post(id(91)),
+            source,
+            unplanned,
+        }
+    }
+
+    #[test]
+    fn an_n7_entry_whose_unchanged_body_lost_its_unplanned_removals_is_listed_not_a_problem() {
+        // A later normaliser rule now plans what the editors accepted: the
+        // body is the one they signed, and N7 removes nothing unplanned
+        // from it any more (point 5 of data-migration.md §7.4's review of
+        // entries; research: DECISIONS R38 (D161)).
+        let signed = accepted();
+        for mode in [Mode::DryRun, Mode::Apply] {
+            let mut part = DefectsPart::default();
+            let decisions = DefectDetector::new(mode, &signed)
+                .run(
+                    &UnplannedRemovals,
+                    &[post_body(SIGNED_BODY, false)],
+                    &mut part,
+                )
+                .expect("an entry no longer needed stops nothing");
+            assert!(decisions.is_empty(), "{mode:?}");
+            let [record] = part.records() else {
+                panic!("{:?}", part.records());
+            };
+            assert_eq!(record.outcome, DefectOutcome::EntryUnused, "{mode:?}");
+            assert_eq!(record.problem(), None);
+            assert!(!record.outcome.is_problem() && !record.outcome.is_instance());
+            // Listed with its row, so the report names what can go.
+            assert_eq!(
+                (record.rows.as_slice(), record.paths.as_slice()),
+                ([id(91)].as_slice(), [PublicPath::Post(id(91))].as_slice())
+            );
+            assert_eq!(
+                record.found,
+                Some(Value::Sha256(FileDigest::of(SIGNED_BODY.as_bytes()).0))
+            );
+            assert_eq!(record.proposed, None);
+            assert_eq!(
+                record.entry.as_ref().map(EntryRef::name),
+                Some("N7-accept[1]".to_owned())
+            );
+            assert_eq!(part.instances(), 0);
+            assert_eq!(part.count(DefectOutcome::EntryUnused), 1);
+            assert_eq!(part.refused(), 0);
+            assert_eq!(part.conclude(), Ok(()), "{mode:?}");
+        }
+        // While the removals are still unplanned, the entry accepts them.
+        let mut part = DefectsPart::default();
+        let decisions = DefectDetector::new(Mode::Apply, &signed)
+            .run(
+                &UnplannedRemovals,
+                &[post_body(SIGNED_BODY, true)],
+                &mut part,
+            )
+            .expect("the entry accepts the body");
+        assert_eq!(
+            decisions.get(&Subject::Post(id(91))),
+            Some(&Decision::Entry(()))
+        );
+        assert_eq!(part.records()[0].outcome, DefectOutcome::Covered);
+        assert_eq!(
+            part.records()[0].proposed,
+            Some(Value::Choice(Word::Accepted))
+        );
+    }
+
+    #[test]
+    fn an_n7_entry_fails_when_its_body_changed_or_is_gone_and_a_body_needs_one() {
+        // Points 1 and 3 of the review of entries: a changed body is a
+        // problem whether or not N7 still removes something unplanned from
+        // it, and so is an entry whose row has no body; and a body with an
+        // unplanned removal needs an entry.
+        let signed = accepted();
+        let expected = FileDigest::of(SIGNED_BODY.as_bytes());
+        let edited = "<p>Szöveg</p>";
+        let edited_digest = FileDigest::of(edited.as_bytes());
+        let cases: [(Vec<N7Body>, &ResolutionFile, DefectOutcome, String); 4] = [
+            // Unplanned removals, no entry.
+            (
+                vec![post_body(SIGNED_BODY, true)],
+                &ResolutionFile::default(),
+                DefectOutcome::Uncovered,
+                format!(
+                    "N7 post 91 is not covered by the resolution file (its source value is \
+                     {expected}): add a N7-accept entry for it once the editors have signed it \
+                     (data-migration.md §8.2)"
+                ),
+            ),
+            // Edited since the sign-off, still with unplanned removals.
+            (
+                vec![post_body(edited, true)],
+                &signed,
+                DefectOutcome::Changed,
+                format!(
+                    "N7 post 91: the precondition of N7-accept[1] does not hold: \
+                     expect_content_sha256 is {expected}, but the source has {edited_digest}. The \
+                     row changed since the sign-off: sign the entry again (data-migration.md \
+                     §8.2)"
+                ),
+            ),
+            // Edited since the sign-off, and N7 now removes nothing
+            // unplanned from it.
+            (
+                vec![post_body(edited, false)],
+                &signed,
+                DefectOutcome::Stale,
+                format!(
+                    "N7 post 91: the precondition of N7-accept[1] does not hold: \
+                     expect_content_sha256 is {expected}, but the source has {edited_digest}, and \
+                     the N7 rule no longer finds the row. The row changed since the sign-off and \
+                     no longer has the defect: remove the entry (data-migration.md §7.4, §8.2)"
+                ),
+            ),
+            // No body for the row: no such row, or a NULL content.
+            (
+                Vec::new(),
+                &signed,
+                DefectOutcome::Stale,
+                format!(
+                    "N7 post 91: N7-accept[1] covers it, but the N7 rule no longer finds it \
+                     (expect_content_sha256 is {expected}, the source has no such row): the row \
+                     is gone, so remove the entry (data-migration.md §8.2)"
+                ),
+            ),
+        ];
+        for (rows, list, outcome, message) in cases {
+            let mut part = DefectsPart::default();
+            let refusal = DefectDetector::new(Mode::Apply, list)
+                .run(&UnplannedRemovals, &rows, &mut part)
+                .expect_err("apply stops");
+            assert_eq!(refusal, DefectRefusal(message.clone()));
+            assert_eq!(part.records()[0].outcome, outcome);
+
+            let mut part = DefectsPart::default();
+            DefectDetector::new(Mode::DryRun, list)
+                .run(&UnplannedRemovals, &rows, &mut part)
+                .expect("a dry run goes on");
+            let problems = part.conclude().expect_err("the dry run fails at its end");
+            assert_eq!(problems.lines, [message]);
+        }
+    }
+
+    #[test]
+    fn a_body_row_is_the_subject_of_its_post_or_page() {
+        assert_eq!(Subject::from(BodyRow::Post(id(91))), Subject::Post(id(91)));
+        assert_eq!(Subject::from(BodyRow::Page(id(9))), Subject::Page(id(9)));
+    }
+
+    proptest! {
+        // For any id, a body row is the subject of its own post or page,
+        // and an `N7-accept` entry for it has that subject, so N7's
+        // instances and entries pair by the row.
+        #[test]
+        fn a_body_row_and_its_entry_have_the_same_subject(
+            number in 1_u32..=u32::MAX,
+            is_page in any::<bool>(),
+            digest in any::<[u8; 32]>(),
+        ) {
+            let row_id = id(number);
+            let (row, expected) = if is_page {
+                (BodyRow::Page(row_id), Subject::Page(row_id))
+            } else {
+                (BodyRow::Post(row_id), Subject::Post(row_id))
+            };
+            prop_assert_eq!(Subject::from(row), expected.clone());
+            let entry = N7Accept { body: row, expect_content_sha256: digest };
+            prop_assert_eq!(entry.subject(), expected);
+        }
+    }
+
     #[test]
     fn every_defect_has_the_entry_policy_of_data_migration() {
         for defect in DefectId::ALL {
@@ -2315,8 +2575,10 @@ set_author = 7
                 | DefectId::D5
                 | DefectId::D6
                 | DefectId::D8
-                | DefectId::D9
-                | DefectId::N7 => EntryPolicy::Required,
+                | DefectId::D9 => EntryPolicy::Required,
+                // Its own policy: an unneeded entry is listed, not a
+                // problem (research: DECISIONS R38 (D161)).
+                DefectId::N7 => EntryPolicy::Acceptance,
             };
             assert_eq!(defect.entry_policy(), expected, "{defect}");
             // Only a defect without a section has no entries.
@@ -2734,6 +2996,7 @@ expect_content_sha256 = \"{digest}\"
                 false,
                 false,
             ),
+            (DefectOutcome::EntryUnused, "entry_unused", false, false),
             (DefectOutcome::Stale, "stale", true, false),
         ];
         assert_eq!(
@@ -2886,7 +3149,8 @@ expect_content_sha256 = \"{digest}\"
                     DefectOutcome::Stale => prop_assert!(decision.is_none()),
                     DefectOutcome::Unchanged
                     | DefectOutcome::Defaulted
-                    | DefectOutcome::FixedInSource => {
+                    | DefectOutcome::FixedInSource
+                    | DefectOutcome::EntryUnused => {
                         prop_assert!(false, "D1 needs an entry for every instance");
                     }
                 }
@@ -3009,9 +3273,10 @@ expect_content_sha256 = \"{digest}\"
             bodies in testing::any_bodies(),
             signed in testing::any_file(),
         ) {
-            // One rule per policy: D1 and N7 need an entry for every
-            // instance, D4 has none, D10's are optional, D3's pin a fix
-            // made in the source.
+            // One rule per policy: D1 needs an entry for every instance,
+            // D4 has none, D10's are optional, D3's pin a fix made in the
+            // source, and N7's accept their instance and are listed as no
+            // longer needed once the rule stops finding an unchanged row.
             judged_by_policy(&dates, &[], &signed)?;
             judged_by_policy(&listed, &[], &signed)?;
             judged_by_policy(&images, &[], &signed)?;
@@ -3165,7 +3430,9 @@ expect_content_sha256 = \"{digest}\"
             (Some(_), None) => match policy {
                 EntryPolicy::Listed => DefectOutcome::Unchanged,
                 EntryPolicy::Optional => DefectOutcome::Defaulted,
-                EntryPolicy::Required | EntryPolicy::SourceFix => DefectOutcome::Uncovered,
+                EntryPolicy::Required | EntryPolicy::SourceFix | EntryPolicy::Acceptance => {
+                    DefectOutcome::Uncovered
+                }
             },
             (Some(instance), Some(expected)) if instance.found.matches(expected) => {
                 DefectOutcome::Covered
@@ -3175,10 +3442,10 @@ expect_content_sha256 = \"{digest}\"
                 let holds = rule
                     .found(rows, subject)
                     .is_some_and(|found| found.matches(expected));
-                if policy == EntryPolicy::SourceFix && holds {
-                    DefectOutcome::FixedInSource
-                } else {
-                    DefectOutcome::Stale
+                match policy {
+                    EntryPolicy::SourceFix if holds => DefectOutcome::FixedInSource,
+                    EntryPolicy::Acceptance if holds => DefectOutcome::EntryUnused,
+                    _ => DefectOutcome::Stale,
                 }
             }
             (None, None) => unreachable!("every subject has an instance or an entry"),
@@ -3228,7 +3495,10 @@ expect_content_sha256 = \"{digest}\"
                 prop_assert_eq!(decision, Some(&expected));
                 prop_assert_eq!(&record.proposed, &shown);
             }
-            (DefectOutcome::FixedInSource | DefectOutcome::Stale, None) => {
+            (
+                DefectOutcome::FixedInSource | DefectOutcome::EntryUnused | DefectOutcome::Stale,
+                None,
+            ) => {
                 prop_assert!(decision.is_none());
                 prop_assert_eq!(&record.proposed, &None);
             }
@@ -3308,7 +3578,9 @@ expect_content_sha256 = \"{digest}\"
 /// The rules cover every [`super::EntryPolicy`] and every kind of
 /// [`Value`]: D1 (required entries; dates), D3 (a fix made in the source;
 /// index image paths), D4 (no entries), D6 (required; ids), D10 (optional;
-/// instants and every [`Word`]) and N7 (required; SHA-256 digests).
+/// instants and every [`Word`]) and N7 (an acceptance; SHA-256 digests).
+/// [`UnplannedRemovals`] is N7's rule over synthetic bodies, which the tests
+/// of N7's entry policy, its sign-off sheet and N7's review share.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::num::NonZeroU32;
@@ -3323,10 +3595,66 @@ pub(crate) mod testing {
     use crate::domain::import_mysql::{
         options::Mode,
         resolutions::{
-            BodyRow, CanteenDuplicate, N7Accept, PageHidden, PostDateShift, PostIndexImage,
-            ResolutionFile,
+            BodyRow, CanteenDuplicate, FileDigest, N7Accept, PageHidden, PostDateShift,
+            PostIndexImage, ResolutionFile,
         },
     };
+
+    /// A synthetic legacy body, as N7's rule reads it.
+    #[derive(Debug, Clone, Copy)]
+    pub struct N7Body {
+        /// The post or page whose `content` this is.
+        pub row: BodyRow,
+        /// The bytes of its source `content`, whose SHA-256 an `N7-accept`
+        /// entry pins.
+        pub source: &'static str,
+        /// Whether the sanitiser removed from it what no normaliser step
+        /// planned.
+        pub unplanned: bool,
+    }
+
+    /// N7's rule as the body steps will run it in the detector (ADR 0047
+    /// §4), over synthetic bodies: a body with an unplanned removal is an
+    /// instance, found as the SHA-256 of its source; N7 has no default, and
+    /// an entry accepts the body. The tests of the detector, the sign-off
+    /// sheet and N7's review share this one statement of the rule, which the
+    /// property test in `n7_review.rs` pins to the verdicts of N7's review.
+    #[derive(Debug)]
+    pub struct UnplannedRemovals;
+
+    impl UnplannedRemovals {
+        /// What the rule finds for `body`: the SHA-256 of its source.
+        fn digest(body: &N7Body) -> Value {
+            Value::Sha256(FileDigest::of(body.source.as_bytes()).0)
+        }
+    }
+
+    impl DefectRule for UnplannedRemovals {
+        type Row = N7Body;
+        type Entry = N7Accept;
+        type Resolution = ();
+        const DEFECT: DefectId = DefectId::N7;
+
+        fn detect(&self, rows: &[N7Body]) -> Vec<Instance<()>> {
+            rows.iter()
+                .filter(|body| body.unplanned)
+                .map(|body| Instance::new(body.row.into(), Self::digest(body)))
+                .collect()
+        }
+
+        fn found(&self, rows: &[N7Body], subject: &Subject) -> Option<Value> {
+            rows.iter()
+                .find(|body| Subject::from(body.row) == *subject)
+                .map(Self::digest)
+        }
+
+        fn resolution(&self, _entry: &N7Accept) -> Proposal<()> {
+            Proposal {
+                resolution: (),
+                shown: Value::Choice(Word::Accepted),
+            }
+        }
+    }
 
     /// A rule that finds exactly the instances it was given, for the
     /// defect whose entries are `E` (D1, D3, D4, D6, D10 or N7); an entry
@@ -3569,11 +3897,7 @@ pub(crate) mod testing {
                 let instances = bodies
                     .into_iter()
                     .map(|(seed, (sha, accepted))| {
-                        let subject = match body(seed) {
-                            BodyRow::Post(post) => Subject::Post(post),
-                            BodyRow::Page(page) => Subject::Page(page),
-                        };
-                        let instance = Instance::new(subject, Value::Sha256(digest(sha)));
+                        let instance = Instance::new(body(seed).into(), Value::Sha256(digest(sha)));
                         if accepted {
                             instance.with_proposed(proposal(Value::Choice(Word::Accepted)))
                         } else {

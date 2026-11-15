@@ -34,17 +34,22 @@
 //!   `span[dir]` unwrapped (a marker span loses only its `dir`);
 //! - **N6** (`dead_host.rs`): `src` and `href` on the dead host's
 //!   `/storage/` rewritten to root-relative `/storage/`;
+//! - **N7** (`sanitise.rs`): the sanitiser that every write uses, given as
+//!   an argument, with what it removed compared with the planned N7 rules:
+//!   the planned changes are counted per rule, and every removal that no
+//!   step planned is reported ([`UnplannedRemoval`]), which stops the
+//!   import unless the editors accept it (`N7-accept`,
+//!   `domain::import_mysql::n7_review`);
 //! - **N8** (`dom.rs`): html5ever's serialisation, which leaves only
 //!   `&amp; &lt; &gt; &nbsp;` and, in attributes, `&quot;` as references.
 //!
 //! The steps that later slices add slot in where §7.1 orders them: N1 and
 //! N2 (legacy embeds) between N0 and N3; N4 (inline `data:` images)
-//! between N3 and N5, and N5b (the content-v1 layout) between N5 and N6;
-//! N7 (the sanitiser with its planned removals) between N6 and N8.
+//! between N3 and N5, and N5b (the content-v1 layout) between N5 and N6.
 //! Each step records what it changed for the
 //! run report ([`report`]), and the pass also lists, without changing them,
 //! the dead-host occurrences N6 leaves and the images without alt text
-//! (editor.md §9).
+//! (editor.md §9), from the tree that N7 left.
 //!
 //! **The fixed-point loop.** A pass's output is parsed again by the next
 //! reader, and html5ever's markup for a tree does not always parse back
@@ -59,39 +64,48 @@
 //! every body the normaliser accepts. The rules only remove what they look
 //! for (`center`; the `align` and `lang` attributes, the `h5` and `h6` tag
 //! names and the italic `font-style` of N5's block rules; the legacy marks
-//! of its inline rules; the dead `/storage/` prefixes), so the passes after
-//! the first only re-parse. A body that is still changing after the last
-//! pass is refused with [`NormaliseError::NotNormalisable`], and the import
-//! treats that like a failed N9 check (data-migration.md §4.2): for example
-//! one with a `plaintext` element, whose end tag the serialiser writes and
-//! no parser reads, a `pre` whose content starts with three or more line
-//! feeds (each parse drops one, and the third pass still drops one), and
-//! tag soup that leaves a link inside another link. That is a link left
-//! open around deeply nested lists and headings with another link inside
-//! them: each parse's adoption agency moves a copy of the outer link at
-//! most eight blocks further in, so with sixteen or more nested blocks
-//! between the two links the third pass still changes the body (the unit
-//! test `a_link_left_open_around_sixteen_blocks_is_refused`), and with
-//! fewer, the headings around the copies it leaves can still be moving
-//! then, as when N3 unwraps a centre between two headings, a body that the
-//! parser alone settles in three parses
-//! (`a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`). Or
-//! it is a link fostered out of a table into another link. Like every
-//! refused body, such a body stops the import's `apply`, and the dry run
-//! names it before that (data-migration.md §7.4, D140). The maintainer
-//! accepted the rare refusal of a link left open around nested blocks as
-//! built, the one that N3's centre unwrap causes included, over a new N3
-//! rule that would settle its shape now (data-migration.md §7.4; research:
-//! DECISIONS R37 (D159)). Once N7 runs here, the sanitiser repairs such
-//! nesting (its structural pass unwraps a nested link, ADR 0037), and the
-//! tests expect the body to settle then. Whether `apply` goes on depends
-//! on what N7 removes: an unwrapped link, like every removal that no N7
-//! rule plans, still stops it unless the resolution file accepts the row
-//! (data-migration.md §7.1, N7). None of these is a shape `CKEditor`
-//! writes; the tests measure how rarely tag soup meets one.
+//! of its inline rules; the dead `/storage/` prefixes; what N7's sanitiser
+//! removes, whose output is its own fixed point), so the passes after the
+//! first only re-parse. A body that is still changing after the last pass
+//! is refused with [`NormaliseError::NotNormalisable`], and the import
+//! treats that like a failed N9 check (data-migration.md §4.2). Before N7
+//! ran in the pass, that refused a `plaintext` element, whose end tag the
+//! serialiser writes and no parser reads, a `pre` or `listing` whose
+//! content starts with three or more line feeds (each parse drops one),
+//! and tag soup that leaves a link inside another link: a link left open
+//! around deeply nested lists and headings with another link inside them,
+//! where each parse's adoption agency moves a copy of the outer link at
+//! most eight blocks further in
+//! (`a_link_left_open_around_sixteen_blocks_settles_since_n7`), or where the
+//! headings around those copies still move after the nesting is gone, as
+//! when N3 unwraps a centre between two headings
+//! (`a_centre_between_headings_in_a_nested_link_settles_since_n7`), and a
+//! link fostered out of a table into another link. The maintainer accepted
+//! the rare refusal of a link left open around nested blocks as built, the
+//! one that N3's centre unwrap causes included, over a new N3 rule that
+//! would settle its shape now (data-migration.md §7.4; research: DECISIONS
+//! R37 (D159)). N7's sanitiser now settles all of these shapes in the first
+//! pass: its own fixed-point loop parses and writes the body again (ADR
+//! 0013 §5), which absorbs the parser's repairs, its structural pass
+//! unwraps a link still nested in another (ADR 0037), and it unwraps the
+//! `pre`, `listing` and `plaintext` that content-v1 does not have, so a
+//! `pre` or `listing` keeps the line feeds the parses left and a
+//! `plaintext` element its unread end tag as text. Those unwraps are
+//! unplanned removals that an editor reviews; the nested-link soup of the
+//! tests settles with planned changes only, so it is imported, and a link
+//! that the structural pass still unwraps goes to review. The maintainer
+//! confirmed this as built on 2026-11-15 (research: DECISIONS R38 (D162)),
+//! and D159's answer still covers any shape where N3 would add a refusal.
+//! None of these is a shape `CKEditor` writes; the tests measure that tag
+//! soup no longer meets a refusal, and `settle` keeps the loop's rule
+//! tested.
 //!
-//! **N9** ([`fixed_point`]) checks an output against both fixed points,
-//! `normalise(out) == out` and `S(out) == out`.
+//! **N9** closes every run: the loop has already shown `normalise(out) ==
+//! out` (its last pass returned its own input), and [`normalise`] then
+//! sanitises the output once more and refuses it when `S(out) != out`
+//! ([`NormaliseError::NotSanitiserFixedPoint`]). [`check_fixed_point`]
+//! ([`fixed_point`]) runs both checks on a body from elsewhere, such as a
+//! stored one.
 //!
 //! **Cost.** html5ever's tree builder and every walk here are iterative, so
 //! nesting depth costs no stack. It does cost time: the parse grows with
@@ -107,21 +121,35 @@
 //! acceptable only because of its two inputs: the import's is the fixed
 //! legacy dump, and backend3's own bodies, which `content_normalize` reads,
 //! hold no `center` and are bounded by the sanitiser's size and depth
-//! limits (editor.md §7.2; research: DECISIONS R11). The sanitiser applies
-//! those limits to the import too, when N7 runs. Like everything under
-//! `src/domain/`, the module is pure (ADR 0008).
+//! limits (editor.md §7.2; research: DECISIONS R11). N7 applies those
+//! limits to the import too, after the rules of the first pass: a deeper or
+//! larger legacy body is refused ([`NormaliseError::SanitiseRefused`]).
+//! N7 adds a sanitiser run per pass and the N9 run at the end, each
+//! linear in the body after its limits (editor.md §7.2). Like everything
+//! under `src/domain/`, the module is pure (ADR 0008).
 //!
 //! ```
 //! use backend3::domain::normalise::{Rule, normalise};
+//! use backend3::domain::rich_text::{SanitizePolicy, Sanitizer};
 //!
-//! let out = normalise(r#"<center><h2>Eredm&eacute;nyek</h2></center><p><a href="https://backend.verseghy-gimnazium.net/storage/a.pdf">PDF</a></p>"#)
-//!     .expect("a body that settles");
+//! let sanitizer = Sanitizer::new(SanitizePolicy::content_v1()).expect("a valid policy");
+//! let out = normalise(
+//!     r#"<center><h2>Eredm&eacute;nyek</h2></center><p><a href="https://backend.verseghy-gimnazium.net/storage/a.pdf">PDF</a></p><table border="1"><tbody><tr><td style="border-top: 1px solid black">x</td></tr></tbody></table>"#,
+//!     &sanitizer,
+//! )
+//! .expect("a body that settles");
 //! assert_eq!(
 //!     out.html,
-//!     r#"<h2 style="text-align: center">Eredmények</h2><p><a href="/storage/a.pdf">PDF</a></p>"#
+//!     concat!(
+//!         r#"<h2 style="text-align: center">Eredmények</h2><p><a href="/storage/a.pdf" target="_blank" rel="noopener noreferrer">PDF</a></p>"#,
+//!         r#"<table style="border-collapse: collapse; max-width: fit-content"><tbody style="display: table-row-group"><tr><td style="border-bottom: none; border-left: none; border-right: none; border-top: 1px solid #000000">x</td></tr></tbody></table>"#,
+//!     )
 //! );
 //! assert_eq!(out.report.count(Rule::CenterUnwrapped), 1);
 //! assert_eq!(out.report.count(Rule::DeadHostLinkRewritten), 1);
+//! assert_eq!(out.report.count(Rule::TableBorderDropped), 1);
+//! assert_eq!(out.report.count(Rule::NamedColourToHex), 1);
+//! assert!(!out.report.has_unplanned_removals());
 //! ```
 
 mod blocks;
@@ -130,16 +158,20 @@ mod dead_host;
 mod dom;
 pub mod fixed_point;
 mod images;
+mod invalid_css;
 mod marks;
 pub mod report;
+mod sanitise;
 
 use std::borrow::Cow;
 
 pub use fixed_point::{FixedPointError, check_fixed_point};
 pub use report::{
     AltState, DeadHostOccurrence, ImageWithoutAlt, NormaliseReport, Place, Rule, Step,
+    UnplannedRemoval,
 };
 
+use crate::domain::rich_text::{RemovalReport, SanitizeError, Sanitizer};
 use report::Observations;
 
 /// The most passes one run makes before it refuses the body. Three, as in
@@ -152,14 +184,17 @@ pub const MAX_PASSES: usize = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Normalised {
     /// The body in the editor's stored form, so far as the steps of this
-    /// module take it.
+    /// module take it. It is content-v1: the sanitiser returns it
+    /// unchanged (N9).
     pub html: String,
-    /// What the run changed and observed.
+    /// What the run changed and observed, and the removals that no step
+    /// planned ([`NormaliseReport::unplanned_removals`]).
     pub report: NormaliseReport,
 }
 
 /// Why the normaliser refused a body. Nothing is written for a refused
-/// body; the import's dry run lists it with the reason.
+/// body; the import's dry run lists it with the reason, and `apply` stops
+/// on it (data-migration.md §4.2, §7.4; D140).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NormaliseError {
     /// The body was still changing after [`MAX_PASSES`] passes: html5ever's
@@ -169,76 +204,222 @@ pub enum NormaliseError {
         /// How many passes ran.
         passes: usize,
     },
+    /// N7's sanitiser refused the body: it is larger or nests deeper than
+    /// the sanitiser's limits, the sanitiser's own passes did not settle,
+    /// or the sanitiser broke an invariant ([`SanitizeError::code`] tells
+    /// them apart).
+    #[error("the sanitiser refused the body: {0}")]
+    SanitiseRefused(SanitizeError),
+    /// N9: sanitising the normalised body once more changes it, `S(out) !=
+    /// out`. The pass ends with the sanitiser and its parse, so this means
+    /// the normaliser's serialisation and the sanitiser's disagree, which
+    /// is a bug.
+    #[error("sanitising the normalised body again changes it from byte {at}")]
+    NotSanitiserFixedPoint {
+        /// The byte offset of the first difference.
+        at: usize,
+        /// What that sanitiser run removed or rewrote.
+        report: RemovalReport,
+    },
 }
 
-/// Normalises one body (see the module documentation).
+/// Normalises one body (see the module documentation): the passes until
+/// one returns its input, then N9.
 ///
 /// - `raw`: the body as stored, legacy or content-v1. A NULL body is not
 ///   passed here: it stays NULL (data-migration.md §6.1, D4).
+/// - `sanitizer`: the deployment's sanitiser, the one every write path uses
+///   (ADR 0013 §5), for N7 and N9. Its policy's limits apply to the body.
 ///
 /// # Errors
 ///
-/// [`NormaliseError::NotNormalisable`] when the body has not settled after
-/// [`MAX_PASSES`] passes.
-pub fn normalise(raw: &str) -> Result<Normalised, NormaliseError> {
+/// - [`NormaliseError::NotNormalisable`] when the body has not settled after
+///   [`MAX_PASSES`] passes;
+/// - [`NormaliseError::SanitiseRefused`] when N7's sanitiser refuses it;
+/// - [`NormaliseError::NotSanitiserFixedPoint`] when N9 finds that the
+///   sanitiser still changes the output.
+pub fn normalise(raw: &str, sanitizer: &Sanitizer) -> Result<Normalised, NormaliseError> {
+    normalise_with(raw, sanitizer, |input, report| {
+        pass(input, sanitizer, report)
+    })
+}
+
+/// [`normalise`] with the pass given as an argument: the passes until one
+/// returns its input, then N9. Apart from [`normalise`] so that the tests
+/// can check that N9 refuses a fixed point the sanitiser still changes,
+/// which the real pass, ending with the sanitiser, never returns.
+///
+/// - `raw`: the body, as for [`normalise`].
+/// - `sanitizer`: the sanitiser of the N9 check.
+/// - `pass`: one pass over its input, adding to the run's report.
+///
+/// # Errors
+///
+/// As [`normalise`].
+fn normalise_with(
+    raw: &str,
+    sanitizer: &Sanitizer,
+    mut pass: impl FnMut(&str, &mut NormaliseReport) -> Result<(String, Observations), NormaliseError>,
+) -> Result<Normalised, NormaliseError> {
     let mut report = NormaliseReport::default();
+    let (html, observations) = settle(raw, MAX_PASSES, |input| pass(input, &mut report))?;
+    check_sanitiser_fixed_point(&html, sanitizer)?;
+    report.observe(observations);
+    Ok(Normalised { html, report })
+}
+
+/// Applies `pass` until its output equals its input, at most `max_passes`
+/// times, and returns that output with its pass's observations. It is
+/// generic over the pass, like the sanitiser's own loop, so that the loop's
+/// rules (stop at the first fixed point, refuse after the last pass) are
+/// tested without an input that the passes fail to settle: since N7 runs in
+/// the pass, the tests know of none.
+///
+/// - `raw`: the first input.
+/// - `max_passes`: how many passes may run; the last one may only confirm.
+/// - `pass`: one pass; its error stops the loop.
+///
+/// # Errors
+///
+/// The error of a pass, or [`NormaliseError::NotNormalisable`] when the
+/// last pass still changed its input.
+fn settle(
+    raw: &str,
+    max_passes: usize,
+    mut pass: impl FnMut(&str) -> Result<(String, Observations), NormaliseError>,
+) -> Result<(String, Observations), NormaliseError> {
     let mut current = Cow::Borrowed(raw);
-    for _ in 0..MAX_PASSES {
-        let (output, observations) = pass(&current, &mut report);
+    for _ in 0..max_passes {
+        let (output, observations) = pass(&current)?;
         if output == *current {
-            report.observe(observations);
-            return Ok(Normalised {
-                html: output,
-                report,
-            });
+            return Ok((output, observations));
         }
         current = Cow::Owned(output);
     }
-    Err(NormaliseError::NotNormalisable { passes: MAX_PASSES })
+    Err(NormaliseError::NotNormalisable { passes: max_passes })
 }
 
-/// One pass: N0, the rules in their order, the observations, N8. The rules
-/// add their hits to `report`; the observations are returned, and only the
-/// last pass's are kept.
+/// N9's sanitiser check on a normalised body: `S(out) == out`.
+///
+/// - `out`: the body the passes settled on.
+/// - `sanitizer`: the sanitiser N7 used.
+///
+/// # Errors
+///
+/// [`NormaliseError::SanitiseRefused`] when the sanitiser refuses the body,
+/// and [`NormaliseError::NotSanitiserFixedPoint`] when it changes it.
+fn check_sanitiser_fixed_point(out: &str, sanitizer: &Sanitizer) -> Result<(), NormaliseError> {
+    let again = sanitizer
+        .sanitize(out)
+        .map_err(NormaliseError::SanitiseRefused)?;
+    if again.html.as_str() == out {
+        Ok(())
+    } else {
+        Err(NormaliseError::NotSanitiserFixedPoint {
+            at: fixed_point::first_difference(out, again.html.as_str()),
+            report: again.report,
+        })
+    }
+}
+
+/// One pass: N0, the rules in their order, N7, the observations, N8. The
+/// rules and N7 add their hits and N7 its unplanned removals to `report`;
+/// the observations are returned, and only the last pass's are kept.
+///
+/// N7 takes a string, so the tree after N6 is written out for it and its
+/// output parsed again; N8 then writes that tree, so the observations
+/// describe what is stored.
 ///
 /// - `input`: the body, or the previous pass's output.
+/// - `sanitizer`: the sanitiser for N7.
 /// - `report`: the report of the current run.
-fn pass(input: &str, report: &mut NormaliseReport) -> (String, Observations) {
+///
+/// # Errors
+///
+/// [`NormaliseError::SanitiseRefused`] when N7's sanitiser refuses the
+/// body.
+fn pass(
+    input: &str,
+    sanitizer: &Sanitizer,
+    report: &mut NormaliseReport,
+) -> Result<(String, Observations), NormaliseError> {
     let mut html = dom::parse(input);
-    center::unwrap_centres(&mut html, report);
-    // After N3, which reads a paragraph's `align`, counts `h5` and `h6`
-    // among the aligned headings and must centre an italic `h2` before N5
-    // puts an `em` inside it (`blocks.rs`, "Order").
-    blocks::map_blocks(&mut html, report);
-    // N5's inline rules, after its block rules: an `i` that the
-    // italic-heading rule unwraps is gone before the `i` rule runs, so it is
-    // not also counted as `i_to_em` (`marks.rs`, "After N3 and N5's block
-    // rules").
-    marks::map_marks(&mut html, report);
-    dead_host::rewrite_links(&mut html, report);
+    let unclear_before = unclear_blocks(report);
+    apply_rules(&mut html, report);
+    // N7 after every rule, so that it sees what they planned: the
+    // alignment N3 and N5 write in front of an unclear one, for as many
+    // blocks as they counted unclear in this pass.
+    let unclear = unclear_blocks(report) - unclear_before;
+    let sanitised = sanitise::sanitise(&dom::serialise(&html), sanitizer, unclear, report)?;
+    let html = dom::parse(&sanitised);
     let observations = Observations {
         dead_host_kept: dead_host::occurrences(&html),
         images_without_alt: images::without_alt(&html),
     };
-    (dom::serialise(&html), observations)
+    Ok((dom::serialise(&html), observations))
+}
+
+/// The rules of one pass in their order, N3, N5 (its block rules, then its
+/// inline rules) and N6, on the tree that N0 parsed; they add their hits to
+/// `report`. A step of its own, apart from N7, so that the tests can check
+/// what the rules do to a body deeper than N7's sanitiser accepts (the
+/// cost tests' shapes): N7 refuses such a body after the rules of the first
+/// pass, and its refusal carries no report.
+///
+/// - `html`: the parsed body, edited in place.
+/// - `report`: the report of the current run.
+fn apply_rules(html: &mut scraper::Html, report: &mut NormaliseReport) {
+    center::unwrap_centres(html, report);
+    // After N3, which reads a paragraph's `align`, counts `h5` and `h6`
+    // among the aligned headings and must centre an italic `h2` before N5
+    // puts an `em` inside it (`blocks.rs`, "Order").
+    blocks::map_blocks(html, report);
+    // N5's inline rules, after its block rules: an `i` that the
+    // italic-heading rule unwraps is gone before the `i` rule runs, so it is
+    // not also counted as `i_to_em` (`marks.rs`, "After N3 and N5's block
+    // rules").
+    marks::map_marks(html, report);
+    dead_host::rewrite_links(html, report);
+}
+
+/// How many blocks N3 and N5 have counted as unclear in the run so far
+/// (`center_alignment_unclear`, `paragraph_align_unclear`): each wrote an
+/// alignment in front of a `text-align` that content-v1 does not keep, for
+/// N7 to drop as planned.
+///
+/// - `report`: the report of the current run.
+fn unclear_blocks(report: &NormaliseReport) -> usize {
+    report.count(Rule::CenterAlignmentUnclear) + report.count(Rule::ParagraphAlignUnclear)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::rich_text::SanitizePolicy;
     use crate::domain::rich_text::search_text::html_to_search_text;
-    use crate::domain::rich_text::{RemovalRule, SanitizePolicy, Sanitizer};
     use proptest::prelude::*;
+    use std::sync::LazyLock;
+
+    /// The content-v1 sanitiser, built once for the tests of this module:
+    /// the proptests normalise thousands of bodies.
+    static SANITIZER: LazyLock<Sanitizer> = LazyLock::new(|| {
+        Sanitizer::new(SanitizePolicy::content_v1()).expect("content-v1 is a valid policy")
+    });
+
+    /// [`normalise`] with the content-v1 sanitiser.
+    fn run(raw: &str) -> Result<Normalised, NormaliseError> {
+        normalise(raw, &SANITIZER)
+    }
 
     fn normalised(raw: &str) -> String {
-        normalise(raw).expect("a body that settles").html
+        run(raw).expect("a body that settles").html
     }
 
     #[test]
     fn entity_encoded_bodies_become_literal_utf8() {
         // POS-C06: CKEditor's named references, decoded once.
         let raw = "<p>Az &eacute;v v&eacute;g&eacute;n &ndash; &bdquo;Eredm&eacute;nyek&rdquo; &amp; d&iacute;jak&nbsp;&hellip; &Ouml;r&ouml;m, &#337;sz, &#x171;r</p>";
-        let out = normalise(raw).expect("a body that settles");
+        let out = run(raw).expect("a body that settles");
         assert_eq!(
             out.html,
             "<p>Az év végén – „Eredmények” &amp; díjak&nbsp;… Öröm, ősz, űr</p>"
@@ -278,15 +459,20 @@ mod tests {
             "<center><h2>C&iacute;m</h2></center>",
             r#"<p><img src="https://backend.verseghy-gimnazium.net/storage/uploads/posts/12/a.jpg"></p>"#,
             r#"<p><a href="https://backend.verseghy-gimnazium.net/admin">x</a></p>"#,
+            r#"<table border="1"><tr><td style="border-top: 1px solid black">y<!-- z --></td></tr></table>"#,
         );
-        let out = normalise(raw).expect("a body that settles");
+        let out = run(raw).expect("a body that settles");
+        // N7 gives the iframe, the image, the link, the table and its
+        // `tbody` what content-v1 always writes on them; adding is no
+        // removal, but it is a planned change, counted per element.
         assert_eq!(
             out.html,
             concat!(
-                "\n<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjK\"></iframe></p>\n",
+                "\n<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjK\" allow=\"accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share\" allowfullscreen=\"\" referrerpolicy=\"strict-origin-when-cross-origin\"></iframe></p>\n",
                 r#"<h2 style="text-align: center">Cím</h2>"#,
-                r#"<p><img src="/storage/uploads/posts/12/a.jpg"></p>"#,
-                r#"<p><a href="https://backend.verseghy-gimnazium.net/admin">x</a></p>"#,
+                r#"<p><img src="/storage/uploads/posts/12/a.jpg" style="display: block; height: auto; margin: 0 auto; max-width: 100%"></p>"#,
+                r#"<p><a href="https://backend.verseghy-gimnazium.net/admin" target="_blank" rel="noopener noreferrer">x</a></p>"#,
+                r#"<table style="border-collapse: collapse; max-width: fit-content"><tbody style="display: table-row-group"><tr><td style="border-bottom: none; border-left: none; border-right: none; border-top: 1px solid #000000">y</td></tr></tbody></table>"#,
             )
         );
         assert_eq!(
@@ -295,8 +481,13 @@ mod tests {
                 (Rule::CenterUnwrapped, 2),
                 (Rule::CenterBlockAligned, 1),
                 (Rule::DeadHostLinkRewritten, 1),
+                (Rule::NamedColourToHex, 1),
+                (Rule::LockedMarkupAdded, 5),
+                (Rule::TableBorderDropped, 1),
+                (Rule::CommentRemoved, 1),
             ]
         );
+        assert!(!out.report.has_unplanned_removals());
         assert_eq!(out.report.dead_host_kept().len(), 1);
         assert_eq!(
             out.report.images_without_alt(),
@@ -309,54 +500,251 @@ mod tests {
     }
 
     #[test]
-    fn a_body_the_parser_moves_settles_in_a_later_pass() {
-        // A link fostered out of a table into another link: the first
-        // output nests one link in another, which the next parse undoes.
-        let raw = r#"<a href="/1"><table><tr><td>x</td></tr><a href="/2">y</table></a>"#;
-        let once = normalise(raw).expect("a body that settles");
+    fn what_n7_removes_unplanned_is_reported_and_the_body_is_still_written() {
+        // The import decides what to do with these (`n7_review`); the
+        // normaliser reports them and writes content-v1.
+        let out = run(r#"<div class="doboz"><p style="font-family: Arial">Szöveg</p></div>"#)
+            .expect("a body that settles");
+        assert_eq!(out.html, "<p>Szöveg</p>");
+        let unplanned: Vec<_> = out
+            .report
+            .unplanned_removals()
+            .map(|(removal, count)| (removal.to_string(), count))
+            .collect();
         assert_eq!(
-            once.html,
-            r#"<a href="/1"></a><a href="/2">y</a><table><tbody><tr><td>x</td></tr></tbody></table>"#
+            unplanned,
+            [
+                ("element_unwrapped div".to_owned(), 1),
+                ("style_rejected p[style] font-family".to_owned(), 1),
+            ]
         );
-        assert_ne!(
-            once.html,
-            dom::serialise(&dom::parse(raw)),
-            "a second pass ran"
-        );
-        assert_eq!(normalise(&once.html), Ok(once));
-        // Two line feeds after `pre`: each parse drops the first one.
-        assert_eq!(normalised("<pre>\n\nx</pre>"), "<pre>x</pre>");
+        assert!(!out.report.has_hits());
     }
 
     #[test]
-    fn a_body_that_never_settles_is_refused() {
-        // A `pre` whose content starts with three line feeds is the
-        // shortest such shape: two settle (above).
-        for raw in ["<plaintext>x", "<pre>\n\n\nx</pre>", "<pre>\n\n\n\nx</pre>"] {
-            assert_eq!(
-                normalise(raw),
-                Err(NormaliseError::NotNormalisable { passes: MAX_PASSES }),
-                "{raw:?}"
-            );
-        }
+    fn a_body_the_parser_moves_settles_in_its_first_pass() {
+        // A link fostered out of a table into another link: the parse after
+        // N6 nests one link in another, and N7's sanitiser settles it in
+        // the same pass (its own passes absorb what the parser moves, ADR
+        // 0013 §5); the next pass only confirms. Both links and the table
+        // get their locked markup.
+        let raw = r#"<a href="/1"><table><tr><td>x</td></tr><a href="/2">y</table></a>"#;
+        let once = run(raw).expect("a body that settles");
+        assert_eq!(
+            once.html,
+            concat!(
+                r#"<a href="/1" target="_blank" rel="noopener noreferrer"></a><a href="/2" target="_blank" rel="noopener noreferrer">y</a>"#,
+                r#"<table style="border-collapse: collapse; max-width: fit-content"><tbody style="display: table-row-group"><tr><td>x</td></tr></tbody></table>"#,
+            )
+        );
+        let first = pass(raw, &SANITIZER, &mut NormaliseReport::default())
+            .expect("a pass over a small body")
+            .0;
+        assert_eq!(first, once.html, "the first pass settled it");
+        assert_eq!(
+            once.report.hits().collect::<Vec<_>>(),
+            [(Rule::LockedMarkupAdded, 4)]
+        );
+        assert_eq!(
+            run(&once.html),
+            Ok(Normalised {
+                html: once.html,
+                report: NormaliseReport::default(),
+            })
+        );
+        // Line feeds after `pre`: each parse drops the first one, and N7
+        // unwraps the `pre`, which content-v1 does not have.
+        assert_eq!(normalised("<pre>\n\nx</pre>"), "x");
+        assert_eq!(normalised("<pre>\n\n\nx</pre>"), "\nx");
+    }
+
+    #[test]
+    fn a_plaintext_element_settles_as_text_and_is_reported() {
+        // The writer gives `plaintext` an end tag that no parser reads, so
+        // N7's parse takes it as text; N7 unwraps the element, and the
+        // unplanned removal puts the body in front of an editor.
+        let out = run("<plaintext>x").expect("a body that settles");
+        assert_eq!(out.html, "x&lt;/plaintext&gt;");
+        assert_eq!(
+            out.report
+                .unplanned_removals()
+                .map(|(removal, count)| (removal.to_string(), count))
+                .collect::<Vec<_>>(),
+            [("element_unwrapped plaintext".to_owned(), 1)]
+        );
+    }
+
+    #[test]
+    fn the_loop_stops_at_the_first_fixed_point_and_refuses_after_the_last_pass() {
+        let observed = || Observations::default();
+        // A pass that drops one leading `x` settles after the `x`s are gone.
+        let mut calls = 0;
+        let settled = settle("xxa", 3, |input| {
+            calls += 1;
+            Ok((
+                input.strip_prefix('x').unwrap_or(input).to_owned(),
+                observed(),
+            ))
+        });
+        assert_eq!(settled, Ok(("a".to_owned(), observed())));
+        assert_eq!(calls, 3, "two changes and one confirmation");
+        // One more `x` and the third pass still changes it.
+        let refused = settle("xxxa", 3, |input| {
+            Ok((
+                input.strip_prefix('x').unwrap_or(input).to_owned(),
+                observed(),
+            ))
+        });
+        assert_eq!(
+            refused,
+            Err(NormaliseError::NotNormalisable { passes: MAX_PASSES })
+        );
+        // A pass's error stops the loop.
+        let deep = SanitizeError::TooDeep { limit: 1, line: 1 };
+        assert_eq!(
+            settle("a", 3, |_| Err(NormaliseError::SanitiseRefused(
+                deep.clone()
+            ))),
+            Err(NormaliseError::SanitiseRefused(deep.clone()))
+        );
         assert_eq!(
             NormaliseError::NotNormalisable { passes: 3 }.to_string(),
             "the body did not reach a fixed point in 3 normaliser passes"
         );
+        assert_eq!(
+            NormaliseError::SanitiseRefused(deep).to_string(),
+            "the sanitiser refused the body: the content nests elements more than 1 levels deep (line 1)"
+        );
+        assert_eq!(
+            NormaliseError::NotSanitiserFixedPoint {
+                at: 4,
+                report: RemovalReport::default()
+            }
+            .to_string(),
+            "sanitising the normalised body again changes it from byte 4"
+        );
     }
 
     #[test]
-    fn a_link_left_open_around_sixteen_blocks_is_refused() {
+    fn the_sanitisers_limits_refuse_a_legacy_body() {
+        let deep = format!("{}x", "<div>".repeat(300));
+        let Err(NormaliseError::SanitiseRefused(error)) = run(&deep) else {
+            panic!("a body deeper than the sanitiser's limit is refused");
+        };
+        assert_eq!(error.code(), Some("content_too_deep"));
+    }
+
+    #[test]
+    fn the_rules_handle_every_level_of_a_deep_body() {
+        // The deep shapes of `tests/normalise/cost.rs`, at the same depths.
+        // N7 refuses each of them as too deep after the rules of the first
+        // pass, and its refusal carries no report, so what the rules made of
+        // every level is checked here, on the rules alone; the cost tests
+        // time the whole normaliser.
+        let rules = |raw: &str| {
+            let mut html = dom::parse(raw);
+            let mut report = NormaliseReport::default();
+            apply_rules(&mut html, &mut report);
+            (dom::serialise(&html), report)
+        };
+        let nested = |open: &str, close: &str, depth: usize| {
+            format!("{}x{}", open.repeat(depth), close.repeat(depth))
+        };
+
+        // N3 unwraps every `center` around the deep inline chain.
+        let depth = 4_000;
+        let (out, report) = rules(&nested("<center><span>", "</span></center>", depth));
+        assert!(!out.contains("<center"), "{out}");
+        assert_eq!(report.count(Rule::CenterUnwrapped), depth);
+
+        // N5 gives every nested italic heading its own `em`.
+        let depth = 5_000;
+        let (out, report) = rules(&nested(
+            r#"<h2 style="font-style: italic"><div><object>"#,
+            "</object></div></h2>",
+            depth,
+        ));
+        assert_eq!(
+            out,
+            nested("<h2><em><div><object>", "</object></div></em></h2>", depth)
+        );
+        assert_eq!(report.count(Rule::ItalicHeadingToEm), depth);
+
+        // N5 maps every level of the deep chain of legacy marks.
+        let depth = 2_000;
+        let (out, report) = rules(&nested(
+            r#"<big><span dir="ltr"><b>"#,
+            "</b></span></big>",
+            depth,
+        ));
+        assert_eq!(out, nested("<strong>", "</strong>", depth));
+        assert_eq!(report.count(Rule::BigUnwrapped), depth);
+        assert_eq!(report.count(Rule::SpanDirUnwrapped), depth);
+        assert_eq!(report.count(Rule::BToStrong), depth);
+
+        // And each of them is deeper than N7's sanitiser accepts.
+        for raw in [
+            nested("<center><span>", "</span></center>", 4_000),
+            nested(r#"<big><span dir="ltr"><b>"#, "</b></span></big>", 2_000),
+        ] {
+            let Err(NormaliseError::SanitiseRefused(error)) = run(&raw) else {
+                panic!("a body deeper than the sanitiser's limit is refused");
+            };
+            assert_eq!(error.code(), Some("content_too_deep"));
+        }
+    }
+
+    #[test]
+    fn normalise_ends_with_n9_after_the_passes_settle() {
+        // The real pass ends with the sanitiser, so it never settles on a
+        // body that the sanitiser still changes; a pass that changes nothing
+        // shows that the run checks N9 after the loop all the same.
+        let unchanged =
+            |input: &str, _: &mut NormaliseReport| Ok((input.to_owned(), Observations::default()));
+        assert!(matches!(
+            normalise_with(r#"<p class="x">a</p>"#, &SANITIZER, unchanged),
+            Err(NormaliseError::NotSanitiserFixedPoint { at: 2, .. })
+        ));
+        assert_eq!(
+            normalise_with("<p>a</p>", &SANITIZER, unchanged).map(|out| out.html),
+            Ok("<p>a</p>".to_owned())
+        );
+    }
+
+    #[test]
+    fn n9_accepts_only_what_the_sanitiser_leaves_unchanged() {
+        assert_eq!(check_sanitiser_fixed_point("<p>a</p>", &SANITIZER), Ok(()));
+        let Err(NormaliseError::NotSanitiserFixedPoint { at, report }) =
+            check_sanitiser_fixed_point(r#"<p class="x">a</p>"#, &SANITIZER)
+        else {
+            panic!("a body outside content-v1 fails N9");
+        };
+        assert_eq!(at, 2);
+        assert!(!report.is_empty());
+        assert!(matches!(
+            check_sanitiser_fixed_point(&"<div>".repeat(300), &SANITIZER),
+            Err(NormaliseError::SanitiseRefused(_))
+        ));
+    }
+
+    #[test]
+    fn a_link_left_open_around_sixteen_blocks_settles_since_n7() {
         // At the inner `<a>` the parser runs the adoption agency, whose
         // eight rounds move the open link out of one block each, so a copy
         // of it stays open around the inner link, eight blocks further in.
         // Each later parse moves it eight blocks more: with sixteen blocks
-        // the third pass still changes the body, and it is refused (see
-        // "The fixed-point loop" in the module documentation), with or
-        // without the rules. The maintainer accepted this rare refusal as
-        // built (D159, data-migration.md §7.4), so the test asserts it. The
-        // first body is the one the properties over `arb_plain_legacy`
-        // found (shrunk by proptest; its seeds are in
+        // the parser alone still changes the body in its third parse, and
+        // before N7 ran in the pass the normaliser refused it, a rare
+        // refusal that the maintainer accepted as built (D159,
+        // data-migration.md §7.4). N7's sanitiser repairs the nesting in the
+        // first pass: its own passes (ADR 0013 §5) absorb what the adoption
+        // agency moves, and a link still nested at its structural pass
+        // would be unwrapped (ADR 0037) as an unplanned removal. Here none
+        // is left to unwrap: the body settles with planned changes only,
+        // every copy of the link that the parse made getting its locked
+        // markup and its dead-host address rewritten, so it is imported
+        // (D162). The first body is the one the properties over
+        // `arb_plain_legacy` found (shrunk by proptest; its seeds are in
         // `proptest-regressions/domain/normalise/mod.txt`), the second the
         // shortest of its kind: eight lists of one item each.
         let found = concat!(
@@ -366,42 +754,34 @@ mod tests {
         );
         let shortest = format!(r#"<a href="/x">{}<a href="/x">"#, "<ul><li>".repeat(8));
         for body in [found, shortest.as_str()] {
-            assert_eq!(
-                normalise(body),
-                Err(NormaliseError::NotNormalisable { passes: MAX_PASSES }),
-                "{body:?}"
-            );
             assert!(!the_parser_alone_settles(body), "{body:?}");
-            // The parse nests the links, so the generator leaves the body
-            // out (`arb_plain_legacy`), and so does the next pass's parse.
             assert!(nests_a_link(body), "{body:?}");
-            assert!(nests_a_link(&once(body)), "{body:?}");
-            // The sanitiser repairs the nesting, here with its structural
-            // pass's nested-link rule (ADR 0037), after which the body
-            // settles: once N7 runs inside the pass, this refusal goes, and
-            // this test and the generator's filter with it. Whether `apply`
-            // then goes on depends on what N7 removes: an unwrapped link,
-            // like every removal that no N7 rule plans, still stops it
-            // unless the resolution file accepts the row
-            // (data-migration.md §7.1, N7).
-            let sanitised = Sanitizer::new(SanitizePolicy::content_v1())
-                .expect("a valid policy")
-                .sanitize(body)
-                .expect("a body within the limits");
-            assert_eq!(
-                sanitised.report.count(RemovalRule::NestedLinkUnwrapped),
-                1,
-                "{body:?}"
+            let out = run(body).expect("N7 settles the nested links");
+            assert!(
+                !out.report.has_unplanned_removals(),
+                "{body:?}: {:?}",
+                out.report
             );
-            assert!(normalise(sanitised.html.as_str()).is_ok(), "{body:?}");
+            assert!(
+                out.report.count(Rule::LockedMarkupAdded) >= 2,
+                "{:?}",
+                out.report
+            );
+            assert!(!nests_a_link(&out.html), "{:?}", out.html);
+            assert!(only_five_references(&out.html), "{:?}", out.html);
+            assert_eq!(search_words(&out.html), search_words(body), "{body:?}");
+            let again = run(&out.html).expect("the output settles");
+            assert_eq!(again.html, out.html, "{body:?}");
+            assert!(
+                !again.report.has_hits() && !again.report.has_unplanned_removals(),
+                "{:?}",
+                again.report
+            );
         }
-        // Fewer blocks settle, unless headings among them still move after
-        // the nesting is gone (the next test): the first parse nests the
+        // Fewer blocks settled before N7 too: the first parse nests the
         // links from eight blocks on and the second undoes it, so seven
-        // lists, fourteen blocks, still settle in the third pass. The
-        // generator's filter leaves these bodies out as well, so this checks
-        // for them what its properties check: the text and the references
-        // (V5(c), V5(d)).
+        // lists, fourteen blocks, settle in the third pass. The text and the
+        // references stay (V5(c), V5(d)).
         let lists = |count: usize| {
             format!(
                 r#"<a href="/x">Az &eacute;v{}v&eacute;ge &ndash; <a href="/x">k&eacute;p"#,
@@ -412,7 +792,7 @@ mod tests {
             let shallower = lists(count);
             assert_eq!(nests_a_link(&shallower), count >= 4, "{shallower:?}");
             assert!(!nests_a_link(&once(&shallower)), "{shallower:?}");
-            let settled = normalise(&shallower).expect("fewer than sixteen blocks settle");
+            let settled = run(&shallower).expect("fewer than sixteen blocks settle");
             assert!(only_five_references(&settled.html), "{:?}", settled.html);
             assert_eq!(
                 search_words(&settled.html),
@@ -420,7 +800,7 @@ mod tests {
                 "{shallower:?}"
             );
             assert_eq!(
-                normalise(&settled.html).map(|again| again.html),
+                run(&settled.html).map(|again| again.html),
                 Ok(settled.html),
                 "{shallower:?}"
             );
@@ -428,59 +808,59 @@ mod tests {
     }
 
     #[test]
-    fn a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass() {
+    fn a_centre_between_headings_in_a_nested_link_settles_since_n7() {
         // Nine blocks between the links: the first parse nests them and
         // leaves a copy of the outer link around the inner heading, inside
         // the centre. N3 unwraps the centre, so that copy and the heading in
-        // it now sit right inside the outer heading. The next parse takes
-        // the inner heading out of that link (the adoption agency again, at
-        // the link inside the heading), and the one after closes the outer
-        // heading before the inner one: the third pass still changes the
-        // body, and it is refused, although the links no longer nest after
-        // the first pass. Without N3 it settles: the parser alone settles it
-        // in three parses, and so does `normalise` with a `div` in place of
-        // the centre, which keeps the inner heading out of the outer one.
-        // The maintainer accepted this rare refusal as built, over a new N3
-        // rule that would settle the body now (D159, data-migration.md
-        // §7.4), so the test asserts it: when N7 joins the pass, it shows
-        // whether the body is still refused.
-        // The filter of `arb_plain_legacy` leaves it out, because its first
-        // parse nests the links; leaving out only the bodies whose links
-        // stay nested after a pass would miss it.
+        // it now sit right inside the outer heading. Without N7, the next
+        // parse took the inner heading out of that link and the one after
+        // closed the outer heading before the inner one, so the third pass
+        // still changed the body and it was refused, although the links no
+        // longer nest after the first pass and the parser alone settles it
+        // in three parses. The maintainer accepted that rare refusal as
+        // built, over a new N3 rule (D159, data-migration.md §7.4). N7's
+        // sanitiser, with its own passes in the first one, absorbs those
+        // repairs, so the body settles, and with planned changes only, so
+        // it is imported as the maintainer confirmed (D162): an unplanned
+        // removal here would send it to review like a `pre`.
         let body = r#"<a href="/x"><ul><li><ul><li><ul><li><h2><center><h2><a href="/x">"#;
-        assert_eq!(
-            normalise(body),
-            Err(NormaliseError::NotNormalisable { passes: MAX_PASSES })
-        );
         assert!(nests_a_link(body));
         assert!(!nests_a_link(&once(body)));
         assert!(the_parser_alone_settles(body));
-        assert!(normalise(&body.replace("<center>", "<div>")).is_ok());
-        // The sanitiser repairs this one too, here with no link to unwrap,
-        // so it should settle once N7 runs inside the pass.
-        let sanitised = Sanitizer::new(SanitizePolicy::content_v1())
-            .expect("a valid policy")
-            .sanitize(body)
-            .expect("a body within the limits");
-        assert_eq!(sanitised.report.count(RemovalRule::NestedLinkUnwrapped), 0);
-        assert!(normalise(sanitised.html.as_str()).is_ok());
+        let out = run(body).expect("N7 settles the headings");
+        assert_eq!(out.report.count(Rule::CenterUnwrapped), 1);
+        assert!(
+            !out.report.has_unplanned_removals(),
+            "only planned changes: {:?}",
+            out.report
+        );
+        let again = run(&out.html).expect("the output settles");
+        assert_eq!(again.html, out.html);
+        assert!(
+            !again.report.has_hits() && !again.report.has_unplanned_removals(),
+            "{:?}",
+            again.report
+        );
+        assert_eq!(search_words(&out.html), search_words(body));
     }
 
     #[test]
     fn centring_inside_containers_survives_the_sanitiser() {
         // A `div` and a list inside a `center` render centred, so their text
-        // stays centred once the sanitiser unwraps the `div` (N7, which runs
-        // here by hand until its slice adds it to the pass).
-        let sanitizer = Sanitizer::new(SanitizePolicy::content_v1()).expect("a valid policy");
-        let out = normalised("<center><div>Sz&ouml;veg</div><ul><li>pont</li></ul></center>");
+        // stays centred once N7 unwraps the `div`.
+        let out = run("<center><div>Sz&ouml;veg</div><ul><li>pont</li></ul></center>")
+            .expect("a body that settles");
         assert_eq!(
-            out,
-            r#"<div><p style="text-align: center">Szöveg</p></div><ul><li><p style="text-align: center">pont</p></li></ul>"#
-        );
-        let sanitised = sanitizer.sanitize(&out).expect("a body within the limits");
-        assert_eq!(
-            sanitised.html.as_str(),
+            out.html,
             r#"<p style="text-align: center">Szöveg</p><ul><li><p style="text-align: center">pont</p></li></ul>"#
+        );
+        // The `div` was legacy markup that no step plans to remove.
+        assert_eq!(
+            out.report
+                .unplanned_removals()
+                .map(|(removal, count)| (removal.to_string(), count))
+                .collect::<Vec<_>>(),
+            [("element_unwrapped div".to_owned(), 1)]
         );
     }
 
@@ -497,7 +877,7 @@ mod tests {
             r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30" width="640" height="360" title="Videó" style="aspect-ratio: 16 / 9; height: auto; max-width: 640px; min-height: 200px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#,
             r#"<p><a href="https://example.org/" target="_blank" rel="noopener noreferrer">link</a></p>"#,
         );
-        let out = normalise(body).expect("content-v1 settles");
+        let out = run(body).expect("content-v1 settles");
         assert_eq!(out.html, body);
         assert_eq!(out.report, NormaliseReport::default());
         let sanitizer = Sanitizer::new(SanitizePolicy::content_v1()).expect("a valid policy");
@@ -507,7 +887,7 @@ mod tests {
     #[test]
     fn an_empty_body_stays_empty() {
         assert_eq!(
-            normalise(""),
+            run(""),
             Ok(Normalised {
                 html: String::new(),
                 report: NormaliseReport::default(),
@@ -542,13 +922,12 @@ mod tests {
     ];
 
     /// N5's block shapes, for [`arb_legacy`] only. [`arb_plain_legacy`]
-    /// keeps the pieces above: its properties expect no refusal, and the
-    /// extra headings and paragraphs here would make more likely the one
-    /// tag soup among them that the parser repairs a few levels per pass (a
-    /// link left open around deeply nested lists and headings, with another
-    /// link inside them), which is refused with or without N5 and which
-    /// [`arb_plain_legacy`] leaves out (see there). `blocks.rs` checks that
-    /// its own shapes settle.
+    /// keeps the pieces above for its properties about text and references;
+    /// the extra headings and paragraphs here would make the tag soup that
+    /// the parser repairs a few levels per pass (a link left open around
+    /// deeply nested lists and headings, with another link inside them)
+    /// much more likely there. `blocks.rs` checks that its own shapes
+    /// settle.
     #[rustfmt::skip]
     const BLOCK_PIECES: &[&str] = &[
         "<p align=\"center\">", "<P ALIGN=\"JUSTIFY\">", "<p lang=\"en\">", "<table align=\"left\"><tr><td>",
@@ -578,7 +957,9 @@ mod tests {
 
     /// The first pass's output, which the second pass parses.
     fn once(raw: &str) -> String {
-        pass(raw, &mut NormaliseReport::default()).0
+        pass(raw, &SANITIZER, &mut NormaliseReport::default())
+            .expect("a pass over a small body")
+            .0
     }
 
     /// Whether html5ever alone, parsing and serialising with no rule in
@@ -607,38 +988,18 @@ mod tests {
     /// text (tables foster it out, `pre` drops a line feed, `form` may be
     /// ignored), for the properties about text and references.
     ///
-    /// It also leaves out every body whose parse nests a link in another
-    /// link ([`nests_a_link`]): a link left open around eight or more
-    /// nested blocks, with another link inside them. That is the one
-    /// family among these pieces that the normaliser refuses (see "The
-    /// fixed-point loop" in the module documentation), in two kinds, each
-    /// pinned by a unit test: with sixteen or more blocks the nesting
-    /// outlasts the passes (`a_link_left_open_around_sixteen_blocks_is_refused`),
-    /// and with fewer, the headings around the copies of the link that the
-    /// parse leaves can still be moving in the third pass after the nesting
-    /// is gone, as when N3 unwraps a centre between two headings
-    /// (`a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`).
-    /// Such a legacy body stops the import's `apply` (data-migration.md
-    /// §7.4, D140), a rare refusal that the maintainer accepted as built,
-    /// the one that N3 causes included (D159). Once N7 runs inside the
-    /// pass, the sanitiser repairs both kinds, and those tests expect the
-    /// body to settle then: they fail, and this filter goes with them.
-    /// Whether `apply` then goes on depends on what N7 removes: a nested
-    /// link it unwraps (ADR 0037), like every removal that no N7 rule plans,
-    /// still stops it unless an `N7-accept` entry covers the row
-    /// (data-migration.md §7.1, N7).
-    ///
-    /// The filter takes the nested links that settle as well, because
-    /// leaving out only the bodies whose links stay nested after a pass
-    /// misses the second kind. So the properties below see no nested link:
-    /// `a_link_left_open_around_sixteen_blocks_is_refused` checks the text
-    /// and the references of nested links that settle, and [`arb_legacy`],
-    /// the generator of P4 and the other rule properties, keeps every
-    /// nested link. In a sample of 1,260,000 bodies of these pieces, 3,451
-    /// nested a link (about 1 in 365), and the normaliser refused 12, all
-    /// among them: 4 of the first kind and 8 of the second, 7 of which the
-    /// parser alone settled. The other 3,439 settled with their text and
-    /// references as these properties expect.
+    /// Before N7 ran in the pass, this generator also left out every body
+    /// whose parse nests a link in another link ([`nests_a_link`]): a link
+    /// left open around eight or more nested blocks, with another link
+    /// inside them, the one family among these pieces that the normaliser
+    /// refused, a rare refusal that the maintainer accepted as built
+    /// (D159). N7's sanitiser now repairs the nesting in the first pass
+    /// (`a_link_left_open_around_sixteen_blocks_settles_since_n7`,
+    /// `a_centre_between_headings_in_a_nested_link_settles_since_n7`; D162),
+    /// so the properties below see those bodies too: they settle, keep their
+    /// text and references, and any link the sanitiser unwraps is an
+    /// unplanned removal for the editors' review. In a sample of 1,260,000
+    /// bodies of these pieces, about 1 in 365 nested a link.
     fn arb_plain_legacy() -> impl Strategy<Value = String> {
         let pieces: Vec<&str> = PIECES
             .iter()
@@ -657,9 +1018,6 @@ mod tests {
             .collect();
         prop::collection::vec(prop::sample::select(pieces), 0..40)
             .prop_map(|pieces| pieces.concat())
-            .prop_filter("a link the parse nests in a link is left to N7", |raw| {
-                !nests_a_link(raw)
-            })
     }
 
     /// Whether every `&` in `html` starts one of the five references N8
@@ -676,41 +1034,49 @@ mod tests {
     fn the_soup_reaches_the_rules_and_is_rarely_refused() {
         // P4 below holds for the bodies the normaliser accepts, so the
         // generator must not hide behind refusals: on a fixed sample, the
-        // rules fire, later passes run, and almost every body settles. The
-        // few refusals are links that tag soup nests in other links, fostered
-        // out of tables or left open around deeply nested lists and headings
-        // (see "Fixed point" in the module documentation).
+        // rules and N7 fire, both planned and unplanned removals occur, and
+        // almost every body settles. Before N7 ran in the pass, the few
+        // refusals were links that tag soup nests in other links; N7's
+        // sanitiser settles those, its own passes absorbing the parser's
+        // repairs (see "The fixed-point loop" in the module documentation),
+        // and the sample has no refusal left, but the bound stays loose so
+        // that a generator change does not fail it.
         use proptest::strategy::ValueTree;
         let mut runner = proptest::test_runner::TestRunner::deterministic();
         let strategy = arb_legacy();
-        let (mut refused, mut later, mut centred, mut mapped, mut rewritten) = (0, 0, 0, 0, 0);
+        let (mut refused, mut centred, mut mapped, mut rewritten) = (0, 0, 0, 0);
+        let (mut planned, mut unplanned) = (0, 0);
         for _ in 0..2_000 {
             let raw = strategy
                 .new_tree(&mut runner)
                 .expect("the generator always produces a value")
                 .current();
-            match normalise(&raw) {
+            match run(&raw) {
                 Err(_) => refused += 1,
                 Ok(out) => {
-                    if pass(&raw, &mut NormaliseReport::default()).0 != out.html {
-                        later += 1;
-                    }
                     centred += out.report.count(Rule::CenterUnwrapped);
-                    mapped += out
-                        .report
-                        .hits()
-                        .filter(|(rule, _)| rule.step() == Step::N5)
-                        .map(|(_, count)| count)
-                        .sum::<usize>();
+                    let step = |wanted| {
+                        out.report
+                            .hits()
+                            .filter(|(rule, _)| rule.step() == wanted)
+                            .map(|(_, count)| count)
+                            .sum::<usize>()
+                    };
+                    mapped += step(Step::N5);
+                    planned += step(Step::N7);
+                    unplanned += usize::from(out.report.has_unplanned_removals());
                     rewritten += out.report.count(Rule::DeadHostLinkRewritten);
                 }
             }
         }
         assert!(refused <= 10, "{refused} of 2000 refused");
-        assert!(later >= 20, "only {later} bodies needed a second pass");
         assert!(
-            centred >= 500 && mapped >= 500 && rewritten >= 500,
-            "{centred} {mapped} {rewritten}"
+            centred >= 500 && mapped >= 500 && rewritten >= 500 && planned >= 500,
+            "{centred} {mapped} {rewritten} {planned}"
+        );
+        assert!(
+            (200..1_800).contains(&unplanned),
+            "{unplanned} of 2000 bodies with unplanned removals"
         );
     }
 
@@ -728,15 +1094,16 @@ mod tests {
         #![proptest_config(config())]
 
         // P4 (editor.md §13.6, data-migration.md §11.2): normalising the
-        // output again returns it, with no rule hits and the same
-        // observations.
+        // output again returns it, with no rule hits, no unplanned removal
+        // and the same observations.
         #[test]
         fn normalising_twice_equals_normalising_once(raw in arb_legacy()) {
-            if let Ok(once) = normalise(&raw) {
-                let twice = normalise(&once.html)
+            if let Ok(once) = run(&raw) {
+                let twice = run(&once.html)
                     .map_err(|error| TestCaseError::fail(format!("{raw:?}: the output was refused: {error}")))?;
                 prop_assert_eq!(&twice.html, &once.html, "{:?}", raw);
                 prop_assert!(!twice.report.has_hits(), "{:?}: {:?}", raw, twice.report);
+                prop_assert!(!twice.report.has_unplanned_removals(), "{:?}: {:?}", raw, twice.report);
                 prop_assert_eq!(twice.report.dead_host_kept(), once.report.dead_host_kept());
                 prop_assert_eq!(twice.report.images_without_alt(), once.report.images_without_alt());
             }
@@ -745,22 +1112,24 @@ mod tests {
         // P4 over arbitrary strings, which reach every tokenizer state.
         #[test]
         fn normalising_any_text_twice_equals_once(raw in any::<String>()) {
-            if let Ok(once) = normalise(&raw) {
-                let twice = normalise(&once.html).expect("an output settles");
+            if let Ok(once) = run(&raw) {
+                let twice = run(&once.html).expect("an output settles");
                 prop_assert_eq!(twice.html, once.html);
                 prop_assert!(!twice.report.has_hits());
+                prop_assert!(!twice.report.has_unplanned_removals());
             }
         }
 
         // Legacy markup settles: the refusal is for pathological bodies.
-        // The one refused family among the plain pieces, a link the parse
-        // leaves inside another link, is left out by the generator, and its
-        // two kinds are pinned by `a_link_left_open_around_sixteen_blocks_is_refused`
-        // and `a_centre_between_headings_in_a_nested_link_costs_a_fourth_pass`:
-        // rare refusals that the maintainer accepted as built (D159).
+        // The one family among the plain pieces that was refused before N7
+        // ran in the pass, a link the parse leaves inside another link (a
+        // rare refusal the maintainer accepted as built, D159), settles now
+        // (`a_link_left_open_around_sixteen_blocks_settles_since_n7`,
+        // `a_centre_between_headings_in_a_nested_link_settles_since_n7`;
+        // D162).
         #[test]
         fn legacy_markup_is_never_refused(raw in arb_plain_legacy()) {
-            prop_assert!(normalise(&raw).is_ok(), "{:?}", raw);
+            prop_assert!(run(&raw).is_ok(), "{:?}", raw);
         }
 
         // N8 and V5(d): no reference but the five survives, and N0 leaves
@@ -783,7 +1152,7 @@ mod tests {
         // `href` on the dead `/storage/`, whatever the input.
         #[test]
         fn no_centre_or_dead_storage_link_is_left(raw in arb_legacy()) {
-            if let Ok(out) = normalise(&raw) {
+            if let Ok(out) = run(&raw) {
                 let html = dom::parse(&out.html);
                 prop_assert!(dom::elements_named(&html, "center").is_empty(), "{:?}", out.html);
                 for node in html.root_element().descendants() {
@@ -802,7 +1171,7 @@ mod tests {
         // `blocks.rs` checks the italic headings over its own shapes.
         #[test]
         fn no_block_shape_is_left(raw in arb_legacy()) {
-            if let Ok(out) = normalise(&raw) {
+            if let Ok(out) = run(&raw) {
                 let html = dom::parse(&out.html);
                 for node in html.root_element().descendants() {
                     let (Some(name), Some(element)) = (dom::html_name(node), node.value().as_element()) else {
@@ -822,7 +1191,7 @@ mod tests {
         // Two runs over the same body agree byte for byte (V12).
         #[test]
         fn the_normaliser_is_deterministic(raw in arb_legacy()) {
-            prop_assert_eq!(normalise(&raw), normalise(&raw));
+            prop_assert_eq!(run(&raw), run(&raw));
         }
     }
 }
