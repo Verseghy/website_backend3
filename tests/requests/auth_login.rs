@@ -299,6 +299,24 @@ async fn a_body_that_is_not_email_and_password_gets_422_before_any_lookup() {
             responses.push((case, server.post(LOGIN).json(&body).await));
         }
         let credentials = json!({ "email": "aktiv@example.test", "password": PASSWORD });
+        // The right credentials in each of the three types that an HTML form,
+        // and so a page on another origin, can send without a CORS preflight
+        // (Fetch standard, "CORS-safelisted request-header"). None signs in,
+        // which is half of why a sign-in without a credential cookie needs no
+        // `Origin` check; the other half is that `/api/admin` answers no
+        // preflight (ADR 0044 §2, as the maintainer answered on 2026-11-15,
+        // research: DECISIONS R35 (D152)).
+        let form_encoded = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("email", "aktiv@example.test")
+            .append_pair("password", PASSWORD)
+            .finish();
+        let boundary = "bejelentkezes-hatar";
+        let multipart_type = format!("multipart/form-data; boundary={boundary}");
+        let multipart = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\n\
+             aktiv@example.test\r\n--{boundary}\r\nContent-Disposition: form-data; \
+             name=\"password\"\r\n\r\n{PASSWORD}\r\n--{boundary}--\r\n"
+        );
         for (case, content_type, body) in [
             (
                 "not JSON",
@@ -332,8 +350,9 @@ async fn a_body_that_is_not_email_and_password_gets_422_before_any_lookup() {
             (
                 "form-encoded",
                 "application/x-www-form-urlencoded",
-                "email=aktiv%40example.test".to_owned(),
+                form_encoded,
             ),
+            ("multipart", multipart_type.as_str(), multipart),
         ] {
             let request = server
                 .post(LOGIN)

@@ -29,7 +29,7 @@ use axum::{
     extract::rejection::JsonRejection,
     http::{
         Method, StatusCode,
-        header::{COOKIE, SET_COOKIE},
+        header::{COOKIE, ORIGIN, SET_COOKIE},
     },
     response::{IntoResponse as _, Response},
     routing::{any, get, post},
@@ -57,6 +57,7 @@ use sea_orm::ActiveValue;
 use serde_json::{Value, json};
 
 use crate::support::{
+    ADMIN_ORIGIN,
     admin_probe::{account_with, give, probe_server, session_token, take_all},
     with_app, with_server,
 };
@@ -386,9 +387,13 @@ async fn assert_every_guarded_route_needs_a_session(
         for (case, token) in cases {
             let request = server.method(route.method().clone(), &path);
             let response = match token {
+                // From the admin origin, so that a write passes the
+                // `Origin` check and reaches the session check
+                // (`tests/requests/admin_origin.rs` walks the other origins).
                 Some(token) => {
                     request
                         .add_header(COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+                        .add_header(ORIGIN, ADMIN_ORIGIN)
                         .await
                 }
                 None => request.await,
@@ -753,9 +758,11 @@ async fn the_guard_decides_before_the_handler_reads_the_body() {
                     .bytes(body.clone().into())
                     .content_type(content_type);
                 match token {
-                    Some(token) => {
-                        request.add_header(COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
-                    }
+                    // From the admin origin, as the admin UI sends it
+                    // (ADR 0006 §3, ADR 0044).
+                    Some(token) => request
+                        .add_header(COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+                        .add_header(ORIGIN, ADMIN_ORIGIN),
                     None => request,
                 }
             };

@@ -116,6 +116,11 @@ settings:
     # A legacy password shorter than 12 characters yields only a
     # password_change session (§6).
     force_change_short_legacy_password: true
+    # The admin origin (ADR 0006 §3, ADR 0044): a cookie-authenticated write
+    # to /api/admin must carry exactly this value in its Origin header. The
+    # origin of the E2E server, from which Playwright loads the built admin
+    # (http://localhost:5150/admin), so the browser sends it with every write.
+    origin: "http://localhost:5150"
   # How uploaded images are optimised (ADR 0015 §7, ADR 0033).
   # `pixel_budget`: the largest pixel count decoded for one image, 50
   # megapixels (ADR 0015 §7). `png`: the oxipng preset by image size

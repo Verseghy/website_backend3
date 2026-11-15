@@ -36,8 +36,16 @@
 //!
 //! The table enforces each requirement itself, in a guard that runs before
 //! the handler: the handler of every entry is wrapped so that its
-//! requirement is checked whatever the handler takes. For a requirement
-//! that needs a session, the guard
+//! requirement is checked whatever the handler takes. First, for every
+//! requirement, `Public` included, the guard
+//!
+//! 0. refuses a write (`POST`, `PUT`, `PATCH`, `DELETE`) that carries the
+//!    session cookie or the two-factor cookie but not the admin origin in
+//!    its `Origin` header, with `403 origin_mismatch` and before it reads
+//!    anything else (`super::origin`, ADR 0006 §3 as amended by ADR 0044);
+//!    a Bearer request without a credential cookie is exempt.
+//!
+//! Then, for a requirement that needs a session, it
 //!
 //! 1. opens the session with the route's accepted scopes
 //!    (`super::session::open_session`): no valid session, or a scope the
@@ -59,8 +67,9 @@
 //!    DECISIONS R35 (D156); ADR 0006 §1 quotes the question), so a
 //!    handler's own record-level `403` carries it too.
 //!
-//! So `401` is always decided before `403` (ADR 0007 §5's flowchart), and
-//! both before the handler reads anything: a list that the account may not
+//! So the `Origin` check comes first, `401` is always decided before
+//! `403 forbidden` (ADR 0007 §5's flowchart), and all of them before the
+//! handler reads anything: a list that the account may not
 //! see answers `403` and never an empty list, and a body that is not the
 //! route's DTO, or is too large, is looked at only for an account that may
 //! call the route. A `Public` route runs its handler without a session; a
@@ -113,7 +122,7 @@ use loco_rs::{app::AppContext, controller::Routes};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::{
-    JSON_BODY_LIMIT, auth, error_response,
+    JSON_BODY_LIMIT, auth, error_response, origin,
     session::{
         AcceptedScopes, AdminOrPasswordChange, AdminScope, accepted_scopes, open_session,
         passive_refresh_cookie, session_refusal_response, with_passive_refresh,
@@ -483,21 +492,32 @@ impl Guard {
     ///   goes into its extensions for the handler's `AdminSession`.
     /// - `ctx`: the router's state.
     ///
-    /// The answer of a refused request is the session's `401 unauthorized`
-    /// or `500` ([`open_session`], [`session_refusal_response`]), or
-    /// `403 forbidden` for an account that does not meet the requirement.
+    /// The answer of a refused request is `403 origin_mismatch` for a
+    /// cookie-authenticated write without the admin origin
+    /// ([`origin::refusal`], for every requirement), the session's
+    /// `401 unauthorized` or `500` ([`open_session`],
+    /// [`session_refusal_response`]), or `403 forbidden` for an account that
+    /// does not meet the requirement, in that order.
     ///
     /// Once the session holds, the guard also decides its passive refresh
     /// (ADR 0006 §1, [`passive_refresh_cookie`]): a full `admin` session in
     /// the session cookie with less than 3,600 s left gets a renewed cookie
-    /// on its answer, the handler's or the `403`, unless the handler sets
-    /// the session cookie itself ([`with_passive_refresh`]). A failure to
-    /// build it (no app clock, no `auth.jwt`) answers Loco's `500`.
+    /// on its answer, the handler's or the `403 forbidden`, unless the
+    /// handler sets the session cookie itself ([`with_passive_refresh`]). A
+    /// failure to build it (no app clock, no `auth.jwt`) answers Loco's
+    /// `500`. The `403 origin_mismatch` comes before the session is opened,
+    /// so it never carries a renewed cookie.
     async fn admit(self, request: Request, ctx: &AppContext) -> Admission {
-        if !self.requirement.needs_session() {
-            return Admission::Admitted(request, None);
-        }
         let (mut parts, body) = request.into_parts();
+        // First, for every requirement, `Public` included: a write with a
+        // credential cookie but without the admin origin is answered before
+        // anything is read, so its session is never even opened.
+        if let Some(answer) = origin::refusal(&parts, ctx) {
+            return Admission::Refused(answer);
+        }
+        if !self.requirement.needs_session() {
+            return Admission::Admitted(Request::from_parts(parts, body), None);
+        }
         let session = match open_session(&mut parts, ctx, self.scopes).await {
             Ok(session) => session,
             Err(error) => return Admission::Refused(session_refusal_response(error)),

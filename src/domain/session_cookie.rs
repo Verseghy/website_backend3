@@ -40,6 +40,15 @@
 /// in every `config/<env>.yaml` reads the token from this cookie first.
 pub const SESSION_COOKIE_NAME: &str = "__Host-admin_session";
 
+/// The name of the cookie that carries the `mfa` token from the password
+/// step of the sign-in to the TOTP step (ADR 0006 §4). It has the session
+/// cookie's attributes with `Max-Age=300`, and `POST /api/admin/auth/totp`
+/// reads it itself, so `auth.jwt.location` never names it. The `Origin`
+/// check counts it as a credential cookie from the start
+/// (`domain::origin::CREDENTIAL_COOKIES`, ADR 0044), so the TOTP step is
+/// covered as soon as it exists.
+pub const MFA_COOKIE_NAME: &str = "__Host-admin_mfa";
+
 /// The `Set-Cookie` attributes of the session cookie except `Max-Age`, the
 /// one attribute that setting and clearing write differently. Both
 /// [`session_cookie`] and [`cleared_session_cookie`] format it in, so they
@@ -199,6 +208,15 @@ mod tests {
     /// The shape of a JWT: three base64url segments joined by dots. Mixed
     /// with arbitrary strings below, which almost never are cookie values.
     const JWT_LIKE: &str = "[A-Za-z0-9_-]{1,40}\\.[A-Za-z0-9_-]{1,80}\\.[A-Za-z0-9_-]{1,90}";
+
+    #[test]
+    fn both_cookie_names_carry_the_host_prefix() {
+        // ADR 0006 §1, §4: the `__Host-` prefix keeps sibling hosts from
+        // setting or overwriting either cookie.
+        assert_eq!(SESSION_COOKIE_NAME, "__Host-admin_session");
+        assert_eq!(MFA_COOKIE_NAME, "__Host-admin_mfa");
+        assert_ne!(SESSION_COOKIE_NAME, MFA_COOKIE_NAME);
+    }
 
     #[test]
     fn the_cookie_has_exactly_the_adr_attributes() {

@@ -199,15 +199,17 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    opens a session itself: on a route outside the table, or a `Public` one,
    it answers `500`. Never take Loco's `JWT` or `JWTWithUser` in an admin
    handler: they skip these checks. A request test covers the route's `401`
-   without a session and its `403` (recipe 10). The guard also renews a full
-   session in the session cookie that has less than an hour left (the
-   passive sliding refresh, ADR 0006 §1), on the handler's answer: a
-   handler that ends or replaces the session (logout, a password or
-   two-factor change) sets the `__Host-admin_session` cookie itself, with
-   `domain::session_cookie`, and the guard then adds none beside it, so the
-   handler's cookie is the answer's only one. `session.carrier` says whether
-   the token came in the cookie or as a Bearer token, which is never
-   refreshed (ADR 0006 §3).
+   without a session and its `403` (recipe 10); a write it sends with the
+   session cookie carries `Origin: ADMIN_ORIGIN` (`tests/support`), or the
+   guard refuses it first with `403 origin_mismatch` (ADR 0044). The guard
+   also renews a full session in the session cookie that has less than an
+   hour left (the passive sliding refresh, ADR 0006 §1), on the handler's
+   answer: a handler that ends or replaces the session (logout, a password
+   or two-factor change) sets the `__Host-admin_session` cookie itself,
+   with `domain::session_cookie`, and the guard then adds none beside it,
+   so the handler's cookie is the answer's only one. `session.carrier` says
+   whether the token came in the cookie or as a Bearer token, which is
+   never refreshed (ADR 0006 §3).
 8. **Public endpoint**, if the feature has one: recipe 3.
 9. **Admin screen** under `admin/src/`: resources through backend3's own data
    provider in `admin/src/data-provider/` (never `ra-data-json-server` or
@@ -1097,25 +1099,37 @@ outside the table; its documentation lists what a text check cannot see.
    section 6) is not a route requirement: the handler checks it after
    loading the record, with a function of `src/domain/authz.rs`, and
    answers its own `403` code.
-3. **What the guard answers.** For every requirement but `Public`: no
-   valid session, or a scope the route does not accept, `401 unauthorized`;
-   then an account that does not meet the requirement, `403 forbidden`,
-   before the handler reads its body. A list the account may not see is
-   therefore a `403`, never `[]`. Every answer carries
-   `Cache-Control: no-store`. A full `admin` session in the session cookie
-   with less than 3,600 s left gets a renewed cookie on whatever the guard
-   answers, the handler's answer or the `403` (the passive refresh,
-   ADR 0006 §1), unless the handler set the session cookie itself; a new
-   route gets it without further work, and so does a handler's own
-   record-level `403` (step 2). The maintainer kept this as built on
-   2026-11-15: "Keep as built: every guarded answer, the 403 included"
-   (research: DECISIONS R35 (D156)).
+3. **What the guard answers.** First, for every requirement, `Public`
+   included: a write (`POST`, `PUT`, `PATCH`, `DELETE`) that carries the
+   session cookie or the two-factor cookie without exactly one `Origin`
+   header equal to the admin origin (`settings.admin_auth.origin`), a
+   missing header included, `403 origin_mismatch`, before anything is read
+   (`controllers::admin::origin`, ADR 0006 §3 as amended by ADR 0044). A
+   Bearer request without a credential cookie is not checked. Then, for
+   every requirement but `Public`: no valid session, or a scope the route
+   does not accept, `401 unauthorized`; then an account that does not meet
+   the requirement, `403 forbidden`, before the handler reads its body. A
+   list the account may not see is therefore a `403`, never `[]`. Every
+   answer carries `Cache-Control: no-store`. A full `admin` session in the
+   session cookie with less than 3,600 s left gets a renewed cookie on
+   whatever the guard answers after it opened the session, the handler's
+   answer or the `403 forbidden` (the passive refresh, ADR 0006 §1),
+   unless the handler set the session cookie itself; a new route gets it
+   without further work, and so does a handler's own record-level `403`
+   (step 2). The maintainer kept this as built on 2026-11-15: "Keep as
+   built: every guarded answer, the 403 included" (research: DECISIONS
+   R35 (D156)). A write route needs nothing of its own for the `Origin`
+   check: the table is the only way to mount one, and
+   `tests/requests/admin_origin.rs` walks every write route of it.
 4. **Test** the route in `tests/requests/<name>.rs`: its `401` without a
    session, its `403` for an account that lacks the requirement (an
    account with one role or one extra grant, `tests/support/admin_probe.rs`
-   gives them), and its answers for one that meets it. The table's own
-   test (`tests/requests/admin_routes.rs`) then sees the route, and so does
-   every other check that walks the table.
+   gives them), and its answers for one that meets it. A test request that
+   writes with the session cookie also sends `Origin: ADMIN_ORIGIN`
+   (`tests/support`, the test configuration's admin origin), as the admin
+   UI does; without it the guard answers `403 origin_mismatch` first. The
+   table's own test (`tests/requests/admin_routes.rs`) then sees the route,
+   and so does every other check that walks the table.
 5. **The admin** gets the refusal as an envelope: a data-provider handler
    rejects a refused answer with `refusalError` of
    `admin/src/api/error-envelope.ts`, so ra-core's notification shows the

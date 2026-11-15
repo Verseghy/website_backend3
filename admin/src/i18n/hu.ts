@@ -485,6 +485,13 @@ export const hu = {
     // §5): the session stays valid, so the message does not ask the user to
     // sign in again.
     forbidden: "Nincs jogosultságod ehhez a művelethez.",
+    // A write with the session cookie that did not come from the admin's own
+    // address (ADR 0006 §3, ADR 0044): a page on another site or host, or a
+    // browser extension that drops the Origin header. Nothing was done and
+    // the session stays valid, so the message asks the user to work from the
+    // admin's usual address instead of signing in again.
+    origin_mismatch:
+      "A szerver elutasította a kérést, mert nem a szerkesztőfelület saját címéről érkezett. Nyisd meg a szerkesztőfelületet a megszokott címén, és próbáld újra!",
     // Upload refusals (ADR 0015 §6 and §7, ADR 0033 §4): each says what
     // makes the file acceptable.
     image_not_allowed: "Csak JPEG, PNG, GIF vagy WebP kép tölthető fel.",

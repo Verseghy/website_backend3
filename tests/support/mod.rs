@@ -590,6 +590,15 @@ impl QueueTableLock {
 /// cross-origin (ADR 0014).
 pub const SITE_ORIGIN: &str = "https://verseghy-gimnazium.net";
 
+/// The admin origin of the test configuration (`settings.admin_auth.origin`
+/// of `config/test.yaml`): the `Origin` that a browser at the admin sends
+/// with every write. A test request that writes with the session cookie
+/// sends it too, or the route table's guard answers `403 origin_mismatch`
+/// before anything else (ADR 0006 §3, ADR 0044);
+/// `tests/requests/admin_origin.rs` checks that it matches the
+/// configuration.
+pub const ADMIN_ORIGIN: &str = "http://localhost:5150";
+
 /// The header `name` of `response` as text, or `None` when it is absent.
 ///
 /// Fails the test when the response carries the header more than once:

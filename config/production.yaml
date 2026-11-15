@@ -13,7 +13,12 @@
 #   DATABASE_URL  postgres://website_backend3:<password>@postgres:5432/verseghy
 #                 (built by the Deployment from the backend-secrets key,
 #                 ADR 0002, ADR 0023 §11)
-#   HOST          https://backend3.microshift.verseghy-gimnazium.net (ADR 0014)
+#   HOST          https://backend3.microshift.verseghy-gimnazium.net (ADR 0014),
+#                 which is also the admin origin that cookie-authenticated
+#                 admin writes must carry in their Origin header
+#                 (settings.admin_auth.origin, ADR 0044): written as browsers
+#                 send an origin, with no path and no trailing slash. Every
+#                 command refuses to start when it is not.
 #   JWT_SECRET    the admin session secret: base64 (standard alphabet, `=`
 #                 padding) of at least 64 random bytes, on one line with no
 #                 trailing newline, from the backend-secrets key
@@ -202,6 +207,15 @@ settings:
     # A legacy password shorter than 12 characters yields only a
     # password_change session (§6).
     force_change_short_legacy_password: true
+    # The admin origin (ADR 0006 §3, ADR 0044): a cookie-authenticated write
+    # to /api/admin must carry exactly this value in its Origin header. It is
+    # HOST, the public URL of the app, which ADR 0014 makes the admin origin
+    # (https://backend3.microshift.verseghy-gimnazium.net; staging's own host
+    # there). Checked at boot: HOST must be an origin as browsers send it,
+    # with no path and no trailing slash, or every command stops with the
+    # spelling to write. Escaped for the double-quoted string as the TOTP key
+    # above is.
+    origin: "<%= get_env(name='HOST') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>"
   # How uploaded images are optimised (ADR 0015 §7, ADR 0033). `png`: oxipng's
   # preset 2 up to `threshold_pixels` pixels and the cheaper `large_preset`
   # (0 or 1) above, so a PNG at the pixel budget finishes inside the 120 s

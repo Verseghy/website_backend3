@@ -20,7 +20,10 @@
 
 use axum::{
     Json,
-    http::{StatusCode, header::ALLOW},
+    http::{
+        StatusCode,
+        header::{ALLOW, ORIGIN},
+    },
 };
 use axum_test::{TestResponse, TestServer};
 use backend3::{
@@ -44,7 +47,7 @@ use loco_rs::{
 use serde_json::{Map, Value, json};
 
 use crate::support::{
-    TestClock,
+    ADMIN_ORIGIN, TestClock,
     admin_probe::{account_with, probe_server},
     session_refresh::{
         SetSessionCookie, at, cookie_header, jwt_secret, place_session, renewed_cookie,
@@ -96,11 +99,13 @@ async fn sign_in(server: &TestServer, email: &str) -> String {
     renewed_cookie(&response).expect("the sign-in cookie").token
 }
 
-/// `POST /auth/refresh` with `token` in the session cookie.
+/// `POST /auth/refresh` with `token` in the session cookie, from the admin
+/// origin as the admin UI sends it (ADR 0006 §3, ADR 0044).
 async fn refresh_with_cookie(server: &TestServer, token: &str) -> TestResponse {
     server
         .post(REFRESH)
         .add_header("cookie", cookie_header(token))
+        .add_header(ORIGIN, ADMIN_ORIGIN)
         .await
 }
 
@@ -233,6 +238,7 @@ async fn the_explicit_refresh_sets_a_new_two_hour_cookie_whatever_is_left() {
         let logout = server
             .post(LOGOUT)
             .add_header("cookie", cookie_header(&renewed.token))
+            .add_header(ORIGIN, ADMIN_ORIGIN)
             .await;
         assert_eq!(logout.status_code(), StatusCode::NO_CONTENT);
         for ended in [&token, &renewed.token] {
@@ -508,6 +514,7 @@ async fn the_refresh_without_a_valid_session_answers_401_and_sets_no_cookie() {
         let logout = server
             .post(LOGOUT)
             .add_header("cookie", cookie_header(&token))
+            .add_header(ORIGIN, ADMIN_ORIGIN)
             .await;
         assert_eq!(logout.status_code(), StatusCode::NO_CONTENT);
         let inactive = account(&ctx, "inaktiv@example.test").await;

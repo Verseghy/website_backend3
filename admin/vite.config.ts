@@ -8,6 +8,7 @@ import {
   LICENCE_NOTICES_FILE,
   licenceNotices,
 } from "./scripts/licence-notices.mjs"
+import { DEV_BACKEND, devProxy } from "./scripts/dev-proxy.mjs"
 import { parseReportMissingKeys } from "./src/i18n/report-missing-keys.ts"
 import { includeClipboardRecorder } from "./src/recorder/recorder-flag.ts"
 import { parseSourceCommit } from "./src/source-link/source-commit.ts"
@@ -21,6 +22,10 @@ import { parseSourceCommit } from "./src/source-link/source-commit.ts"
  * - Development: the Vite dev server serves the UI and proxies the API to a
  *   locally running backend3, so the browser sees one origin and the
  *   `SameSite=Strict` session cookie behaves as in production (ADR 0004 §4).
+ *   The proxy gives the requests of the dev server's own pages backend3's
+ *   origin, which backend3's `Origin` check of cookie-authenticated writes
+ *   expects; every other origin passes unchanged and is refused there
+ *   (`scripts/dev-proxy.mjs`, ADR 0044).
  * - `VITE_SOURCE_COMMIT` is validated here, at build time, so a malformed value
  *   fails the image build instead of shipping a broken AGPL source link
  *   (ADR 0012 §4). The Containerfile passes the full commit SHA; an empty or
@@ -81,13 +86,11 @@ export default defineConfig(({ command, mode }) => {
       },
     },
     server: {
-      proxy: {
-        // The admin API (ADR 0004 §4).
-        "/api": "http://localhost:5150",
-        // Media URLs are root-relative `/storage/...` (ADR 0015, ADR 0023 §6),
-        // so previews in the media library need the same origin in development.
-        "/storage": "http://localhost:5150",
-      },
+      // The admin API (ADR 0004 §4), with the `Origin` of the dev server's
+      // own pages translated into backend3's (ADR 0044), and the
+      // root-relative `/storage/...` media URLs (ADR 0015, ADR 0023 §6),
+      // which previews in the media library need on the same origin.
+      proxy: devProxy(DEV_BACKEND),
     },
   }
 })

@@ -14,6 +14,13 @@
 //! `tests/architecture/admin_mounts.rs` (in another hook, within the limits
 //! of a text check that its documentation lists).
 //!
+//! Before it opens a session, the guard answers `403 origin_mismatch` to a
+//! write that carries the session cookie (or the two-factor cookie) without
+//! the admin's own origin in its `Origin` header ([`origin`], ADR 0006 §3 as
+//! amended by ADR 0044): the control against pages on sibling hosts, which
+//! `SameSite` does not stop. A Bearer request without a credential cookie is
+//! exempt.
+//!
 //! A handler that needs a signed-in account takes [`session::AdminSession`],
 //! which hands it the session that the guard opened and checked
 //! (ADR 0006 §1), and never Loco's `JWT` or `JWTWithUser`, which skip those
@@ -38,6 +45,7 @@ use crate::dtos::admin::error::{ErrorCode, ErrorEnvelope};
 pub mod auth;
 pub mod client_context;
 pub mod media;
+pub mod origin;
 pub mod routes;
 pub mod session;
 
