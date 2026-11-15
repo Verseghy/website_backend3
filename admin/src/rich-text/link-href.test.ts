@@ -1,8 +1,16 @@
 // @vitest-environment node
+import { readFileSync } from "node:fs"
+
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 
-import { isAllowedHref } from "./link-href"
+import {
+  endsWithExtension,
+  isAllowedHref,
+  isOwnHost,
+  leadingSlashes,
+  SAME_ORIGIN_BASE,
+} from "./link-href"
 import { CONTENT_V1_POLICY } from "./policy"
 import { policyWith } from "@/test/rich-text-policy"
 
@@ -163,6 +171,194 @@ describe("isAllowedHref", () => {
         (scheme) => {
           expect(allowed(`${scheme}:x`)).toBe(false)
           expect(allowed(`${scheme}://x.example/`)).toBe(false)
+        }
+      )
+    )
+  })
+})
+
+/**
+ * The helpers that the image rule (`media-src.ts`) shares with the link
+ * rule, tested on their own so that a change to one rule cannot change the
+ * other unseen.
+ */
+describe("SAME_ORIGIN_BASE", () => {
+  it("is the server's base, on a reserved host that no site can own", () => {
+    const rust = readFileSync(
+      new URL("../../../src/domain/rich_text/url_rules.rs", import.meta.url),
+      "utf8"
+    )
+    const server = /pub const SAME_ORIGIN_BASE: &str = "([^"]+)";/.exec(rust)
+    expect(server?.[1]).toBe(SAME_ORIGIN_BASE)
+    const base = new URL(SAME_ORIGIN_BASE)
+    expect(base.hostname.endsWith(".invalid")).toBe(true)
+    expect(URLS.own_hosts).not.toContain(base.hostname)
+  })
+})
+
+describe("leadingSlashes", () => {
+  it.each([
+    ["an empty value", "", 0],
+    ["blanks only", " \t\n ", 0],
+    ["a path-relative value", "x/y", 0],
+    ["a query", "?/x", 0],
+    ["a path", "/x", 1],
+    ["a backslash", "\\x", 1],
+    ["a path after a space and a C0 control", " \u0001/x", 1],
+    ["a path followed by blanks", "/ ", 1],
+    ["two slashes", "//x", 2],
+    ["three slashes, counted up to two", "///x", 2],
+    ["a slash and a backslash", "/\\x", 2],
+    ["two backslashes", "\\\\x", 2],
+    ["slashes split by a tab", "/\t/x", 2],
+    ["slashes split by a newline and a return", "/\n\r/x", 2],
+    ["slashes after a tab", "\t//x", 2],
+  ])("counts %s", (_name, href, count) => {
+    expect(leadingSlashes(href)).toBe(count)
+  })
+
+  it("counts the slashes in front, whatever blanks surround them", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("", " ", "\u0000", "\u001f ", "\t"),
+        fc.array(
+          fc.tuple(
+            fc.constantFrom("/", "\\"),
+            fc.constantFrom("", "\t", "\n", "\r", "\t\n")
+          ),
+          { maxLength: 4 }
+        ),
+        fc.stringMatching(/^[a-z0-9.?#:-]{0,10}$/),
+        (lead, slashes, rest) => {
+          const href =
+            lead + slashes.map(([s, noise]) => s + noise).join("") + rest
+          expect(leadingSlashes(href)).toBe(Math.min(slashes.length, 2))
+        }
+      )
+    )
+  })
+
+  it("is two or more exactly when the URL parser leaves the page's origin", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 3 }),
+        fc.constantFrom("", "\t", "\n"),
+        fc.stringMatching(/^[a-z]{1,10}\.example$/),
+        (count, noise, host) => {
+          const href = ` ${"/".repeat(count).split("").join(noise)}${host}/x`
+          const resolved = new URL(href, SAME_ORIGIN_BASE)
+          expect(leadingSlashes(href) >= 2).toBe(
+            resolved.origin !== new URL(SAME_ORIGIN_BASE).origin
+          )
+        }
+      )
+    )
+  })
+})
+
+describe("endsWithExtension", () => {
+  const SVG = ["svg"]
+  it.each([
+    ["a file with the extension", "/storage/x.svg", SVG, true],
+    ["the extension in upper case", "/storage/x.SVG", SVG, true],
+    ["one of several extensions", "/x.tar.gz", ["zip", "gz"], true],
+    ["a name that is only the extension", "/.svg", SVG, true],
+    ["a path without a slash", "x.svg", SVG, true],
+    ["a directory that looks like a file", "/storage/x.svg/", SVG, false],
+    ["the extension in a parent segment", "/a.svg/b", SVG, false],
+    ["the extension without its dot", "/storage/xsvg", SVG, false],
+    ["another extension", "/storage/x.svgz", SVG, false],
+    ["an empty path", "", SVG, false],
+    ["no extensions", "/x.svg", [], false],
+  ])("answers for %s", (_name, path, extensions, expected) => {
+    expect(endsWithExtension(path, extensions)).toBe(expected)
+  })
+
+  it("looks at the last segment only, in any case", () => {
+    const extensions = URLS.image.extensions
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[a-z]{0,5}$/),
+        fc.stringMatching(/^[a-z0-9]{1,10}$/),
+        fc.constantFrom(...extensions),
+        fc.boolean(),
+        (dir, name, extension, upper) => {
+          const written = upper ? extension.toUpperCase() : extension
+          expect(
+            endsWithExtension(`/${dir}/${name}.${written}`, extensions)
+          ).toBe(true)
+          expect(endsWithExtension(`/${name}.${written}/`, extensions)).toBe(
+            false
+          )
+          expect(
+            endsWithExtension(`/${name}.${written}/${name}`, extensions)
+          ).toBe(false)
+        }
+      )
+    )
+  })
+})
+
+describe("isOwnHost", () => {
+  it.each([
+    ["an own host", "https://verseghy-gimnazium.net/x", true],
+    [
+      "an own host with a trailing dot",
+      "https://verseghy-gimnazium.net./x",
+      true,
+    ],
+    ["an own host in upper case", "HTTPS://VERSEGHY-GIMNAZIUM.NET/", true],
+    ["an own host with a port", "http://verseghy-gimnazium.net:8443/", true],
+    ["a sub-domain of an own host", "https://x.verseghy-gimnazium.net/", false],
+    [
+      "an own host as a prefix",
+      "https://verseghy-gimnazium.net.example/",
+      false,
+    ],
+    [
+      "an own host as user info",
+      "https://verseghy-gimnazium.net@x.example/",
+      false,
+    ],
+    ["another host", "https://example.org/", false],
+  ])("answers for %s", (_name, url, expected) => {
+    expect(isOwnHost(new URL(url), URLS)).toBe(expected)
+  })
+
+  it("follows the policy's own hosts", () => {
+    const urls = policyWith((json) => {
+      ;(json.urls as { own_hosts: string[] }).own_hosts = ["example.org"]
+    }).urls
+    expect(isOwnHost(new URL("https://example.org/"), urls)).toBe(true)
+    expect(isOwnHost(new URL("https://verseghy-gimnazium.net/"), urls)).toBe(
+      false
+    )
+  })
+
+  it("knows every own host, however it is written, and no other", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...URLS.own_hosts),
+        fc.boolean(),
+        fc.boolean(),
+        fc.stringMatching(/^[a-z]{1,10}$/),
+        (host, upper, trailingDot, label) => {
+          const written =
+            (upper ? host.toUpperCase() : host) + (trailingDot ? "." : "")
+          expect(isOwnHost(new URL(`https://${written}/${label}`), URLS)).toBe(
+            true
+          )
+          expect(isOwnHost(new URL(`https://${label}.example/`), URLS)).toBe(
+            false
+          )
+          expect(isOwnHost(new URL(`https://${host}.${label}/`), URLS)).toBe(
+            false
+          )
+          // `backend.` in front of the school's domain is itself an own host.
+          const subdomain = `${label}.${host}`
+          expect(isOwnHost(new URL(`https://${subdomain}/`), URLS)).toBe(
+            URLS.own_hosts.includes(subdomain)
+          )
         }
       )
     )

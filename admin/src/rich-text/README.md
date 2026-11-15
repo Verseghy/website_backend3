@@ -30,8 +30,8 @@ The TipTap 3.32 schema of content-v1 (editor.md §4.2, §4.3):
 | Module               | What it is                                                                                                                                                         |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `policy.ts`          | `policy.json` read, validated and typed (`CONTENT_V1_POLICY`); a manifest the admin does not understand fails at load with the member and the fix                  |
-| `site-extensions.ts` | `siteExtensions({ policy, media })`, the extension list of every editor                                                                                            |
-| `extensions/`        | the site versions of the document, headings, lists, link, alignment, sub and superscript, text style and tables, one module each, with why each differs from stock |
+| `site-extensions.ts` | `siteExtensions({ policy, notify })`, the extension list of every editor                                                                                           |
+| `extensions/`        | the site document, headings, lists, link, alignment, sub- and superscript, text style, tables, image and embeds, one module each, with why each differs from stock |
 | `style-decls.ts`     | the raw style reader of the parse rules: every `style` through `canonicalStyle`, so a rule reads what the server stores; the checks of the one spelling            |
 | `link-href.ts`       | the server's `a[href]` rule, for the link mark                                                                                                                     |
 | `load-document.ts`   | `loadDocument(editor, html)`, the one way a body enters an editor                                                                                                  |
@@ -105,16 +105,46 @@ short row, and it repeats `fixTables` until every table is rectangular. In a
 cell, the alignment commands of `extensions/site-text-align.ts` align the
 innermost cell that holds the selection.
 
+## Images and embeds
+
+The `media` group of editor.md §4.2 and §4.3 rows 8-10: atoms that live at
+the top level only, each writing content-v1's one shape (§3.7).
+
+| Module                        | What it is                                                                                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extensions/site-image.ts`    | `SiteImage`: `src`, `alt`, display width and ratio, upload state; parse rules ① and ②; the React node view; `insertSiteImage`                       |
+| `image-attributes.ts`         | the image's attributes, the width presets 175/350/525/700, the missing-alt rule and the stored `width` and `height`                                 |
+| `views/SiteImageView.tsx`     | the image in the editor: the red „Alt szöveg hiányzik” badge, the width presets, the upload state and the alt dialog                                |
+| `extensions/youtube-embed.ts` | `YoutubeEmbed`: parse rules 70/70/65/60, the lone-URL paste rule with its notices, `insertYoutubeEmbed`                                             |
+| `youtube-input.ts`            | the one reader of YouTube input (ADR 0043): links, embed addresses and embed code, the `t` and `listType` mappings, the title rule, dropped options |
+| `extensions/padlet-embed.ts`  | `PadletEmbed`: parse rules, the height, `insertPadletEmbed`                                                                                         |
+| `padlet-input.ts`             | the reader of Padlet's embed address                                                                                                                |
+| `media-src.ts`                | the server's `img[src]` and `iframe[src]` rules, read from `policy.json`                                                                            |
+| `extensions/embed-frame.ts`   | the forced iframe attributes, the stored-style check, the wrapper readers and where media may be placed (`isMediaPlace`), which the nodes share     |
+| `extensions/editor-notice.ts` | `NotifyEditor`, how an extension asks the editor input to show an `editor.*` notice                                                                 |
+| `dialogs/`                    | the YouTube and Padlet insert dialogs and the image's alt dialog                                                                                    |
+
+`siteExtensions({ policy, notify })` always holds the three nodes; `notify`
+shows the YouTube paste rule's notices (the dropped options of D134, a link
+it refuses, a link pasted where media cannot go) and defaults to none. The
+nodes go only where `isMediaPlace` allows (between top-level blocks or in a
+top-level paragraph), so their insert commands refuse a list item, quote,
+table cell or heading and `editor.can()` disables the toolbar buttons there.
+The YouTube fixtures of `../../test/fixtures/youtube/` (their README says
+where each comes from) feed the reader's tests and the golden files.
+
 ## The golden files (P2 and P3)
 
 `e1-golden.test.ts`, part of `npm test`, writes `J(x)` for every editor
 fixture to `tests/fixtures/e1/` at the repository root (editor.md §13.6):
 the server's regression fixtures, the canonical bodies and tables, the table
-inputs and the command fixtures of `src/test/editor-fixtures.ts`, named as
-`src/test/golden-e1.ts` says. The server's `tests/rich_text/golden.rs`
-asserts that the sanitiser stores each file unchanged and removes nothing
-from it. The `Contract` CI job runs `npm run test:e1` and fails when a file
-differs from the committed one, so after a change here run `npm test` and
-commit what it wrote there. A slice that adds an editor feature or a paste
-fixture adds it to `editor-fixtures.ts` (or a group of its own in
-`golden-e1.ts`), so the server checks what it writes.
+inputs, the canonical images and embeds and their inputs, the command
+fixtures of `src/test/editor-fixtures.ts` and the YouTube fixtures of
+`../../test/fixtures/youtube/`, named as `src/test/golden-e1.ts` says. The
+server's `tests/rich_text/golden.rs` asserts that the sanitiser stores each
+file unchanged and removes nothing from it. The `Contract` CI job runs
+`npm run test:e1` and fails when a file differs from the committed one, so
+after a change here run `npm test` and commit what it wrote there. A slice
+that adds an editor feature or a paste fixture adds it to
+`editor-fixtures.ts` (or a group of its own in `golden-e1.ts`), so the
+server checks what it writes.

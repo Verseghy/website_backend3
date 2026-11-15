@@ -56,3 +56,15 @@ the editor does not: prosemirror-tables shortens such a rowspan when a body
 loads, so the editor would have stored the shape with another `rowspan`
 (editor.md §13.4, `toStoredHtml(load(z)) == z`). A canonical table is
 rectangular.
+
+The YouTube rules of ADR 0043 changed fixtures and added one (items D129,
+D132 and D133). A video id now has exactly 11 characters, so the fixtures
+that used `VIDEOID` or `x` as a YouTube id use 11-character ids; each case
+of `embed-queries-and-markers`, `embed-look-alike-hosts` and
+`iframe-text-removed` still fails or passes for the reason it was written
+for, not for its id. `canonical-shapes` stores its YouTube embed with the
+§3.7 style, which gained `min-height: 200px`. The new
+`youtube-id-rules-and-minimum-height` pins the rules themselves: ids of the
+wrong length, `videoseries` without `list` and the `listType` form are
+refused, `videoseries` with `list` is kept, and `min-height` is kept only
+at its locked `200px`.

@@ -22,19 +22,29 @@
  *   regression fixture of `tests/fixtures/regressions/` (a stored body,
  *   loaded and saved), and `regression-input-<name>`: `J` of its input,
  *   when that differs;
- * - `canonical-<name>`, `table-<name>`, `table-input-<name>`: `J` of the
- *   bodies of `editor-fixtures.ts`;
+ * - `canonical-<name>`, `table-<name>`, `table-input-<name>`,
+ *   `media-<name>`, `media-input-<name>`: `J` of the bodies of
+ *   `editor-fixtures.ts`;
+ * - `embed-<name>`: what the editor stores for a YouTube input fixture of
+ *   `admin/test/fixtures/youtube/` (ADR 0043): `J` of embed code, and the
+ *   lone-URL paste rule's embed for a link, pasted into an empty body;
  * - `command-<name>`: the stored HTML of a document built with the editor's
- *   commands, which is `J` of itself (the tests check that).
+ *   commands (the media commands included), which is `J` of itself (the
+ *   tests check that).
  */
 import type { StoredHtmlHarness } from "./stored-html"
 import { regressionFixtures } from "./stored-html"
 import {
   CANONICAL_BODIES,
   COMMAND_FIXTURES,
+  MEDIA_BODIES,
+  MEDIA_COMMAND_FIXTURES,
+  MEDIA_INPUTS,
   TABLE_INPUTS,
   TABLE_SHAPES,
 } from "./editor-fixtures"
+import { pasteEvent } from "./site-schema"
+import { youtubeFixtures } from "./youtube-fixtures"
 
 /** The repository path of the golden files, from the repository root. */
 export const GOLDEN_DIRECTORY = "tests/fixtures/e1"
@@ -107,16 +117,32 @@ export function editorGoldenFiles(
     ["canonical", CANONICAL_BODIES],
     ["table", TABLE_SHAPES],
     ["table-input", TABLE_INPUTS],
+    ["media", MEDIA_BODIES],
+    ["media-input", MEDIA_INPUTS],
   ]
   for (const [group, bodies] of groups) {
     for (const [name, body] of Object.entries(bodies)) {
       sources.push({ name: `${group}-${name}`, html: J(body) })
     }
   }
-  for (const [name, script] of Object.entries(COMMAND_FIXTURES)) {
+  for (const [name, script] of Object.entries({
+    ...COMMAND_FIXTURES,
+    ...MEDIA_COMMAND_FIXTURES,
+  })) {
     load(COMMAND_START)
     script(editor)
     sources.push({ name: `command-${name}`, html: save(editor.state.doc) })
+  }
+  for (const { name, kind, text } of youtubeFixtures()) {
+    if (kind === "code") {
+      sources.push({ name: `embed-${name}`, html: J(text) })
+    } else {
+      // The lone-URL paste rule, as a browser pastes a copied link.
+      load("<p></p>")
+      editor.commands.setTextSelection(1)
+      editor.view.dom.dispatchEvent(pasteEvent({ "text/plain": text }))
+      sources.push({ name: `embed-${name}`, html: save(editor.state.doc) })
+    }
   }
   return goldenFiles(sources)
 }

@@ -54,9 +54,9 @@ describe("readPolicy", () => {
     [
       "a newer policy version",
       (json) => {
-        json.policy_version = "content-v2"
+        json.policy_version = "content-v3"
       },
-      'policy_version is "content-v2", but this admin implements content-v1',
+      'policy_version is "content-v3", but this admin implements content-v2',
     ],
     [
       "a forbidden tag, in any case",
@@ -137,6 +137,35 @@ describe("readPolicy", () => {
       },
       'urls.embed.providers[0].query[0].value is "number"; expected one of digits, id',
     ],
+    [
+      "an embed id length that is not a positive integer",
+      (json) => {
+        at(json, "urls.embed.providers.0").id_length = 0
+      },
+      "urls.embed.providers[0].id_length must be a positive integer, not 0",
+    ],
+    [
+      "an embed id length of 11.5",
+      (json) => {
+        at(json, "urls.embed.providers.0").id_length = 11.5
+      },
+      "urls.embed.providers[0].id_length must be a positive integer, not 11.5",
+    ],
+    [
+      "a missing embed id length",
+      (json) => {
+        delete at(json, "urls.embed.providers.1").id_length
+      },
+      "urls.embed.providers[1].id_length must be a positive integer, not undefined",
+    ],
+    [
+      "a list-only id that is not a string",
+      (json) => {
+        at(json, "urls.embed.providers.0").list_only_id = true
+      },
+      "urls.embed.providers[0].list_only_id must be a string, not true",
+    ],
+
     [
       "a border keyword width that is not a number",
       (json) => {

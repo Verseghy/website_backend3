@@ -31,16 +31,21 @@
  * - `site-text-style.ts`: colour, highlight and `em` font size on `span`.
  * - `site-table.ts`: tables in content-v1's one shape, with the canonical
  *   cell declarations as cell attributes (rows 5-7).
+ * - `site-image.ts`, `youtube-embed.ts`, `padlet-embed.ts`: the image and
+ *   the two embeds, the `media` group, top level only (rows 8-10).
  *
- * Images, embeds, the paste extension and image uploads join this list as
- * their own modules (editor.md §4.3 rows 8-13).
+ * The paste extension and image uploads join this list as their own
+ * modules (editor.md §4.3 rows 11-13).
  */
 import type { AnyExtension } from "@tiptap/core"
-import { callOrReturn, getExtensionField, Node } from "@tiptap/core"
 import { StarterKit } from "@tiptap/starter-kit"
 
-import { createSiteDocument, MEDIA_GROUP } from "./extensions/site-document"
+import type { NotifyEditor } from "./extensions/editor-notice"
+import { IGNORE_NOTICES } from "./extensions/editor-notice"
+import { createPadletEmbed } from "./extensions/padlet-embed"
+import { SiteDocument } from "./extensions/site-document"
 import { SiteHeading } from "./extensions/site-heading"
+import { createSiteImage } from "./extensions/site-image"
 import { createSiteLink } from "./extensions/site-link"
 import {
   createSiteBulletList,
@@ -50,6 +55,7 @@ import { SiteSubscript, SiteSuperscript } from "./extensions/site-scripts"
 import { createSiteTable } from "./extensions/site-table"
 import { createSiteTextAlign } from "./extensions/site-text-align"
 import { createSiteTextStyle } from "./extensions/site-text-style"
+import { createYoutubeEmbed } from "./extensions/youtube-embed"
 import type { RichTextPolicy } from "./policy"
 
 export {
@@ -66,56 +72,21 @@ export interface SiteExtensionsOptions {
    */
   readonly policy: RichTextPolicy
   /**
-   * The nodes of the `media` group (editor.md §4.2): the image and embed
-   * nodes, legal only at the top level of the document. Each must be a
-   * node whose only group is `media`. Default: none, and the document holds
-   * blocks only (`site-document.ts` says why that is the same schema).
+   * Shows a notice of the editor to the staff member, by its `editor.*` key:
+   * the YouTube paste rule's dropped options and refused links (ADR 0043
+   * §4). Default: notices are not shown, as in a headless editor.
    */
-  readonly media?: readonly Node[]
-}
-
-/**
- * Checks that every media node is a node whose only group is `media`. A
- * node that is also a block would be legal inside quotes and list items,
- * which §4.2 forbids.
- */
-function checkMedia(
-  media: readonly unknown[]
-): asserts media is readonly Node[] {
-  media.forEach((extension, index) => {
-    if (!(extension instanceof Node)) {
-      throw new TypeError(
-        `siteExtensions: options.media[${index}] must be a TipTap Node (Node.create), not ${typeof extension}.`
-      )
-    }
-    // `group` may be a function of the node's options; getExtensionField
-    // binds it and callOrReturn calls it, as TipTap does when it builds the
-    // schema.
-    const group: unknown = callOrReturn(
-      getExtensionField(extension, "group", {
-        name: extension.name,
-        options: extension.options,
-        storage: extension.storage,
-      })
-    )
-    const groups =
-      typeof group === "string" ? group.split(/\s+/).filter(Boolean) : []
-    if (groups.length !== 1 || groups[0] !== MEDIA_GROUP) {
-      throw new TypeError(
-        `siteExtensions: media node "${extension.name}" has the group ${JSON.stringify(group ?? null)}; it must be exactly "${MEDIA_GROUP}", so that it is legal only at the top level (editor.md §4.2).`
-      )
-    }
-  })
+  readonly notify?: NotifyEditor
 }
 
 /**
  * The extensions of the site schema, for a TipTap `Editor` or `getSchema`.
  *
- * @param options - the policy and the media nodes; see
+ * @param options - the policy and the notice callback; see
  *   {@link SiteExtensionsOptions}.
  * @returns the extensions, in the order TipTap registers them.
- * @throws {TypeError} when `options` has no policy or a media node is not in
- *   the `media` group alone.
+ * @throws {TypeError} when `options` has no policy, or a `notify` that is
+ *   not a function.
  * @throws {PolicyError} when the policy lacks a rule the schema reads.
  */
 export function siteExtensions(options: SiteExtensionsOptions): AnyExtension[] {
@@ -124,9 +95,15 @@ export function siteExtensions(options: SiteExtensionsOptions): AnyExtension[] {
       "siteExtensions: options.policy is required; pass CONTENT_V1_POLICY from admin/src/rich-text/policy.ts."
     )
   }
+  // Checked here, because the paste rule calls it only later, inside a
+  // transaction, where a wrong value would fail with a bare "not a function".
+  if (options.notify !== undefined && typeof options.notify !== "function") {
+    throw new TypeError(
+      `siteExtensions: options.notify must be a function that takes an editor.* message key, or left out; got ${options.notify === null ? "null" : typeof options.notify}.`
+    )
+  }
   const { policy } = options
-  const media = options.media ?? []
-  checkMedia(media)
+  const notify = options.notify ?? IGNORE_NOTICES
   return [
     StarterKit.configure({
       document: false,
@@ -138,7 +115,7 @@ export function siteExtensions(options: SiteExtensionsOptions): AnyExtension[] {
       trailingNode: false,
       heading: false,
     }),
-    createSiteDocument(media.length > 0),
+    SiteDocument,
     SiteHeading,
     createSiteBulletList(policy),
     createSiteOrderedList(policy),
@@ -148,6 +125,8 @@ export function siteExtensions(options: SiteExtensionsOptions): AnyExtension[] {
     SiteSuperscript,
     ...createSiteTextStyle(policy),
     ...createSiteTable(policy),
-    ...media,
+    createSiteImage(policy),
+    createYoutubeEmbed(policy, notify),
+    createPadletEmbed(policy),
   ]
 }

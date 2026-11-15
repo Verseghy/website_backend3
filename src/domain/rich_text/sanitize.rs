@@ -449,9 +449,9 @@ mod tests {
         .expect("converges")
     }
 
-    const YOUTUBE: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/VIDEOID?start=30" width="640" height="360" title="Videó" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
+    const YOUTUBE: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30" width="640" height="360" title="Videó" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
     const LINK: &str = r#"<p><a href="https://example.org/" target="_blank" rel="noopener noreferrer">link</a></p>"#;
-    const YOUTUBE_STYLED: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/VIDEOID?start=30" width="640" height="360" title="Videó" style="aspect-ratio: 16 / 9; height: auto; max-width: 640px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
+    const YOUTUBE_STYLED: &str = r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30" width="640" height="360" title="Videó" style="aspect-ratio: 16 / 9; height: auto; max-width: 640px; min-height: 200px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
     const PADLET_STYLED: &str = r#"<p data-padlet-embed=""><iframe src="https://padlet.com/embed/KEY" width="100%" height="608" title="Padlet" style="height: 608px; width: 100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"></iframe></p>"#;
     /// The `style` the structural pass gives an `img` that has none: the
     /// locked declarations, as the grammar writes them for an empty style.
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn swap_remove_reorders_only_when_the_filter_drops() {
         let foreign = YOUTUBE.replace(
-            "https://www.youtube-nocookie.com/embed/VIDEOID?start=30",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30",
             "https://evil.example/embed/x",
         );
         // The filter drops `src` (index 0); `swap_remove` moves the last
@@ -1408,7 +1408,7 @@ mod tests {
         "javascript:alert(1)",
         "//evil.example/x",
         "/storage/x.svg",
-        "https://www.youtube-nocookie.com/embed/abc?start=3",
+        "https://www.youtube-nocookie.com/embed/AbCdEfGhIjK?start=3",
         "https://padlet.com/embed/k",
         "https://evil.example/embed/x",
         "mailto:a@b.example",
@@ -1435,8 +1435,10 @@ mod tests {
         "/storage/uploads/a.jpg", "/storage/uploads/../x.jpg", "/storage/uploads/a%2F..%2Fb.jpg",
         "https://verseghy-gimnazium.net/storage/uploads/b.png", "https://evil.example/a.jpg",
         "data:image/png;base64,AA", "blob:x", "javascript:x", "//evil.example/a.jpg", "a.jpg",
-        "https://www.youtube-nocookie.com/embed/abc?start=3", "https://padlet.com/embed/k",
-        "http://www.youtube.com/embed/x", "", " /storage/uploads/a.jpg", "/storage/uploads/a.txt",
+        "https://www.youtube-nocookie.com/embed/AbCdEfGhIjK?start=3", "https://padlet.com/embed/k",
+        "http://www.youtube.com/embed/AbCdEfGhIjK", "https://www.youtube.com/embed/abc",
+        "https://www.youtube.com/embed/videoseries?list=PL1", "https://www.youtube.com/embed/videoseries",
+        "", " /storage/uploads/a.jpg", "/storage/uploads/a.txt",
         "//evil.example/x", "/\\evil.example/x", "\\\\evil.example/x", "/\t/evil.example/x",
         "#top", "?q=1", "../x", "x/y", "https://example.org/", "mailto:a@b.example",
         "https://verseghy-gimnazium.net/storage/uploads/doc.pdf", "/storage/uploads/doc.pdf",

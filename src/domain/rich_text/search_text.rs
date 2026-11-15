@@ -392,7 +392,7 @@ mod tests {
             r#"<p>Szöveg <strong>félkövér</strong>, <span style="color: #c00000; font-size: 1.25em">piros és nagy</span>.</p>"#,
             r#"<ol start="5" type="a"><li>első</li><li><p>két</p><p>bekezdés</p></li></ol>"#,
             r#"<p><img src="/storage/uploads/posts/612/kep.jpg" alt="A díjazottak a színpadon" width="350" height="495"></p>"#,
-            r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/VIDEOID?start=30" width="640" height="360" title="Videó"></iframe></p>"#,
+            r#"<p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30" width="640" height="360" title="Videó"></iframe></p>"#,
             "<p>két\u{a0} szóköz</p>",
         );
         assert_eq!(

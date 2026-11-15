@@ -22,8 +22,14 @@
  */
 import policyJson from "./policy.json"
 
-/** The dialect this admin implements (editor.md §3, `POLICY_VERSION`). */
-export const POLICY_VERSION = "content-v1"
+/**
+ * The dialect this admin implements (editor.md §3, `POLICY_VERSION`).
+ * `content-v2` adds ADR 0043's YouTube rules (an 11-character video id,
+ * `videoseries` only with `list`, the locked `min-height: 200px`) and keeps
+ * the empty first paragraph of editor.md §3.7 (item D148); `policy.rs` says
+ * the same.
+ */
+export const POLICY_VERSION = "content-v2"
 
 /** How an attribute's value is checked (editor.md §3.2, §3.9). */
 export type AttributeValueRule =
@@ -125,6 +131,19 @@ export interface EmbedProvider {
   readonly hosts: readonly string[]
   /** The path before the embed id. */
   readonly path_prefix: string
+  /**
+   * The exact length of an id, or `null` for any length of at least one
+   * character (`11` for a YouTube video, ADR 0043 §3, D132).
+   * {@link EmbedProvider.list_only_id} is exempt.
+   */
+  readonly id_length: number | null
+  /**
+   * The literal id that is a path only together with `list`, whatever its
+   * length: YouTube's `videoseries`, a whole playlist (ADR 0043 §3, D129);
+   * `null` when the provider has none.
+   */
+  readonly list_only_id: string | null
+
   /** The query parameters it may carry, in the order they must appear. */
   readonly query: readonly {
     readonly name: string
@@ -223,6 +242,13 @@ function nonNegative(value: unknown, path: string): number {
     fail(path, `must be a non-negative number, not ${show(value)}`)
   }
   return value
+}
+
+function positiveInteger(value: unknown, path: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    fail(path, `must be a positive integer, not ${show(value)}`)
+  }
+  return value as number
 }
 
 function boolean(value: unknown, path: string): boolean {
@@ -439,6 +465,16 @@ function urls(value: unknown, path: string): UrlPolicy {
         return {
           hosts: strings(provider.hosts, `${p}.hosts`),
           path_prefix: string(provider.path_prefix, `${p}.path_prefix`),
+          id_length: nullable(
+            provider.id_length,
+            `${p}.id_length`,
+            positiveInteger
+          ),
+          list_only_id: nullable(
+            provider.list_only_id,
+            `${p}.list_only_id`,
+            string
+          ),
           query: array(provider.query, `${p}.query`, (q, qp) => {
             const parameter = object(q, qp)
             return {
@@ -630,7 +666,7 @@ export function requireStyleGrammar<K extends StyleGrammarKind>(
   tag: string,
   property: string,
   kind: K
-): Extract<StyleGrammar, { readonly kind: K }> {
+): StyleGrammar & { readonly kind: K } {
   const rule = styleRuleOf(policy, tag, property)
   if (
     rule === undefined ||
@@ -641,7 +677,7 @@ export function requireStyleGrammar<K extends StyleGrammarKind>(
       `The policy has no stored ${property} on ${tag} with a ${kind} grammar (editor.md §3.3), which the code built on it reads; found ${show(rule ?? null)}.`
     )
   }
-  return rule.grammar as Extract<StyleGrammar, { readonly kind: K }>
+  return rule.grammar as StyleGrammar & { readonly kind: K }
 }
 
 /**

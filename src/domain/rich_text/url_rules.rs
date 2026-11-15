@@ -161,9 +161,15 @@ pub fn decoded_segments_are_plain(path: &str) -> bool {
 ///
 /// Accepted: an `https` URL with no user info, port or fragment, whose host
 /// is exactly one of a provider's hosts, whose path is the provider's prefix
-/// followed by an id of `[A-Za-z0-9_-]+`, and whose query follows the
-/// provider's [`EmbedQuery`]. The result is the `url` crate's serialisation,
-/// so an upper-case host comes back lower-case.
+/// followed by an id, and whose query follows the provider's [`EmbedQuery`].
+/// The id is one or more characters of `[A-Za-z0-9_-]`, exactly
+/// [`EmbedProvider::id_length`] of them when the provider sets a length
+/// (11 for a `YouTube` video), or the provider's
+/// [`EmbedProvider::list_only_id`] (`videoseries`), which is accepted only
+/// when the query carries `list` (editor.md §3.6; ADR 0043 §3, items D129
+/// and D132). Any other parameter, `listType` included, is refused, because
+/// the editor maps the one `listType` form it keeps. The result is the `url`
+/// crate's serialisation, so an upper-case host comes back lower-case.
 ///
 /// - `policy`: supplies the embed providers.
 /// - `value`: the attribute value.
@@ -181,12 +187,17 @@ pub fn embed_src(policy: &SanitizePolicy, value: &str) -> Option<String> {
         .iter()
         .find(|p| p.hosts.iter().any(|h| h == host))?;
     let id = url.path().strip_prefix(provider.path_prefix.as_str())?;
-    let query_ok = match (provider.query, url.query()) {
-        (_, None) => true,
-        (EmbedQuery::None, Some(_)) => false,
-        (EmbedQuery::StartAndList, Some(query)) => is_start_and_list(query),
+    let has_list = match (provider.query, url.query()) {
+        (_, None) => false,
+        (EmbedQuery::None, Some(_)) => return None,
+        (EmbedQuery::StartAndList, Some(query)) => start_and_list(query)?,
     };
-    (is_embed_id(id) && query_ok).then(|| url.as_str().to_owned())
+    let id_ok = if provider.list_only_id.as_deref() == Some(id) {
+        has_list
+    } else {
+        is_embed_id(id) && provider.id_length.is_none_or(|length| id.len() == length)
+    };
+    id_ok.then(|| url.as_str().to_owned())
 }
 
 /// The `a[href]` rule beyond the scheme list and [`same_origin_relative`]:
@@ -291,8 +302,9 @@ fn is_embed_id(id: &str) -> bool {
             .all(|b| EMBED_ID_ALPHABET.as_bytes().contains(&b))
 }
 
-/// `start=<digits>`, `list=<id>`, or both in that order.
-fn is_start_and_list(query: &str) -> bool {
+/// Reads a query of `start=<digits>`, `list=<id>`, or both in that order:
+/// whether it carries `list`, or `None` when it is not such a query.
+fn start_and_list(query: &str) -> Option<bool> {
     let start_ok = |param: &str| {
         param
             .strip_prefix("start=")
@@ -300,8 +312,9 @@ fn is_start_and_list(query: &str) -> bool {
     };
     let list_ok = |param: &str| param.strip_prefix("list=").is_some_and(is_embed_id);
     match query.split_once('&') {
-        None => start_ok(query) || list_ok(query),
-        Some((start, list)) => start_ok(start) && list_ok(list),
+        None if start_ok(query) => Some(false),
+        None => list_ok(query).then_some(true),
+        Some((start, list)) => (start_ok(start) && list_ok(list)).then_some(true),
     }
 }
 
@@ -567,18 +580,24 @@ mod tests {
             );
         };
         for url in [
-            "https://www.youtube-nocookie.com/embed/VIDEOID",
-            "https://www.youtube-nocookie.com/embed/VIDEOID?start=30",
-            "https://www.youtube-nocookie.com/embed/VIDEOID?list=PLa_b-1",
-            "https://www.youtube-nocookie.com/embed/VIDEOID?start=0&list=PL1",
-            "https://www.youtube.com/embed/a-b_C9",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?list=PLa_b-1",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=0&list=PL1",
+            "https://www.youtube.com/embed/a-b_C9d-E_f",
+            // A whole playlist (ADR 0043, D129).
+            "https://www.youtube-nocookie.com/embed/videoseries?list=PLMOZDTW7ZvXM",
+            "https://www.youtube.com/embed/videoseries?start=5&list=PL1",
+            // Padlet keys keep any length.
             "https://padlet.com/embed/KEY123",
+            "https://padlet.com/embed/k",
+            "https://padlet.com/embed/bbcgkx6oq8valf3lbbcgkx6oq8valf3l",
         ] {
             accept(url, url);
         }
         accept(
-            "https://WWW.YouTube-NoCookie.com/embed/x",
-            "https://www.youtube-nocookie.com/embed/x",
+            "https://WWW.YouTube-NoCookie.com/embed/AbCdEfGhIjK",
+            "https://www.youtube-nocookie.com/embed/AbCdEfGhIjK",
         );
         accept(
             "https://padlet.com:443/embed/k",
@@ -589,32 +608,71 @@ mod tests {
     #[test]
     fn embed_src_rejects_everything_else() {
         for value in [
-            "http://www.youtube-nocookie.com/embed/x",
-            "https://youtube.com/embed/x",
-            "https://m.youtube.com/embed/x",
-            "https://www.youtube.com.evil.example/embed/x",
-            "https://www.youtube.com./embed/x",
-            "https://www.youtube.com@evil.example/embed/x",
-            "https://evil@www.youtube.com/embed/x",
-            "https://www.youtube.com:8443/embed/x",
+            "http://www.youtube-nocookie.com/embed/AbCdEfGhIjK",
+            "https://youtube.com/embed/AbCdEfGhIjK",
+            "https://m.youtube.com/embed/AbCdEfGhIjK",
+            "https://www.youtube.com.evil.example/embed/AbCdEfGhIjK",
+            "https://www.youtube.com./embed/AbCdEfGhIjK",
+            "https://www.youtube.com@evil.example/embed/AbCdEfGhIjK",
+            "https://evil@www.youtube.com/embed/AbCdEfGhIjK",
+            "https://www.youtube.com:8443/embed/AbCdEfGhIjK",
             "https://www.youtube.com/embed/",
-            "https://www.youtube.com/embed/a/b",
-            "https://www.youtube.com/embed/a%20b",
-            "https://www.youtube.com/watch?v=x",
-            "https://www.youtube.com/embed/x?si=abc",
-            "https://www.youtube.com/embed/x?list=a&start=1",
-            "https://www.youtube.com/embed/x?start=",
-            "https://www.youtube.com/embed/x?start=-1",
-            "https://www.youtube.com/embed/x?start=1&list=a&rel=0",
-            "https://www.youtube.com/embed/x?",
-            "https://www.youtube.com/embed/x#t=1",
+            "https://www.youtube.com/embed/AbCdEfGhIjK/b",
+            "https://www.youtube.com/embed/AbCdEfGh%20jK",
+            "https://www.youtube.com/watch?v=AbCdEfGhIjK",
+            "https://www.youtube.com/embed/AbCdEfGhIjK?si=abc",
+            "https://www.youtube.com/embed/AbCdEfGhIjK?list=a&start=1",
+            "https://www.youtube.com/embed/AbCdEfGhIjK?start=",
+            "https://www.youtube.com/embed/AbCdEfGhIjK?start=-1",
+            "https://www.youtube.com/embed/AbCdEfGhIjK?start=1&list=a&rel=0",
+            "https://www.youtube.com/embed/AbCdEfGhIjK?",
+            "https://www.youtube.com/embed/AbCdEfGhIjK#t=1",
+            // A video id of any other length than 11 (ADR 0043, D132).
+            "https://www.youtube.com/embed/x",
+            "https://www.youtube.com/embed/abc",
+            "https://www.youtube.com/embed/AbCdEfGhIj",
+            "https://www.youtube.com/embed/AbCdEfGhIjKl",
+            "https://www.youtube-nocookie.com/embed/AbCdEfGhIjKlmnopqrst?list=PL1",
+            // `videoseries` only together with `list` (D129).
+            "https://www.youtube.com/embed/videoseries",
+            "https://www.youtube.com/embed/videoseries?start=5",
+            // `listType` is never accepted: the editor maps it.
+            "https://www.youtube.com/embed?listType=playlist&list=PLC77007E23FF423C6",
+            "https://www.youtube.com/embed/?listType=playlist&list=PL1",
+            "https://www.youtube.com/embed/videoseries?listType=playlist&list=PL1",
+            "https://www.youtube.com/embed/AbCdEfGhIjK?listType=user_uploads&list=x",
             "https://padlet.com/embed/k?x=1",
-            "https://evil.example/embed/x",
-            "/embed/x",
+            "https://padlet.com/embed/videoseries?list=PL1",
+            "https://evil.example/embed/AbCdEfGhIjK",
+            "/embed/AbCdEfGhIjK",
             "javascript:alert(1)",
         ] {
             assert_eq!(embed_src(&policy(), value), None, "{value}");
         }
+    }
+
+    #[test]
+    fn embed_src_follows_the_provider_id_rules() {
+        let mut policy = policy();
+        policy.embed_providers[0].id_length = None;
+        assert!(embed_src(&policy, "https://www.youtube.com/embed/x").is_some());
+        policy.embed_providers[0].list_only_id = None;
+        assert!(
+            embed_src(&policy, "https://www.youtube.com/embed/videoseries").is_some(),
+            "without a list-only id, videoseries is an ordinary id"
+        );
+        policy.embed_providers[1].id_length = Some(3);
+        assert!(embed_src(&policy, "https://padlet.com/embed/abc").is_some());
+        assert!(embed_src(&policy, "https://padlet.com/embed/abcd").is_none());
+        // The list-only id is matched exactly: `Videoseries` is an ordinary
+        // 11-character id.
+        assert!(
+            embed_src(
+                &SanitizePolicy::content_v1(),
+                "https://www.youtube.com/embed/Videoseries"
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -727,10 +785,24 @@ mod tests {
                 (None, Some(l)) => format!("?list={l}"),
                 (Some(s), Some(l)) => format!("?start={s}&list={l}"),
             };
+            // A YouTube video id is kept exactly when it has 11 characters,
+            // and `videoseries` exactly when there is a list (ADR 0043).
             let url = format!("https://www.youtube-nocookie.com/embed/{id}{query}");
-            prop_assert_eq!(embed_src(&policy(), &url), Some(url.clone()));
+            let kept = if id == "videoseries" { list.is_some() } else { id.len() == 11 };
+            prop_assert_eq!(embed_src(&policy(), &url), kept.then(|| url.clone()));
+            let playlist = format!("https://www.youtube.com/embed/videoseries{query}");
+            prop_assert_eq!(embed_src(&policy(), &playlist), list.is_some().then(|| playlist.clone()));
             let padlet = format!("https://padlet.com/embed/{id}{query}");
             prop_assert_eq!(embed_src(&policy(), &padlet).is_some(), query.is_empty());
+        }
+
+        #[test]
+        fn eleven_character_video_ids_are_kept(id in "[A-Za-z0-9_-]{11}", start in proptest::option::of(0u32..100_000)) {
+            let query = start.map_or_else(String::new, |s| format!("?start={s}"));
+            for host in ["www.youtube.com", "www.youtube-nocookie.com"] {
+                let url = format!("https://{host}/embed/{id}{query}");
+                prop_assert_eq!(embed_src(&policy(), &url), Some(url.clone()));
+            }
         }
 
         #[test]

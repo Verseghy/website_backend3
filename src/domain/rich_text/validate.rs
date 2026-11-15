@@ -665,7 +665,7 @@ mod tests {
     use std::fmt::Write as _;
 
     const GOOD_IMAGE: &str = "/storage/uploads/posts/1/kep.jpg";
-    const YOUTUBE: &str = "https://www.youtube-nocookie.com/embed/VIDEOID";
+    const YOUTUBE: &str = "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ";
 
     fn sanitizer() -> Sanitizer {
         Sanitizer::new(SanitizePolicy::content_v1()).expect("content-v1 is a valid policy")
@@ -1273,7 +1273,13 @@ mod tests {
         Source::Good(YOUTUBE, YOUTUBE),
         Source::Good("https://padlet.com/embed/k", "https://padlet.com/embed/k"),
         Source::Bad("https://evil.example/embed/x"),
-        Source::Bad("http://www.youtube.com/embed/x"),
+        Source::Bad("http://www.youtube.com/embed/AbCdEfGhIjK"),
+        Source::Bad("https://www.youtube.com/embed/abc"),
+        Source::Bad("https://www.youtube.com/embed/videoseries"),
+        Source::Good(
+            "https://www.youtube.com/embed/videoseries?list=PL1",
+            "https://www.youtube.com/embed/videoseries?list=PL1",
+        ),
         Source::Missing,
     ];
 
