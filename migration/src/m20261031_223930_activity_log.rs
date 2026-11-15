@@ -82,9 +82,10 @@
 //!   with the transaction; set inside a savepoint, it lasts until the
 //!   outermost transaction ends, unless the savepoint is rolled back. A
 //!   custom setting needs a dotted name, and any role may set one; the
-//!   `revisions` table will check the same flag. The triggers read only the
-//!   value, so they cannot tell `SET LOCAL` from a session-wide `SET`: the
-//!   model never issues the latter, and even then the flag lets nothing
+//!   `DELETE` trigger of `revisions` checks the same flag
+//!   (`m20261101_012003_revisions`). The triggers read only the value, so
+//!   they cannot tell `SET LOCAL` from a session-wide `SET`: the model never
+//!   issues the latter, and even then the flag lets nothing of this table
 //!   through but clearing an address.
 //!
 //! Removing a trigger takes a migration, which is a reviewed PR. The trigger

@@ -404,8 +404,10 @@ pub fn check_entry(shape: &EntryShape<'_>) -> Result<(), EntryError> {
 }
 
 /// Whether `name` starts with a lowercase ASCII letter and holds only
-/// lowercase ASCII letters, digits and underscores.
-fn is_snake_case(name: &str) -> bool {
+/// lowercase ASCII letters, digits and underscores. `revision` checks
+/// entity types and snapshot field names with it too, so the two modules
+/// agree on what a resource name is.
+pub(super) fn is_snake_case(name: &str) -> bool {
     let mut characters = name.chars();
     characters
         .next()

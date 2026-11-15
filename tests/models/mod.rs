@@ -2,5 +2,7 @@
 
 mod activity_log;
 mod job_queue;
+mod revisions;
+mod safety_net;
 mod task_lock;
 mod users;
