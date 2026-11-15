@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, a queue worker, or an admin API route with its requirement. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, a queue worker, an admin API route with its requirement, or an admin list endpoint (paging, sorting, filtering). Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its ten repeated tasks. They sit on
+These recipes are backend3's way of doing its eleven repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -140,7 +140,8 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    decide with its cursor.
 7. **Admin API**: thin handlers in `src/controllers/admin/<name>.rs`, each
    mounted by one entry of the admin route table with its requirement
-   (deny by default, ADR 0007 sections 4-5): recipe 10. Errors use the
+   (deny by default, ADR 0007 sections 4-5): recipe 10; a list and its
+   record follow the shared list contract: recipe 11. Errors use the
    envelope and `ErrorCode` of ADR 0021 section 4
    (`controllers::admin::error_response`).
    A handler that reads a JSON body takes `Result<Json<T>, JsonRejection>`
@@ -1111,11 +1112,12 @@ outside the table; its documentation lists what a text check cannot see.
      `tests/requests/admin_routes.rs` in the same PR, with its ADR.
    An ADR 0007 section 4 row that reads "or" (the labels and authors
    pickers that `edit posts` may read, the page picker of `edit menu`)
-   needs a new `Requirement` variant in `src/domain/authz.rs`, with its
-   unit tests and properties, in the slice that mounts the first such
-   route. Only routes take it: the access row of step 6 asks for the
-   resource's own permission alone (research: DECISIONS R35 (D153)). Then
-   chain what the route needs:
+   is `Requirement::AnyPermission(&[...])`: the account needs one of the
+   listed permissions, and an empty list lets nobody in. The labels'
+   reads use it first (`controllers::admin::labels::READ`). Only routes
+   take it: the access row of step 6 asks for the resource's own
+   permission alone (research: DECISIONS R35 (D153)). Then chain what the
+   route needs:
    - `.upload()` for a route that receives a file (128 MiB instead of the
      JSON routes' 4 MiB, ADR 0015 section 6);
    - `.accepting::<AdminOrPasswordChange>()` only for the three routes
@@ -1210,18 +1212,20 @@ outside the table; its documentation lists what a text check cannot see.
    row asks only for the resource's own permission, also where ADR 0007
    section 4 reads "or" (the labels and authors that `edit posts` may read
    for the post form's pickers, the pages that `edit menu` may read): the
-   other permission goes on the routes the picker calls, with the new
-   `Requirement` variant of step 2, never into the row, so every rule
+   other permission goes on the routes the picker calls, whose
+   `AnyPermission` of step 2 lets it in, never into the row, so every rule
    stays a list that needs all of its requirements. Asked whether such a
    row asks only for the resource's own permission or carries the "or"
    too, so that an account that holds only the picker's permission also
    sees the list screen and is offered the resource's `history`, the
    maintainer answered "The row asks for the resource's own permission;
    the "or" stays on the routes" on 2026-11-15 (research: DECISIONS R35
-   (D153)). An account with `edit posts` alone therefore still gets the
-   post form's picker (ra-core's reference inputs never ask `canAccess`),
-   but not the „Címkék” sidebar entry, the labels list (its address opens
-   the access-denied page) or the labels' `history`. The module's
+   (D153)). The labels' row is the first such row: an account with
+   `edit posts` alone still gets the post form's picker (ra-core's
+   reference inputs never ask `canAccess`), but not the „Címkék” sidebar
+   entry, the labels list (its address opens the access-denied page) or
+   the labels' `history`, which, added later, asks for what `list` asks
+   for. The module's
    tests refuse a row that names a resource twice, lists an action twice
    or without a requirement, makes an action public, lets anything but the
    `admin` role purge, or gives `history` other requirements than `list`.
@@ -1245,3 +1249,80 @@ outside the table; its documentation lists what a text check cannot see.
    into the case table's Rust dispatcher (`record_rule_allows`), into
    `RECORD_RULES` of `admin/src/auth/access.ts`, and into cases with a
    record, which `admin/src/auth/authz-cases.test.ts` requires.
+
+---
+
+## 11. Add an admin list endpoint (the list contract)
+
+Every admin resource is listed through one contract, which the labels
+settled first (parity SHR-02, SHR-03; ADR 0005, ADR 0020 §4): ra-core's list
+screens, its pickers and its `getMany` all call
+`GET /api/admin/<resource>` with the same query parameters and get the same
+answer. The record of a resource is `GET /api/admin/<resource>/{id}`.
+
+1. **The spec** in the resource's domain module
+   (`src/domain/<resource>.rs`): a `domain::list_query::ListSpec` constant,
+   as `domain::labels::LIST`. Its `sort_keys` are the allow-list of `sort`:
+   one `SortKey` per field a column header may sort, named as the DTO
+   serialises the field (ra-core sorts on record fields), with
+   `SortKey::text` for a text column (sorted `COLLATE hu_icu`, ADR 0020 §4)
+   and `SortKey::plain` for an id, a number or an instant. It must have a key
+   on `id`, which ra-core sorts on when a screen sets none. Give the
+   resource's default order (`default_sort`, `default_direction`), and its
+   `filters` (`FilterKind::Ids` on `id` for ra-core's `getMany`; an id list
+   on a foreign key, such as `author_id`, for a `getManyReference`). A unit
+   test asserts `LIST.problems()` is empty, and the spec's own tests pin the
+   default order and the sortable fields.
+2. **What the contract fixes** (`src/domain/list_query.rs`, never per
+   resource): `page` from 1, `perPage` one of 10, 25, 50 and 100 (default 25,
+   no "all"), `sort` and `order` (`ASC` or `DESC`) at most once each, every
+   other parameter a filter of the spec, and the order `sort`, then `id`
+   as the tie-break. The tie-break is `id` descending whatever the sort's
+   direction (none after a sort on `id`), as SHR-03 says and as the
+   maintainer answered on 2026-11-15 (research: DECISIONS R37 (D157)), so
+   ADR 0020 §4 reads `<column> COLLATE hu_icu, id DESC` for admin lists;
+   it is `TIE_BREAK`, never a per-resource setting. An id-list filter
+   takes at most 100 ids and is paged like any other list, so `getMany`
+   and `getManyReference` send `perPage=100` with at most 100 ids per
+   request and split a larger set: without `perPage`, the answer
+   holds only the first 25 of them, although `total` counts them all. A
+   refusal is the first failing check in a fixed order, answered by
+   `dtos::admin::list::list_query_error_envelope` as a `422`
+   (`invalid_page`, `invalid_per_page`, `invalid_sort`,
+   `invalid_order`, `unknown_filter`, `invalid_filter`) whose `field` is the
+   parameter. A new kind of filter (the search term `q` of ADR 0020 §3, the
+   trash filter of ADR 0011 §8) is a `FilterKind` variant with its checks and
+   tests there, a `FilterValue` variant, and its SQL in
+   `models::list_page::filter`.
+3. **The model** (`src/models/<resource>.rs`): `Model::find_live()`, the
+   live-row helper (recipe 2 step 4), and `Model::list_live_page(db, &query)`,
+   which hands it to `models::list_page::fetch`: that applies the filters,
+   the order and the window, and reads the page and the total in one
+   read-only `REPEATABLE READ` snapshot, so it takes the pool, not a
+   transaction. `find_live_by_id` reads the record. The spec's columns are
+   resolved by name on the entity; a name it lacks is a `500`, which the
+   model tests catch.
+4. **The handlers** (`src/controllers/admin/<resource>.rs`): the list takes
+   axum's `RawQuery`, calls `domain::list_query::parse(&LIST, raw.as_deref())`,
+   answers a refusal with `envelope_response(list_query_error_envelope(&e))`
+   before any query, and answers
+   `ListResponse { data, total }` (`dtos::admin::list`) with the resource's
+   DTO as `data`'s rows. The record route takes
+   `Result<Path<String>, PathRejection>` and reads the id with
+   `domain::v1_params::id` (digits, 1 to 2^53 − 1): an id that cannot name a
+   row, a missing row and a trashed row all answer `404 not_found`, never
+   axum's plain-text `400`.
+5. **The routes** (recipe 10): both with the resource's read requirement
+   (`AnyPermission` when ADR 0007 §4 adds a picker), marked
+   `.serving("<resource>", &[AccessAction::List])` and
+   `&[AccessAction::Show]`, with the access row and its cases.
+6. **Tests**: the spec's unit tests; model tests for the live finders, the
+   order with the tie-break in both directions, the window and total, and
+   each filter, the `id` filter also with more than 25 ids at `perPage=100`
+   (`tests/models/labels.rs`, which also pins once that `list_page` reads
+   the page and the total in its snapshot); request tests for `401`, `403` (a
+   list the account may not see is never `[]`), the picker's permission,
+   paging, header sorts, the `id` filter, each `422` with its `field`, the
+   record's `404`s, and that trashed rows never show
+   (`tests/requests/admin_labels.rs`). A resource whose default order is by a
+   name or title also runs ADR 0020's ten-word order test.

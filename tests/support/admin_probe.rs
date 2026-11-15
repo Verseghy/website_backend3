@@ -1,8 +1,9 @@
 //! Helpers for the tests of the admin route table's guard (ADR 0007 §5).
 //!
-//! The admin API has no route yet that asks for a permission or the `admin`
-//! role, so the guard is tested on probe tables: routes that the tests
-//! declare with each kind of requirement, built by the same
+//! The application's routes do not carry every kind of requirement (no
+//! route asks for the `admin` role yet), so the guard is tested on probe
+//! tables: routes that the tests declare with each kind of requirement,
+//! built by the same
 //! `controllers::admin::routes::build` as the application's table and served
 //! through Loco's own middleware stack ([`probe_server`]). The accounts are
 //! invented and get their roles and extra grants straight in the tables

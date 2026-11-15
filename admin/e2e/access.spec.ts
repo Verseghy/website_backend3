@@ -9,15 +9,16 @@
  *
  * `authProvider.canAccess` answers from the access map without asking the
  * server, so the sidebar's questions add no request: the test counts the
- * admin API requests of a page load. While the server's access table
- * (`RESOURCE_ACCESS` in `src/domain/authz.rs`) has no row and the admin
- * registers no resource, the seed account's map is `{}` and the sidebar
- * holds only the dashboard, so the checks of the map's lists and of the
- * sidebar's resource links have nothing to check yet; they start to bite
- * with the first resource slice's row and screen. The redirect to the
- * access-denied page needs a resource and an account that may not list it,
- * which the seed does not create, so the test opens the pages directly;
- * `src/auth/AccessPages.test.tsx` drives the redirects through ra-core. The
+ * admin API requests of a page load. The server's access table
+ * (`RESOURCE_ACCESS` in `src/domain/authz.rs`) has the labels row, so the
+ * seed account's map is `{labels: ["list", "show"]}` and the check of the
+ * map's lists runs on it. The admin registers no resource yet, so the
+ * sidebar holds only the dashboard and the check of its resource links
+ * starts to bite when the labels screen registers its resource. The
+ * redirect to the access-denied page needs a resource and an account that
+ * may not list it, which the seed does not create, so the test opens the
+ * pages directly; `src/auth/AccessPages.test.tsx` drives the redirects
+ * through ra-core. The
  * 403 path (the Hungarian message, the refetch of `/auth/me`, the user kept
  * signed in) needs such an account too; the unit tests
  * (`src/data-provider/refusal.test.tsx`, `src/layout/sidebar-access.test.tsx`)

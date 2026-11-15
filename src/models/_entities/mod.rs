@@ -3,6 +3,7 @@
 pub mod prelude;
 
 pub mod activity_log;
+pub mod labels;
 pub mod revisions;
 pub mod roles;
 pub mod user_permissions;

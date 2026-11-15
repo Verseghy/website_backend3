@@ -10,6 +10,11 @@
 //! - [`activity_log`]: the append-only activity log (ADR 0011 §5).
 //! - [`job_queue`]: Loco's job queue table, read for `/metrics`; a model
 //!   module without an entity.
+//! - [`labels`]: the post labels (parity LBL-01), with the live-row finders
+//!   every read of them goes through (ADR 0011 §3).
+//! - [`list_page`]: one page of an admin list and its total, read in one
+//!   snapshot (the shared admin list contract); a model module without an
+//!   entity.
 //! - [`media`]: the uploads volume: an upload streamed to staging, optimised
 //!   and renamed into place (ADR 0015 §6, §7); a model module without an
 //!   entity.
@@ -43,6 +48,8 @@
 pub mod _entities;
 pub mod activity_log;
 pub mod job_queue;
+pub mod labels;
+pub mod list_page;
 pub mod media;
 pub mod owned_files;
 pub mod revisions;

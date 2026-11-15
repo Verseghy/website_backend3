@@ -439,10 +439,10 @@ async fn every_route_but_the_sign_in_steps_needs_a_signed_in_account() {
 
 #[tokio::test]
 async fn the_walk_over_the_table_refuses_each_scope_a_route_does_not_accept() {
-    // The application's table has no route yet that refuses a
-    // `password_change` session, so the same walk runs on the probe table,
-    // whose routes take every requirement and both scope sets: a guard that
-    // opened a route to a scope it does not accept fails here today.
+    // The same walk on the probe table, whose routes take every kind of
+    // requirement and both scope sets, so a guard that opened a route to a
+    // scope it does not accept fails here whatever the application's table
+    // holds.
     with_app(|_router, ctx| async move {
         let tokens = RefusedTokens::new(&ctx).await;
         assert_every_guarded_route_needs_a_session(&probe(&ctx), probe_table(), &tokens).await;
@@ -530,6 +530,12 @@ fn probe_table() -> Vec<AdminRoute> {
             empty_list,
         ),
         AdminRoute::get("/probe/purge", Requirement::AdminRole, who),
+        // An "or" of ADR 0007 §4, as the label picker's.
+        AdminRoute::get(
+            "/probe/picker",
+            Requirement::AnyPermission(&[Permission::EditLabels, Permission::EditPosts]),
+            empty_list,
+        ),
         AdminRoute::get("/probe/own", Requirement::AnyActiveUser, who),
         AdminRoute::get(
             "/probe/own-or-new-password",
@@ -628,16 +634,28 @@ async fn each_requirement_admits_exactly_the_accounts_adr_0007_names() {
             account_with(&ctx, "minden@example.test", &[], &Permission::ALL, |_| {}).await;
         let admin = account_with(&ctx, "admin@example.test", &[Role::Admin], &[], |_| {}).await;
 
-        // (account, may list posts, may purge)
-        for (user, posts, purge) in [
-            (&nobody, false, false),
-            (&writer, true, false),
-            (&secretary, false, false),
-            (&granted, true, false),
+        let labels_only = account_with(
+            &ctx,
+            "cimkek@example.test",
+            &[Role::Secretary],
+            &[Permission::EditLabels],
+            |_| {},
+        )
+        .await;
+
+        // (account, may list posts, may purge, may use the picker)
+        for (user, posts, purge, picker) in [
+            (&nobody, false, false, false),
+            (&writer, true, false, true),
+            (&secretary, false, false, false),
+            // `edit posts` alone opens the picker, and so does
+            // `edit labels` alone.
+            (&granted, true, false, true),
+            (&labels_only, false, false, true),
             // ADR 0007 §2: every permission as an extra grant is not the
             // admin role.
-            (&every_grant, true, false),
-            (&admin, true, true),
+            (&every_grant, true, false, true),
+            (&admin, true, true, true),
         ] {
             let token = session_token(&ctx, user, SessionScope::Admin);
             let case = user.email.clone().unwrap_or_default();
@@ -657,6 +675,14 @@ async fn each_requirement_admits_exactly_the_accounts_adr_0007_names() {
                 assert_eq!(purge_answer.status_code(), StatusCode::OK, "{case}");
             } else {
                 assert_refused(&purge_answer, StatusCode::FORBIDDEN, &forbidden(), &case);
+            }
+
+            let picker_answer = get_with(&server, "/probe/picker", Some(&token)).await;
+            if picker {
+                assert_eq!(picker_answer.status_code(), StatusCode::OK, "{case}");
+                assert_eq!(picker_answer.json::<Value>(), json!([]), "{case}");
+            } else {
+                assert_refused(&picker_answer, StatusCode::FORBIDDEN, &forbidden(), &case);
             }
 
             // Any active user, whatever it holds; the session the handler

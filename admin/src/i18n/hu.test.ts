@@ -204,6 +204,14 @@ describe("hu.ts", () => {
       forbidden: [],
       origin_mismatch: [],
       ...UPLOAD_REFUSAL_PARAMS,
+      // The list contract's refusals name their parameter in `field` and
+      // send no params (src/dtos/admin/list.rs).
+      invalid_page: [],
+      invalid_per_page: [],
+      invalid_sort: [],
+      invalid_order: [],
+      unknown_filter: [],
+      invalid_filter: [],
     }
     const unknown = Object.entries(hu.errors).flatMap(([code, message]) =>
       placeholders(message)

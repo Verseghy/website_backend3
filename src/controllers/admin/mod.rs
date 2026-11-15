@@ -44,6 +44,7 @@ use crate::dtos::admin::error::{ErrorCode, ErrorEnvelope};
 
 pub mod auth;
 pub mod client_context;
+pub mod labels;
 pub mod media;
 pub mod origin;
 pub mod routes;
@@ -65,10 +66,21 @@ pub const JSON_BODY_LIMIT: usize = 4 * 1024 * 1024;
 /// - `code`: the error to report; its default English description is sent.
 #[must_use]
 pub fn error_response(code: ErrorCode) -> Response {
+    envelope_response(ErrorEnvelope::new(code))
+}
+
+/// `envelope` as the answer, with the status of its code (ADR 0021 §4):
+/// for an error that names its `field` or sends a description of its own,
+/// such as a refused list request (`crate::dtos::admin::list`).
+///
+/// - `envelope`: the error to report.
+#[must_use]
+pub fn envelope_response(envelope: ErrorEnvelope) -> Response {
     // Every status `ErrorCode::status` returns is a valid status code; the
     // fallback only guards against a mistake in that table.
-    let status = StatusCode::from_u16(code.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(ErrorEnvelope::new(code))).into_response()
+    let status =
+        StatusCode::from_u16(envelope.error.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, Json(envelope)).into_response()
 }
 
 /// The admin error envelope for a request body that axum's `Json` extractor
@@ -207,6 +219,19 @@ mod tests {
             send(Some("text/plain"), probe_body_of(LIMIT + 1)).await,
             envelope(ErrorCode::InvalidBody)
         );
+    }
+
+    #[tokio::test]
+    async fn an_envelope_response_sends_the_envelope_as_given_with_its_code_s_status() {
+        let envelope = ErrorEnvelope {
+            description: "perPage must appear at most once, as 10, 25, 50 or 100".to_owned(),
+            field: Some("perPage".to_owned()),
+            ..ErrorEnvelope::new(ErrorCode::InvalidPerPage)
+        };
+        let response = envelope_response(envelope.clone());
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = to_bytes(response.into_body(), 4096).await.expect("body");
+        assert_eq!(body, serde_json::to_vec(&envelope).expect("serializes"));
     }
 
     #[tokio::test]

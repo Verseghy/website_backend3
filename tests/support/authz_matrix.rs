@@ -172,20 +172,33 @@ impl MatrixSubject {
     ///
     /// Read from the account's definition: a public route and an
     /// own-account route admit every signed-in account; the `admin` role
-    /// only the admin (an extra grant never gives it, ADR 0007 §2); and a
+    /// only the admin (an extra grant never gives it, ADR 0007 §2); a
     /// permission the accounts whose role grants it (ADR 0007 §2's matrix)
-    /// or whose extra grants name it (§3).
+    /// or whose extra grants name it (§3); and an "or" of ADR 0007 §4
+    /// ([`Requirement::AnyPermission`], such as the labels' reads for the
+    /// post form's picker) the accounts that hold at least one of its
+    /// permissions in either way, so an empty list admits nobody.
     #[must_use]
     pub fn admits(self, requirement: Requirement) -> bool {
         match requirement {
             Requirement::Public | Requirement::AnyActiveUser => true,
             Requirement::AdminRole => self == Self::Role(Role::Admin),
-            Requirement::Permission(needed) => match self {
-                Self::Role(role) => role.permissions().contains(&needed),
-                Self::Nothing => false,
-                Self::Grant(granted) => granted == needed,
-                Self::AllBut(left_out) => left_out != needed,
-            },
+            Requirement::Permission(needed) => self.holds(needed),
+            Requirement::AnyPermission(any_of) => any_of.iter().any(|needed| self.holds(*needed)),
+        }
+    }
+
+    /// Whether the account holds `needed`, by its role (ADR 0007 §2's
+    /// matrix) or by its extra grants (§3), read from the account's
+    /// definition alone.
+    ///
+    /// - `needed`: the permission a requirement names.
+    fn holds(self, needed: Permission) -> bool {
+        match self {
+            Self::Role(role) => role.permissions().contains(&needed),
+            Self::Nothing => false,
+            Self::Grant(granted) => granted == needed,
+            Self::AllBut(left_out) => left_out != needed,
         }
     }
 
