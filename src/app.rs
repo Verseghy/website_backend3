@@ -14,9 +14,11 @@
 //!   there, the handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]:
 //!   the media settings and the file-owner registry, ADR 0011 §6), the
 //!   session limits ([`SessionLimits`]: the absolute limit of ADR 0006 §8),
-//!   which the sliding refresh of the admin session reads, and the admin
-//!   origin (`settings.admin_auth.origin`), which the admin route table's
-//!   guard reads for the `Origin` check of cookie-authenticated writes
+//!   which the sliding refresh of the admin session reads, the sign-in
+//!   rules ([`SignInRules`]: the short legacy password rule of ADR 0006 §6,
+//!   §8), which the two password sign-ins read, and the admin origin
+//!   (`settings.admin_auth.origin`), which the admin route table's guard
+//!   reads for the `Origin` check of cookie-authenticated writes
 //!   (ADR 0006 §3, ADR 0044). It checks the file-owner registry before
 //!   storing it and refuses to start on a name that is not a plain
 //!   identifier, because the worker writes the names into SQL.
@@ -114,7 +116,10 @@ use crate::tasks;
 use crate::{
     controllers::{
         self,
-        admin::{media::MediaUploads, origin::set_admin_origin, session::SessionLimits},
+        admin::{
+            auth::SignInRules, media::MediaUploads, origin::set_admin_origin,
+            session::SessionLimits,
+        },
         admin_ui::{self, DistRequirement},
         metrics::{self, HttpMetrics, Metrics, runtime::RuntimeMetrics},
         not_found, storage,
@@ -414,8 +419,9 @@ impl Hooks for App {
     /// handles ([`MediaUploads`]), one optimiser permit per process, and the
     /// handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]), whose
     /// file-owner registry it checks, the session limits that the sliding
-    /// refresh reads ([`SessionLimits`]), and the admin origin of
-    /// `settings.admin_auth.origin` ([`set_admin_origin`]).
+    /// refresh reads ([`SessionLimits`]), the rule of a short legacy
+    /// password that the sign-ins read ([`SignInRules`]), and the admin
+    /// origin of `settings.admin_auth.origin` ([`set_admin_origin`]).
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
         set_clock(&ctx, Arc::new(SystemClock));
         let mut registry = Registry::default();
@@ -440,6 +446,8 @@ impl Hooks for App {
         // The session refresh's absolute limit (ADR 0006 §1, §8), from the
         // same validated settings.
         ctx.shared_store.insert(SessionLimits::new(&settings));
+        // The password sign-ins' legacy password rule (ADR 0006 §6, §8).
+        ctx.shared_store.insert(SignInRules::new(&settings));
         // The admin origin, which the route table's guard compares with the
         // `Origin` of every cookie-authenticated write (ADR 0006 §3,
         // ADR 0044).

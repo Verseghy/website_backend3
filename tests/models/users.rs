@@ -1,5 +1,7 @@
 //! The `users` model (ADR 0006, ADR 0011): password hashing and the cost of
-//! every failed check, then, against PostgreSQL, the two finders, the `pid`
+//! every failed check, a legacy bcrypt hash included (the rest of the legacy
+//! path is `tests/models/legacy_passwords.rs`), then, against PostgreSQL,
+//! the two finders, the `pid`
 //! hook, a hash that round-trips through the table, `App::truncate`, which
 //! leaves the accounts and their roles and grants alone, sign-in and its
 //! cost, the session token, the session state the admin session check reads,
@@ -170,10 +172,20 @@ fn every_failure_without_an_argon2id_hash_costs_one_real_verification() {
         dummy_cost >= floor,
         "dummy {dummy_cost:?}, real {real_cost:?}"
     );
+    // A genuine legacy hash of another password, in the shape of every
+    // imported one ($2y$, cost 10), made here from an invented password: a
+    // wrong password costs its own bcrypt work (ADR 0006 §4).
+    let legacy_of_another = bcrypt::hash_with_result("another password", 10)
+        .expect("bcrypt hash")
+        .format_for_version(bcrypt::Version::TwoY);
     for stored in [
         None,
-        // Legacy bcrypt: verified only by the bcrypt step (ADR 0006 §4).
+        Some(legacy_of_another.as_str()),
+        // A bcrypt prefix on an invented value: it costs its bcrypt work if
+        // the bcrypt crate reads it, and the dummy's when the crate refuses
+        // it, as it refuses the second, which is too short.
         Some("$2y$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"),
+        Some("$2y$10$too-short"),
         Some(ARGON2I_OF_PASSWORD),
         Some(ARGON2D_OF_PASSWORD),
         // The password itself as plain text.
@@ -372,7 +384,7 @@ async fn seed_account_creates_an_active_account_that_signs_in() {
         // A fresh Argon2id hash, with the hasher's default cost.
         let hash = created.password_hash.as_deref().expect("hash");
         assert_eq!(phc_head(hash), ["", "argon2id", "v=19", "m=19456,t=2,p=1"]);
-        let signed_in = Model::authenticate(&ctx.db, "mag.proba@EXAMPLE.test", SEED.password)
+        let signed_in = Model::authenticate(&ctx.db, "mag.proba@EXAMPLE.test", SEED.password, true)
             .await
             .expect("authenticate");
         assert_eq!(signed_in.accepted().map(|user| user.id), Some(created.id));
@@ -534,11 +546,20 @@ async fn every_failed_sign_in_costs_what_a_wrong_password_costs() {
             })
             .await;
         }
+        // An imported account that never signed in: its legacy hash ($2y$,
+        // cost 10, of the invented PASSWORD) costs its bcrypt work.
+        let legacy = bcrypt::hash_with_result(PASSWORD, 10)
+            .expect("bcrypt hash")
+            .format_for_version(bcrypt::Version::TwoY);
+        insert(&ctx.db, "regi@example.test", |new| {
+            new.password_hash = ActiveValue::Set(Some(legacy));
+        })
+        .await;
         let cost = |email: &'static str| {
             let db = ctx.db.clone();
             async move {
                 let start = Instant::now();
-                let outcome = Model::authenticate(&db, email, "wrong password").await;
+                let outcome = Model::authenticate(&db, email, "wrong password", true).await;
                 assert_eq!(outcome.expect("query").accepted(), None);
                 start.elapsed()
             }
@@ -555,6 +576,7 @@ async fn every_failed_sign_in_costs_what_a_wrong_password_costs() {
             "inaktiv@example.test",
             "ketlepcsos@example.test",
             "csere@example.test",
+            "regi@example.test",
         ] {
             let failed = cost(email).await.min(cost(email).await);
             assert!(

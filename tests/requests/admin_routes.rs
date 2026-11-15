@@ -63,10 +63,14 @@ use crate::support::{
 };
 
 /// The routes allowed to be `Public`: the sign-in steps, which issue the
-/// session and so cannot ask for one (ADR 0006 §3, §4). The Bearer token
-/// endpoint, the two-factor step and the reset-link redemption join this
-/// list with their slices; nothing else ever does.
-const PUBLIC_ROUTES: [(&str, &str); 1] = [("POST", "/api/admin/auth/login")];
+/// session and so cannot ask for one (ADR 0006 §3, §4): the browser's
+/// sign-in and the scripts' Bearer token endpoint. The two-factor step and
+/// the reset-link redemption join this list with their slices; nothing else
+/// ever does.
+const PUBLIC_ROUTES: [(&str, &str); 2] = [
+    ("POST", "/api/admin/auth/login"),
+    ("POST", "/api/admin/auth/token"),
+];
 
 /// The routes allowed to accept a `password_change` session: those of
 /// ADR 0006 §4 that exist so far. `POST /auth/change-password` joins with
@@ -906,15 +910,21 @@ async fn a_handler_gets_a_session_only_from_the_guard() {
 
 #[tokio::test]
 async fn the_application_s_own_routes_keep_their_answers() {
-    // The three auth routes moved into the table: the sign-in still needs no
+    // The auth routes of the table: the two sign-ins still need no
     // session, and `me` and logout still answer 401 without one.
     with_server(|server, _ctx| async move {
-        let login = server
-            .post(&format!("{ADMIN_API_PREFIX}/auth/login"))
-            .json(&json!({ "email": "senki@example.test", "password": "rossz jelszó" }))
-            .await;
-        assert_eq!(login.status_code(), StatusCode::UNAUTHORIZED);
-        assert_eq!(login.json::<Value>()["error"], json!("invalid_credentials"));
+        for path in ["/auth/login", "/auth/token"] {
+            let sign_in = server
+                .post(&format!("{ADMIN_API_PREFIX}{path}"))
+                .json(&json!({ "email": "senki@example.test", "password": "rossz jelszó" }))
+                .await;
+            assert_eq!(sign_in.status_code(), StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(
+                sign_in.json::<Value>()["error"],
+                json!("invalid_credentials"),
+                "{path}"
+            );
+        }
         for (method, path) in [(Method::GET, "/auth/me"), (Method::POST, "/auth/logout")] {
             let response = server
                 .method(method.clone(), &format!("{ADMIN_API_PREFIX}{path}"))

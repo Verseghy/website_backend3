@@ -147,6 +147,9 @@ pub fn table() -> Vec<AdminRoute> {
         // The sign-in issues the session, so it cannot ask for one
         // (ADR 0006 §4).
         AdminRoute::post("/auth/login", Requirement::Public, auth::login),
+        // A script's sign-in: it issues the Bearer token, so it cannot ask
+        // for one either (ADR 0006 §3).
+        AdminRoute::post("/auth/token", Requirement::Public, auth::token),
         // The account's own data: any signed-in account, also one that must
         // first set a new password (ADR 0006 §4, ADR 0007 §7).
         AdminRoute::get("/auth/me", Requirement::AnyActiveUser, auth::me)

@@ -88,6 +88,11 @@ ADR 0005 (bindings) before changing anything here.
   `src/auth/auth-provider.ts` is the only code that talks to
   `/api/admin/auth`. The session is an `HttpOnly` cookie, so the admin never
   reads or stores a token: `checkAuth` and `getIdentity` ask `/auth/me`.
+  Never call `/auth/token`: it is the scripts' sign-in, and it answers the
+  token in the body, where page scripts could read it (ADR 0006 §3); its
+  bindings (`TokenRequest`, `TokenResponse`) exist only because every admin
+  API type has one (ADR 0005), and `src/auth/scripts-sign-in.test.ts` fails
+  on a source that names the path or imports them.
   `checkError` signs out on `401` only, never on `403`. Every page needs a
   session (`requireAuth` in `src/App.tsx`); the only page without one is the
   Hungarian sign-in screen `src/auth/SignInPage.tsx`, which replaces the
