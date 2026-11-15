@@ -518,6 +518,21 @@ export const hu = {
       "A JPEG kép szokatlan módon, több mint %{max_scans} részletben tárolja a képet. Nyisd meg egy képszerkesztőben, mentsd el újra, majd töltsd fel ismét!",
     insufficient_storage:
       "A szerveren nincs elég szabad hely, ezért a feltöltés nem sikerült. Szólj a rendszergazdának!",
+    // A list request the server's list contract refuses (`field` names the
+    // query parameter). The screens send only valid values, so these show
+    // up for a hand-edited or outdated address; each says what to do.
+    invalid_page:
+      "Az oldalszám érvénytelen. Lapozz vissza az első oldalra, és próbáld újra!",
+    invalid_per_page:
+      "Oldalanként csak 10, 25, 50 vagy 100 sor jeleníthető meg.",
+    invalid_sort:
+      "A lista nem rendezhető ezen oszlop szerint. Válassz egy másik oszlopot!",
+    invalid_order:
+      "A rendezés iránya érvénytelen. Kattints újra az oszlop fejlécére!",
+    unknown_filter:
+      "A lista nem szűrhető így. Töröld a szűrőket, és próbáld újra!",
+    invalid_filter:
+      "A szűrő értéke érvénytelen. Töröld a szűrőt, és próbáld újra!",
   } satisfies Record<ErrorCode, string>,
 } as const satisfies MessageTree
 

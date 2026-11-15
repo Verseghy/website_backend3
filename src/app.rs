@@ -98,6 +98,7 @@ use loco_rs::{
         AppRoutes,
         middleware::{self, MiddlewareLayer, MiddlewareStackExt as _},
     },
+    db::truncate_table,
     environment::Environment,
     task::Tasks,
 };
@@ -130,7 +131,10 @@ use crate::{
         database_target::{self, Connection},
         seed,
     },
-    models::users::{self, SeedOutcome},
+    models::{
+        labels,
+        users::{self, SeedOutcome},
+    },
     settings::{
         METRICS_BINDING_KEY, METRICS_PORT_KEY, MetricsSettings, Settings, check_session_jwt,
     },
@@ -615,7 +619,13 @@ impl Hooks for App {
     /// roles and grants, a state no operation produces. `roles` holds the
     /// four rows that only its migration writes, which nothing would put
     /// back (ADR 0007 §3).
-    async fn truncate(_ctx: &AppContext) -> Result<()> {
+    ///
+    /// The entity tables so far: `labels`. Their rows reference `users`
+    /// (the audit columns), which this leaves alone, and nothing references
+    /// them yet; a table that later references one (`post_labels`) is
+    /// emptied before it, by the slice that adds it.
+    async fn truncate(ctx: &AppContext) -> Result<()> {
+        truncate_table(&ctx.db, labels::Entity).await?;
         Ok(())
     }
 

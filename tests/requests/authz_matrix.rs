@@ -123,12 +123,19 @@ fn the_matrix_holds_each_role_no_role_each_grant_and_each_all_but_one_set() {
     assert_eq!(MatrixSubject::Nothing.to_string(), "no role and no grant");
 }
 
-/// Every requirement a route can declare.
+/// Every requirement a route can declare, with the "or" of ADR 0007 §4 as
+/// the labels' reads declare it, as one permission, across a role's edge
+/// (`edit posts` or `edit canteens`), and as the empty list that lets
+/// nobody in.
 fn requirements() -> Vec<Requirement> {
     [
         Requirement::Public,
         Requirement::AnyActiveUser,
         Requirement::AdminRole,
+        Requirement::AnyPermission(&[Permission::EditLabels, Permission::EditPosts]),
+        Requirement::AnyPermission(&[Permission::EditMenu]),
+        Requirement::AnyPermission(&[Permission::EditPosts, Permission::EditCanteens]),
+        Requirement::AnyPermission(&[]),
     ]
     .into_iter()
     .chain(Permission::ALL.into_iter().map(Requirement::Permission))
@@ -158,6 +165,17 @@ fn what_the_matrix_expects_follows_adr_0007() {
     // No role and no grant: only the own account and the public routes.
     assert!(Nothing.admits(Requirement::AnyActiveUser));
     assert!(Nothing.admits(Requirement::Public));
+    // ADR 0007 §4's "or": the labels' reads let in `edit labels` and, for
+    // the post form's picker, `edit posts`, but not a secretary; an empty
+    // list lets nobody in, the admin included.
+    let label_reads = Requirement::AnyPermission(&[Permission::EditLabels, Permission::EditPosts]);
+    assert!(Grant(Permission::EditPosts).admits(label_reads));
+    assert!(Grant(Permission::EditLabels).admits(label_reads));
+    assert!(!Grant(Permission::ViewLogs).admits(label_reads));
+    assert!(AllBut(Permission::EditLabels).admits(label_reads));
+    assert!(!MatrixSubject::Role(Role::Secretary).admits(label_reads));
+    assert!(!Nothing.admits(label_reads));
+    assert!(!MatrixSubject::Role(Role::Admin).admits(Requirement::AnyPermission(&[])));
     // The expectation, computed from the account's definition, agrees with
     // the guard's own check on every pair; the matrix walk then checks the
     // guard's whole path (grants stored, read, checked and answered).

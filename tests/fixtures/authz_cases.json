@@ -261,6 +261,66 @@
       "record": { "id": 3 },
       "access": [],
       "expected": false
+    },
+    {
+      "name": "a writer may list labels",
+      "permissions": [
+        "edit posts",
+        "edit labels",
+        "edit authors",
+        "manage media"
+      ],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "list",
+      "record": null,
+      "access": ["list", "show"],
+      "expected": true
+    },
+    {
+      "name": "edit labels alone shows a label",
+      "permissions": ["edit labels"],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "show",
+      "record": { "id": 7 },
+      "access": ["list", "show"],
+      "expected": true
+    },
+    {
+      "name": "edit posts alone reads labels only through the post form's picker, so no label screen is offered",
+      "permissions": ["edit posts"],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "list",
+      "record": null,
+      "access": [],
+      "expected": false
+    },
+    {
+      "name": "a secretary may not list labels",
+      "permissions": ["edit events", "edit canteens", "edit colleagues"],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "list",
+      "record": null,
+      "access": [],
+      "expected": false
+    },
+    {
+      "name": "the label writes are not offered before their routes exist",
+      "permissions": [
+        "edit posts",
+        "edit labels",
+        "edit authors",
+        "manage media"
+      ],
+      "is_admin": false,
+      "resource": "labels",
+      "action": "edit",
+      "record": { "id": 7 },
+      "access": ["list", "show"],
+      "expected": false
     }
   ]
 }

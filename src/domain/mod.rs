@@ -36,6 +36,8 @@ pub mod etag;
 pub mod http_metrics;
 pub mod image_optimise;
 pub mod import_mysql;
+pub mod labels;
+pub mod list_query;
 pub mod media_rules;
 pub mod normalise;
 pub mod origin;

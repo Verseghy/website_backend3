@@ -115,12 +115,14 @@ The collation gets its own name instead of relying on the predefined `hu-x-icu`,
 | Where | Order |
 |---|---|
 | Public colleagues list | `ORDER BY regexp_replace(name, '^Dr\. ', '') COLLATE hu_icu, id`: one leading `"Dr. "` is ignored, matched exactly and case-sensitively as backend2 does. The prefix is one constant in the code. The order no longer depends on which fields a client selects (backend2 sorted only when `name` was selected). |
-| Admin colleagues list | the same sort key, so editors see the public order |
-| Every other sort on a name or title | `ORDER BY <column> COLLATE hu_icu, id` for public and admin lists: labels, authors, dishes, page titles, users, and admin list sorts on any text column |
+| Admin colleagues list | the same sort key, so editors see the public order of the names, then `id DESC` as after every admin list sort: two colleagues whose names are equal once `"Dr. "` is removed are listed in the opposite order to the public site |
+| Every other sort on a name or title | `ORDER BY <column> COLLATE hu_icu, id` for public lists and `ORDER BY <column> COLLATE hu_icu, id DESC` for admin lists, whichever way the column is sorted: labels, authors, dishes, page titles, users, and admin list sorts on any text column |
 | Orders that are not by name | unchanged from the REST spec, for example posts by `date DESC, id DESC` and labels on a post by `id DESC` |
 | Sorting in the browser | admin option lists and other client-side sorts use `Intl.Collator('hu')` (ADR 0021), so client and server agree |
 
-`id` is the tie-break everywhere, so the order is total and stable across pages.
+`id` is the tie-break everywhere, so the order is total and stable across pages: ascending in the public name orders above, descending after every admin list sort (none after a sort on `id` itself), and as the REST spec gives it in the other orders.
+
+The admin colleagues row, the row after it and the sentence above correct what stood here, under [ADR 0001](0001-record-architecture-decisions.md) §5 and §6, to the maintainer's answer of 2026-11-15 (research: DECISIONS R37 (D157)). The table read "the same sort key, so editors see the public order" for the admin colleagues list and "`ORDER BY <column> COLLATE hu_icu, id` for public and admin lists: labels, authors, dishes, page titles, users, and admin list sorts on any text column" for every other sort on a name or title, and the sentence ended at "stable across pages". The Q38 answer that this ADR records names the `hu` collation but no direction for the tie-break (research: DECISIONS 38), while parity SHR-03 says "then id descending". The register asked (research: third decision register D157): "Every admin list breaks ties on `id`. Should ties stay `id` descending after every sort, as parity SHR-03 says and backend1 did (as built)? Should they be ascending, as ADR 0020 §4 writes `ORDER BY <column> COLLATE hu_icu, id`? Or should `id` follow the direction of the sort?" The maintainer answered "Keep id descending after every sort (SHR-03, as built)", the recommended option, whose consequence includes: "ADR 0020 §4 gets a correction that cites this answer: admin list sorts read `<column> COLLATE hu_icu, id DESC`, public lists keep `, id`, and the admin colleagues row says that tied names are ordered differently from the public site. Your Q38 answer left the direction open, so this is an editorial fix (ADR 0001 §5-§6), as with D84 and D140, not an amending ADR." and "If two colleagues ever have names that are equal once `Dr. ` is removed, the admin list shows them in the opposite order to the public site."
 
 ## Consequences
 
@@ -156,6 +158,7 @@ The collation gets its own name instead of relying on the predefined `hu-x-icu`,
 ## References
 
 - research: QUESTIONS Q38; DECISIONS rows 19 and 38
+- research: DECISIONS R37 (D157, answer of 2026-11-15), which §4's admin orders follow; research: third decision register D157 (the question, its context and the options)
 - research: SYNTHESIS §2.2 (SHR-04), §2.7, §2.12, §3.5.1 (admin search columns), §4.7 (stored rich text), §4.10 R6 (collation risk), §5.4 and §5.8 (search semantics and colleague sort), §7.9.6 (#342), §8 O16
 - research: gap-05 §4 (entity encoding and search), gap-10 §4 (REST draft for search)
 - website_backend2@7ba71da:src/graphql/resolvers/posts.rs, src/graphql/resolvers/colleagues.rs

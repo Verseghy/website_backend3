@@ -27,6 +27,13 @@
 //! `{code, index, detail}`, and the codes needed their Hungarian messages
 //! first.
 //!
+//! The shared admin list contract (the first list, labels, parity SHR-02
+//! and SHR-03) adds the six refusals of a list request's query, one per
+//! parameter kind: `invalid_page`, `invalid_per_page`, `invalid_sort`,
+//! `invalid_order`, `unknown_filter` and `invalid_filter`, each a `422` whose
+//! `field` is the query parameter (`dtos::admin::list`). Every list has
+//! them, so they belong to no resource and are `snake_case`.
+//!
 //! The upload model adds the image refusals of ADR 0015 §6 and §7 and the
 //! four CPU limits of ADR 0033 §4 (`image_*`), and the free-space refusal
 //! (`insufficient_storage`, 507 Insufficient Storage: the maintainer's
@@ -132,6 +139,24 @@ pub enum ErrorCode {
     /// `507`: storing the upload would leave less free space on the media
     /// volume than the configured reserve. An operator has to make room.
     InsufficientStorage,
+    /// `422`: a list's `page` is not a whole number from 1 up, or is given
+    /// twice. `field`: `page`.
+    InvalidPage,
+    /// `422`: a list's `perPage` is not 10, 25, 50 or 100, or is given
+    /// twice. `field`: `perPage`.
+    InvalidPerPage,
+    /// `422`: a list's `sort` names a field the list cannot be sorted on,
+    /// or is given twice. `field`: `sort`.
+    InvalidSort,
+    /// `422`: a list's `order` is neither `ASC` nor `DESC`, or is given
+    /// twice. `field`: `order`.
+    InvalidOrder,
+    /// `422`: a list request has a parameter that is no filter of the list.
+    /// `field`: the parameter's name.
+    UnknownFilter,
+    /// `422`: a list filter's value is not what the filter takes, such as
+    /// an id that is not a whole number. `field`: the filter's name.
+    InvalidFilter,
 }
 
 impl ErrorCode {
@@ -170,7 +195,16 @@ impl ErrorCode {
             | Self::ImageCorrupt
             | Self::ImageTooManyPixels
             | Self::ImageAnimationTooLarge
-            | Self::ImageTooManyScans => 422,
+            | Self::ImageTooManyScans
+            // A list request's query is submitted values too: the parity
+            // row SHR-02 and the list contract refuse a page size or a sort
+            // field outside the allow-list, and ADR 0021 §4 has no 400 row.
+            | Self::InvalidPage
+            | Self::InvalidPerPage
+            | Self::InvalidSort
+            | Self::InvalidOrder
+            | Self::UnknownFilter
+            | Self::InvalidFilter => 422,
             // ADR 0021 §4 has no row for it, and ADR 0015 §6 asks only for
             // a clear message. 507 Insufficient Storage (RFC 4918 §11.5):
             // the server cannot store what the request needs, and nothing
@@ -218,6 +252,15 @@ impl ErrorCode {
             Self::ImageAnimationTooLarge => "The animation has too many frames or pixels",
             Self::ImageTooManyScans => "The JPEG image has too many scans",
             Self::InsufficientStorage => "There is not enough free space to store the upload",
+            // A refused list request sends its refusal's own text, which
+            // names the parameter (`dtos::admin::list`); these are the
+            // fallbacks.
+            Self::InvalidPage => "The page number is not valid",
+            Self::InvalidPerPage => "The page size is not valid",
+            Self::InvalidSort => "The list cannot be sorted on this field",
+            Self::InvalidOrder => "The sort direction is not valid",
+            Self::UnknownFilter => "The list has no such filter",
+            Self::InvalidFilter => "The filter value is not valid",
         }
     }
 }
@@ -332,6 +375,12 @@ mod tests {
             ),
             (ErrorCode::ImageTooManyScans, 422, "image_too_many_scans"),
             (ErrorCode::InsufficientStorage, 507, "insufficient_storage"),
+            (ErrorCode::InvalidPage, 422, "invalid_page"),
+            (ErrorCode::InvalidPerPage, 422, "invalid_per_page"),
+            (ErrorCode::InvalidSort, 422, "invalid_sort"),
+            (ErrorCode::InvalidOrder, 422, "invalid_order"),
+            (ErrorCode::UnknownFilter, 422, "unknown_filter"),
+            (ErrorCode::InvalidFilter, 422, "invalid_filter"),
         ] {
             assert_eq!(code.status(), status, "{code:?}");
             assert_eq!(serde_json::to_value(code).expect("serializes"), json!(wire));
@@ -391,7 +440,7 @@ mod tests {
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "origin_mismatch" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "origin_mismatch" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage" | "invalid_page" | "invalid_per_page" | "invalid_sort" | "invalid_order" | "unknown_filter" | "invalid_filter";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");

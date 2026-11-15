@@ -435,10 +435,10 @@ impl AccountGrants {
 /// answered `401` before any requirement is looked at (ADR 0007 §5, the
 /// flowchart), so `403` always means "signed in, but not allowed".
 ///
-/// The ADR's "any of" rows (the labels and authors pickers that `edit posts`
-/// may read, the page picker of `edit menu`) are not variants yet: the first
-/// slice that mounts such a route adds one, with its tests here. Only routes
-/// take it; an [`ActionRule`] asks for the resource's own permission alone
+/// The ADR's "or" rows (the labels and authors that `edit posts` may read
+/// for the post form's pickers, the pages that `edit menu` may read for the
+/// menu form's picker) are [`Requirement::AnyPermission`]. Only routes take
+/// it; an [`ActionRule`] asks for the resource's own permission alone
 /// (research: DECISIONS R35 (D153)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Requirement {
@@ -455,6 +455,13 @@ pub enum Requirement {
     /// One permission among the account's effective permissions
     /// (ADR 0007 §3, §4).
     Permission(Permission),
+    /// At least one of these permissions among the account's effective
+    /// permissions: an "or" row of ADR 0007 §4, such as the labels'
+    /// list and read, which `edit labels` gives and `edit posts` gives for
+    /// the post form's picker. An empty list is met by no account (deny by
+    /// default, ADR 0007 §5), so a route that forgot its permissions is
+    /// closed rather than open.
+    AnyPermission(&'static [Permission]),
 }
 
 impl Requirement {
@@ -475,22 +482,30 @@ impl Requirement {
     /// [`Requirement::Public`] and [`Requirement::AnyActiveUser`] hold for
     /// every account; [`Requirement::AdminRole`] reads the role only, never
     /// the permissions ([`AccountGrants::is_admin`]); and
-    /// [`Requirement::Permission`] reads the effective permissions, the
-    /// union of the roles' sets and the extra grants.
+    /// [`Requirement::Permission`] and [`Requirement::AnyPermission`] read
+    /// the effective permissions, the union of the roles' sets and the extra
+    /// grants.
     #[must_use]
     pub fn is_met_by(self, grants: &AccountGrants) -> bool {
         match self {
             Self::Public | Self::AnyActiveUser => true,
             Self::AdminRole => grants.is_admin(),
             Self::Permission(permission) => grants.effective().contains(&permission),
+            Self::AnyPermission(permissions) => {
+                let effective = grants.effective();
+                permissions
+                    .iter()
+                    .any(|permission| effective.contains(permission))
+            }
         }
     }
 }
 
 impl fmt::Display for Requirement {
     /// Writes the requirement in words, for log lines and test messages:
-    /// `public`, `any active user`, `the admin role` or
-    /// `the permission "edit posts"`.
+    /// `public`, `any active user`, `the admin role`,
+    /// `the permission "edit posts"` or
+    /// `any of the permissions "edit labels", "edit posts"`.
     ///
     /// - `formatter`: where to write.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -500,6 +515,14 @@ impl fmt::Display for Requirement {
             Self::AdminRole => formatter.write_str("the admin role"),
             Self::Permission(permission) => {
                 write!(formatter, "the permission {:?}", permission.name())
+            }
+            Self::AnyPermission(permissions) => {
+                formatter.write_str("any of the permissions")?;
+                for (index, permission) in permissions.iter().enumerate() {
+                    let separator = if index == 0 { " " } else { ", " };
+                    write!(formatter, "{separator}{:?}", permission.name())?;
+                }
+                Ok(())
             }
         }
     }
@@ -598,16 +621,19 @@ impl fmt::Display for AccessAction {
 /// More than one requirement is how the ADR's "also need" reads: publishing
 /// a post asks for `edit posts` and `publish posts`. A row never carries an
 /// "or" of ADR 0007 §4 (the labels and authors that `edit posts` may read for
-/// the post form's pickers, the pages that `edit menu` may read): it asks
-/// only for the resource's own permission, and the other permission goes on
-/// the routes the picker calls, with the "any of" [`Requirement`] variant
-/// that recipe 10 of the project skill asks of them. Asked whether such a row
-/// should carry the "or" too, so that an account that holds only the
-/// picker's permission also sees the list screen and is offered the
-/// resource's `history`, the maintainer answered "The row asks for the
-/// resource's own permission; the "or" stays on the routes" on 2026-11-15
-/// (research: DECISIONS R35 (D153)). The route table's tests accept such a
-/// row, which offers its actions to fewer accounts than its routes let in.
+/// the post form's pickers, the pages that `edit menu` may read for the menu
+/// form): it asks only for the resource's own permission, and the other
+/// permission goes on the routes the picker calls, whose
+/// [`Requirement::AnyPermission`] (recipe 10 of the project skill) lets it
+/// in. Asked whether such a row should carry the "or" too, so that an
+/// account that holds only the picker's permission also sees the list screen
+/// and is offered the resource's `history`, the maintainer answered "The row
+/// asks for the resource's own permission; the "or" stays on the routes" on
+/// 2026-11-15 (research: DECISIONS R35 (D153)). The picker is no screen of
+/// the resource, so rules stay plain all-of lists. The labels' row does so
+/// first: `edit posts` alone does not put „Címkék” in the sidebar. A row may
+/// offer an action to fewer accounts than its routes let in, never to more
+/// (the route table's tests check that).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActionRule {
     /// The action the rule is about.
@@ -661,12 +687,22 @@ pub struct ResourceAccess {
 /// The access table of ADR 0007 §4, one row per ra-core resource, in the
 /// order the resources are added.
 ///
-/// Empty until the first resource screen: each resource slice adds its row
-/// here in the PR that mounts its routes, with the requirements that its
-/// routes carry in the route table, and adds the cases of its row to
-/// `tests/fixtures/authz_cases.json`, whose Rust test fails until every row
-/// has a case that allows and a case that refuses. The tests of this module
-/// hold every row to the shape of ADR 0007 §4: unique resource names, each
+/// Each resource slice adds its row here in the PR that mounts its first
+/// routes, with the requirements that its routes carry in the route table,
+/// and adds the cases of its row to `tests/fixtures/authz_cases.json`,
+/// whose Rust test fails until every row has a case that allows and a case
+/// that refuses. The rows so far:
+///
+/// - `labels`: `list` and `show`, the list and record reads that `edit
+///   labels` gives. Their routes also let in `edit posts` for the post
+///   form's label picker (ADR 0007 §4), which is no screen of the resource,
+///   so `edit posts` alone is not offered them, as the maintainer answered
+///   (research: DECISIONS R35 (D153); [`ActionRule`] says why).
+///   The label writes, trash and history add their actions with their
+///   routes.
+///
+/// The tests of this module hold every row to the shape of ADR 0007 §4:
+/// unique resource names, each
 /// action once with at least one requirement and never
 /// [`Requirement::Public`], `purge` only with the `admin` role, and
 /// `history` with exactly the requirements of `list`.
@@ -678,7 +714,19 @@ pub struct ResourceAccess {
 /// only an action that a row offers, and a row may offer an action only to
 /// accounts that every route serving it lets in, so the sidebar never
 /// shows an entry that answers `403`.
-pub const RESOURCE_ACCESS: &[ResourceAccess] = &[];
+pub const RESOURCE_ACCESS: &[ResourceAccess] = &[ResourceAccess {
+    resource: "labels",
+    rules: &[
+        ActionRule::new(
+            AccessAction::List,
+            &[Requirement::Permission(Permission::EditLabels)],
+        ),
+        ActionRule::new(
+            AccessAction::Show,
+            &[Requirement::Permission(Permission::EditLabels)],
+        ),
+    ],
+}];
 
 /// An account's access map: for each resource, the actions the account may
 /// take, in [`AccessAction`] order (ADR 0007 §7).
@@ -1001,8 +1049,79 @@ mod tests {
             Requirement::AnyActiveUser,
             Requirement::AdminRole,
             Requirement::Permission(Permission::EditPosts),
+            Requirement::AnyPermission(&[Permission::EditLabels, Permission::EditPosts]),
+            Requirement::AnyPermission(&[]),
         ] {
             assert!(requirement.needs_session(), "{requirement}");
+        }
+    }
+
+    #[test]
+    fn any_permission_is_met_by_one_of_its_permissions_from_a_role_or_a_grant() {
+        // ADR 0007 §4: labels are read with `edit labels`, or with
+        // `edit posts` for the post form's picker.
+        const PICKER: Requirement =
+            Requirement::AnyPermission(&[Permission::EditLabels, Permission::EditPosts]);
+        // Every permission, in a static, so that each one-element slice of
+        // it below is `'static`.
+        static EVERY: [Permission; 16] = Permission::ALL;
+        for (grants, expected) in [
+            (account(&[Role::Writer], &[]), true),
+            (account(&[Role::Supervisor], &[]), true),
+            (account(&[Role::Admin], &[]), true),
+            (account(&[], &[Permission::EditPosts]), true),
+            (account(&[], &[Permission::EditLabels]), true),
+            (account(&[Role::Secretary], &[]), false),
+            (
+                account(&[Role::Secretary], &[Permission::EditAuthors]),
+                false,
+            ),
+            (AccountGrants::default(), false),
+        ] {
+            assert_eq!(PICKER.is_met_by(&grants), expected, "{grants:?}");
+        }
+        // An empty list lets nobody in, not even the admin role with every
+        // grant: deny by default.
+        let everything = account(&[Role::Admin], &Permission::ALL);
+        assert!(!Requirement::AnyPermission(&[]).is_met_by(&everything));
+        // One permission in the list reads like `Permission`.
+        for single in &EVERY {
+            let one = std::slice::from_ref(single);
+            let permission = *single;
+            for grants in [account(&[Role::Writer], &[]), account(&[], &[permission])] {
+                assert_eq!(
+                    Requirement::AnyPermission(one).is_met_by(&grants),
+                    Requirement::Permission(permission).is_met_by(&grants),
+                    "{permission}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_labels_row_offers_the_list_and_the_record_to_edit_labels_only() {
+        // ADR 0007 §4: `edit posts` reads labels for the post form's picker,
+        // which is no screen, so the access map does not offer it the
+        // labels' screens (the routes still let it in).
+        let labels = |grants: &AccountGrants| -> Vec<&'static str> {
+            access_map(RESOURCE_ACCESS, grants)
+                .get("labels")
+                .map(|actions| actions.iter().map(|action| action.name()).collect())
+                .unwrap_or_default()
+        };
+        for role in [Role::Writer, Role::Supervisor, Role::Admin] {
+            assert_eq!(labels(&account(&[role], &[])), ["list", "show"], "{role}");
+        }
+        assert_eq!(
+            labels(&account(&[], &[Permission::EditLabels])),
+            ["list", "show"]
+        );
+        for grants in [
+            account(&[], &[Permission::EditPosts]),
+            account(&[Role::Secretary], &[]),
+            AccountGrants::default(),
+        ] {
+            assert!(labels(&grants).is_empty(), "{grants:?}");
         }
     }
 
@@ -1056,15 +1175,30 @@ mod tests {
             Requirement::Permission(Permission::EditSiteSettings).to_string(),
             r#"the permission "edit site settings""#
         );
+        assert_eq!(
+            Requirement::AnyPermission(&[Permission::EditLabels, Permission::EditPosts])
+                .to_string(),
+            r#"any of the permissions "edit labels", "edit posts""#
+        );
+        assert_eq!(
+            Requirement::AnyPermission(&[Permission::EditMenu]).to_string(),
+            r#"any of the permissions "edit menu""#
+        );
     }
 
-    /// Any requirement.
+    /// Any requirement. An [`Requirement::AnyPermission`] lists one to four
+    /// permissions; the empty list, which no account meets, has its own
+    /// unit test. Its slices are leaked to get the `'static` slice the
+    /// variant holds; a test process ends soon.
     fn requirement() -> impl Strategy<Value = Requirement> {
         prop_oneof![
             Just(Requirement::Public),
             Just(Requirement::AnyActiveUser),
             Just(Requirement::AdminRole),
             permission().prop_map(Requirement::Permission),
+            subsequence(Permission::ALL.to_vec(), 1..=4)
+                .prop_shuffle()
+                .prop_map(|permissions| Requirement::AnyPermission(Vec::leak(permissions))),
         ]
     }
 
@@ -1159,13 +1293,15 @@ mod tests {
             requirement in requirement(),
         ) {
             let account = account(&roles, &grants);
+            let given = |permission: &Permission| {
+                grants.contains(permission)
+                    || roles.iter().any(|role| role.permissions().contains(permission))
+            };
             let expected = match requirement {
                 Requirement::Public | Requirement::AnyActiveUser => true,
                 Requirement::AdminRole => roles.contains(&Role::Admin),
-                Requirement::Permission(permission) => {
-                    grants.contains(&permission)
-                        || roles.iter().any(|role| role.permissions().contains(&permission))
-                }
+                Requirement::Permission(permission) => given(&permission),
+                Requirement::AnyPermission(permissions) => permissions.iter().any(given),
             };
             prop_assert_eq!(requirement.is_met_by(&account), expected, "{}", requirement);
             // The admin role meets every requirement (it holds every
@@ -1194,11 +1330,17 @@ mod tests {
                 prop_assert!(requirement.is_met_by(&with_role), "{}", requirement);
                 prop_assert!(requirement.is_met_by(&with_grant), "{}", requirement);
             }
-            // And a grant of the asked permission always lets the account in.
-            if let Requirement::Permission(permission) = requirement {
-                let mut granted = before;
-                granted.extra.insert(permission);
-                prop_assert!(requirement.is_met_by(&granted));
+            // And a grant of the asked permission, or of any one of the
+            // permissions an "or" asks for, always lets the account in.
+            let asked: &[Permission] = match &requirement {
+                Requirement::Permission(permission) => std::slice::from_ref(permission),
+                Requirement::AnyPermission(permissions) => permissions,
+                _ => &[],
+            };
+            for permission in asked {
+                let mut granted = account(&[], &[]);
+                granted.extra.insert(*permission);
+                prop_assert!(requirement.is_met_by(&granted), "{}", requirement);
             }
         }
 

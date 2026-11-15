@@ -122,7 +122,7 @@ use loco_rs::{app::AppContext, controller::Routes};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::{
-    JSON_BODY_LIMIT, auth, error_response, origin,
+    JSON_BODY_LIMIT, auth, error_response, labels, origin,
     session::{
         AcceptedScopes, AdminOrPasswordChange, AdminScope, accepted_scopes, open_session,
         passive_refresh_cookie, session_refusal_response, with_passive_refresh,
@@ -160,6 +160,14 @@ pub fn table() -> Vec<AdminRoute> {
         // The explicit sliding refresh (ADR 0006 §1): a full session only,
         // so a `password_change` session cannot extend itself (§4).
         AdminRoute::post("/auth/refresh", Requirement::AnyActiveUser, auth::refresh),
+        // Labels (LBL-01): the list and the record, which `edit labels`
+        // reads and `edit posts` reads for the post form's label picker
+        // (ADR 0007 §4). The access map offers the screens to `edit labels`
+        // only (`domain::authz::RESOURCE_ACCESS`).
+        AdminRoute::get("/labels", labels::READ, labels::list)
+            .serving("labels", &[AccessAction::List]),
+        AdminRoute::get("/labels/{id}", labels::READ, labels::show)
+            .serving("labels", &[AccessAction::Show]),
     ]
 }
 
@@ -635,6 +643,28 @@ mod tests {
                 &[SessionScope::Admin][..],
                 RequestBody::Json,
             ),
+            // ADR 0007 §4: labels are read with `edit labels`, or with
+            // `edit posts` for the post form's picker.
+            (
+                Method::GET,
+                "/api/admin/labels".to_owned(),
+                Requirement::AnyPermission(&[
+                    crate::domain::authz::Permission::EditLabels,
+                    crate::domain::authz::Permission::EditPosts,
+                ]),
+                &[SessionScope::Admin][..],
+                RequestBody::Json,
+            ),
+            (
+                Method::GET,
+                "/api/admin/labels/{id}".to_owned(),
+                Requirement::AnyPermission(&[
+                    crate::domain::authz::Permission::EditLabels,
+                    crate::domain::authz::Permission::EditPosts,
+                ]),
+                &[SessionScope::Admin][..],
+                RequestBody::Json,
+            ),
         ] {
             assert!(declared.contains(&expected), "{expected:?} in {declared:?}");
         }
@@ -760,24 +790,43 @@ mod tests {
         accounts
     }
 
-    /// The account that holds exactly what `rule` names: its permissions
-    /// as extra grants, and the `admin` role when the rule asks for it.
-    fn weakest_account(rule: &ActionRule) -> AccountGrants {
-        AccountGrants {
+    /// The accounts that hold exactly what `rule` names: its permissions as
+    /// extra grants, one permission of each "or" list
+    /// ([`Requirement::AnyPermission`], one account per choice), and the
+    /// `admin` role when the rule asks for it. An empty "or" list, which no
+    /// account meets, leaves no account.
+    fn weakest_accounts(rule: &ActionRule) -> Vec<AccountGrants> {
+        let mut accounts = vec![AccountGrants {
             roles: if rule.requires.contains(&Requirement::AdminRole) {
                 BTreeSet::from([Role::Admin])
             } else {
                 BTreeSet::new()
             },
-            extra: rule
-                .requires
-                .iter()
-                .filter_map(|requirement| match requirement {
-                    Requirement::Permission(permission) => Some(*permission),
-                    _ => None,
-                })
-                .collect(),
+            extra: BTreeSet::new(),
+        }];
+        for requirement in rule.requires {
+            match requirement {
+                Requirement::Permission(permission) => {
+                    for account in &mut accounts {
+                        account.extra.insert(*permission);
+                    }
+                }
+                Requirement::AnyPermission(permissions) => {
+                    accounts = accounts
+                        .into_iter()
+                        .flat_map(|account| {
+                            permissions.iter().map(move |permission| {
+                                let mut chosen = account.clone();
+                                chosen.extra.insert(*permission);
+                                chosen
+                            })
+                        })
+                        .collect();
+                }
+                Requirement::Public | Requirement::AnyActiveUser | Requirement::AdminRole => {}
+            }
         }
+        accounts
     }
 
     /// What is wrong between the access table `access` and the route table
@@ -816,7 +865,7 @@ mod tests {
                     if let Some(account) = accounts
                         .iter()
                         .cloned()
-                        .chain([weakest_account(rule)])
+                        .chain(weakest_accounts(rule))
                         .find(|account| rule.is_met_by(account) && !requirement.is_met_by(account))
                     {
                         problems.push(format!(
@@ -1049,7 +1098,7 @@ mod tests {
         assert!(accounts.contains(&AccountGrants::default()));
         assert!(accounts.iter().any(|account| account.roles.len() == 4
             && account.extra == BTreeSet::from([Permission::EditPosts, Permission::EditDiaktoll])));
-        let weakest = weakest_account(&ActionRule::new(
+        let weakest = weakest_accounts(&ActionRule::new(
             AccessAction::Purge,
             &[
                 Requirement::AdminRole,
@@ -1057,7 +1106,78 @@ mod tests {
                 Requirement::AnyActiveUser,
             ],
         ));
-        assert_eq!(weakest.roles, BTreeSet::from([Role::Admin]));
-        assert_eq!(weakest.extra, BTreeSet::from([Permission::EditPosts]));
+        assert_eq!(weakest.len(), 1);
+        assert_eq!(weakest[0].roles, BTreeSet::from([Role::Admin]));
+        assert_eq!(weakest[0].extra, BTreeSet::from([Permission::EditPosts]));
+        // An "or" gives one account per choice, each with the other
+        // requirements too; an empty one gives none.
+        let choices = weakest_accounts(&ActionRule::new(
+            AccessAction::List,
+            &[
+                Requirement::AnyPermission(&[Permission::EditLabels, Permission::EditPosts]),
+                Requirement::Permission(Permission::ManageMedia),
+            ],
+        ));
+        assert_eq!(
+            choices
+                .iter()
+                .map(|account| account.extra.clone())
+                .collect::<Vec<_>>(),
+            [
+                BTreeSet::from([Permission::EditLabels, Permission::ManageMedia]),
+                BTreeSet::from([Permission::EditPosts, Permission::ManageMedia]),
+            ]
+        );
+        assert_eq!(
+            weakest_accounts(&ActionRule::new(
+                AccessAction::List,
+                &[Requirement::AnyPermission(&[])]
+            )),
+            Vec::<AccountGrants>::new()
+        );
+    }
+
+    #[test]
+    fn the_access_check_finds_a_picker_route_that_lets_in_fewer_than_its_row() {
+        async fn probe() {}
+        // The row offers the list to either permission; a route that asks
+        // for one of them alone would answer the other one's sidebar entry
+        // `403`.
+        const EITHER: &[ResourceAccess] = &[ResourceAccess {
+            resource: "probe-either",
+            rules: &[ActionRule::new(
+                AccessAction::List,
+                &[Requirement::AnyPermission(&[
+                    Permission::EditLabels,
+                    Permission::EditPosts,
+                ])],
+            )],
+        }];
+        let narrower = vec![
+            AdminRoute::get("/probe-either", EDIT_LABELS, probe)
+                .serving("probe-either", &[AccessAction::List]),
+        ];
+        let problems = access_route_problems(EITHER, &narrower);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains(r#""probe-either"/list: the access map offers"#)),
+            "{problems:?}"
+        );
+        // A route with the same "or", or a wider one, agrees.
+        for requirement in [
+            Requirement::AnyPermission(&[Permission::EditPosts, Permission::EditLabels]),
+            Requirement::AnyActiveUser,
+        ] {
+            let routes = vec![
+                AdminRoute::get("/probe-either", requirement, probe)
+                    .serving("probe-either", &[AccessAction::List]),
+            ];
+            assert_eq!(
+                access_route_problems(EITHER, &routes),
+                Vec::<String>::new(),
+                "{requirement}"
+            );
+        }
     }
 }
