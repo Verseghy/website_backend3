@@ -70,7 +70,16 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    narrows the guard rule so it no longer reports it, changes the guard case
    in `tests/schema/guard_cases.rs` that expected it, and updates the
    snapshot. A new extension goes into the guard's `EXTENSIONS` with every
-   object it owns.
+   object it owns. Every new table also goes on exactly one list of what
+   the legacy import does with it, or
+   `tests/tasks/import_mysql_target.rs` fails: a table that the import
+   writes is already on `IMPORT_TARGET_TABLES`
+   (`src/domain/import_mysql/target.rs`) under its name in the insert order
+   of `data-migration.md` section 4.3, so the migration uses exactly that
+   name; any other table (a release-1 table of ADR 0019 §5, for example)
+   joins `NEVER_WRITTEN` in that test with the reason. The empty-target
+   guard of the import skips a listed table that the schema lacks, so a
+   table created under another name would otherwise escape it.
 3. **Entities**: `cargo loco db migrate`, then `cargo loco db entities`. Never
    edit `src/models/_entities/`; `src/models/mod.rs` allows `missing_docs` for
    it, so the generated code needs no doc comments. The entities derive no
@@ -472,24 +481,43 @@ is its specification; each slice adds the step for its own tables.
    mismatch, and each exemption flag of section 4.3; proptests cover
    round trips and idempotence.
 3. **The step** in `src/tasks/import_mysql/` (code that only the task uses,
-   ADR 0008 rule 5), called from `run(&source_db, &target_db, &ImportOptions)`
-   in `src/tasks/import_mysql/mod.rs`: it reads the source rows through the
-   source pool it is given (only the task reads `ctx` and the source setting
+   ADR 0008 rule 5), called from `run(&source_db, &target_db, &ImportOptions,
+   &mut ReportParts)` in `src/tasks/import_mysql/mod.rs`, inside the one
+   target transaction that `run` opens (`target::in_import_transaction`,
+   whose `dry-run` rolls back and `apply` commits), after the checks of the
+   code tables and of the empty target. It reads the source rows inside the
+   locked source session (`src/tasks/import_mysql/session.rs`): it extends
+   `session::read` to read them on `SourceSession::connection` before the
+   session closes, so every row is read under the one `LOCK TABLES` (only
+   the task reads `ctx` and the source setting
    `settings.import.source_database_url`, which production and development
    fill from `IMPORT_SOURCE_DATABASE_URL`; data-migration.md section 4.1),
    and only with `tasks::import_mysql::source::select_rows`, the source
    query layer: it reads only the 17 tables of the allow-list in
    `src/domain/import_mysql/source_tables.rs` and refuses any other table,
-   the newsletter's first (NWS-01), before it sends anything. Its errors
-   carry no part of the source URL. Only `src/tasks/import_mysql/source.rs`
-   builds or sends a statement to the source or opens a connection to it:
+   the newsletter's first (NWS-01), before it sends anything. It selects
+   the columns of the table's entry in
+   `src/tasks/import_mysql/expected_schema.rs`, which the session's
+   fingerprint has checked. Its errors carry no part of the source URL.
+   Only `src/tasks/import_mysql/source.rs` and `session.rs` build or send a
+   statement to the source or open a connection to it:
    `tests/architecture.rs` fails when another file of the import task names
    sqlx's statement or connection API (`sqlx::query`, `Executor`,
-   `MySqlPoolOptions`, `MySqlPool::connect`, ...). A new kind of statement,
-   such as the source session's `LOCK TABLES` or the schema fingerprint,
+   `MySqlPoolOptions`, `MySqlPool::connect`, ...). A new kind of statement
    goes into a file that joins `SOURCE_STATEMENT_FILES` in that test, names
    its tables from `SOURCE_TABLES` and maps the driver's errors with
-   `source::source_error`. The step inserts in the foreign-key order of
+   `source::source_error`, as `session.rs` does. The sequences use the
+   session's `AUTO_INCREMENT` values (`SourceFacts`, data-migration.md
+   §5.1). A target table that the step writes and that
+   `IMPORT_TARGET_TABLES` (`src/domain/import_mysql/target.rs`) does not
+   list joins it, so the guard refuses a target in which it holds a row
+   (section 4.2), and the insert order of section 4.3 names it in the same
+   place (`tests/domain/import_target_tables.rs` compares the two). The
+   step's first test with synthetic rows also covers the refusals that the
+   empty compose source could not: the non-empty refusal for the step's
+   own entity table, and, when its legacy table has write-instant columns,
+   a `snapshot_at` earlier than its rows refused through the whole task.
+   The step inserts in the foreign-key order of
    section 4.3 with explicit values (no model save hooks), and writes the
    `import` (and `import_original`) revisions of the entity's revision
    snapshot type (recipe 2 step 6) with `models::revisions::append` and
@@ -505,8 +533,11 @@ is its specification; each slice adds the step for its own tables.
    row (ADR 0010 point 6, ADR 0041 §2).
 5. **Verification and report**: add the table to the row counts and digests
    of section 10 and to the run report of section 11.3: the step's data joins
-   `RunSummary` in `src/domain/import_mysql/report.rs`, which renders
-   `summary.json` and `report.md`; a step that fills a Markdown section
+   `ReportParts` in `src/domain/import_mysql/report.rs`, as the source
+   session's `source` does, and the step fills it through the `parts` that
+   `run` receives as soon as the step ends, so the report of a run that
+   fails later still shows it; `RunSummary` renders `summary.json` and
+   `report.md` from it. A step that fills a Markdown section
    replaces its "No import step of this build reports here yet." line. Add
    new `summary.json` fields without changing `REPORT_FORMAT`; rename or
    remove one only with a `REPORT_FORMAT` bump.
@@ -533,13 +564,20 @@ is its specification; each slice adds the step for its own tables.
    directory. The task refuses an unset source (empty or `disabled`), an
    unknown argument, a `snapshot_at` that is not UTC or lies after the start
    of the run, and a report directory that is not empty or lies inside
-   `storage_root`. The task and its MySQL driver exist only with the default
+   `storage_root`. Once it runs, it refuses a target whose `roles` or
+   `user_permissions` CHECK differ from the code, or in which a table it
+   writes holds a row (recreate the local database to start over, as the
+   `AGENTS.md` commands say), a source whose schema differs from the
+   expected DDL, and a `snapshot_at` earlier than the latest timestamp in the
+   source. The task and its MySQL driver exist only with the default
    Cargo feature `import-mysql`; code and tests that use the driver are
    behind it, and the CI `Test` job builds and tests once without it. Its
    tests set the source in the context they run the task with
-   (`tests/tasks/import_mysql.rs`), because `config/test.yaml` names none,
-   and the source layer's tests read the compose source
-   (`tests/tasks/import_mysql_source.rs`).
+   (`tests/tasks/import_mysql.rs`), because `config/test.yaml` names none;
+   the source layer's and the source session's tests read the compose
+   source (`tests/tasks/import_mysql_source.rs`,
+   `tests/tasks/import_mysql_session.rs`), and the target's checks have
+   theirs in `tests/tasks/import_mysql_target.rs`.
 9. **PR**: the `import` scope, for example `feat(import): import labels and post labels`,
    with the D-numbers it resolves and the parity IDs it finishes.
 

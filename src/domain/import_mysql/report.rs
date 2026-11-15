@@ -27,10 +27,16 @@
 //! only when a field of `summary.json` is renamed or removed; new fields are
 //! added without changing it.
 //!
+//! The first part is the source session's (data-migration.md §3.3): that the
+//! schema fingerprint matched, the latest timestamp in the source, which
+//! `snapshot_at` did not precede, and every table's `AUTO_INCREMENT`. A run
+//! that stopped before the session ended has none of them, and the report
+//! says so; its error says why.
+//!
 //! The report is private: it holds draft content and account counts, and
 //! the Markdown starts by saying so (data-migration.md §11.3).
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
@@ -38,6 +44,8 @@ use serde::Serialize;
 use super::{
     not_migrated::NOT_MIGRATED_TABLES,
     options::{ImportOptions, format_instant},
+    source_session::SourceFacts,
+    source_tables::SOURCE_TABLES,
 };
 
 /// The version of the `summary.json` layout.
@@ -117,6 +125,17 @@ pub struct RunSummary {
     pub finished_at: DateTime<Utc>,
     /// How it ended.
     pub outcome: Outcome,
+    /// What the import found, part by part.
+    pub parts: ReportParts,
+}
+
+/// What the import steps found, for the report. A run that failed has the
+/// parts of the steps that ended before it failed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportParts {
+    /// What the source session established, or `None` when the run stopped
+    /// before the session ended.
+    pub source: Option<SourceFacts>,
 }
 
 /// `summary.json`'s layout. The field order is the order of the file.
@@ -130,7 +149,45 @@ struct SummaryJson<'a> {
     finished_at: String,
     duration_ms: i64,
     arguments: BTreeMap<String, String>,
+    source: Option<SourceJson>,
     not_migrated: Vec<NotMigratedJson>,
+}
+
+/// `summary.json`'s `source` object: the source session's part.
+#[derive(Serialize)]
+struct SourceJson {
+    /// Always `matched`: a session that ends has checked the fingerprint.
+    fingerprint: &'static str,
+    latest_timestamp: Option<LatestTimestampJson>,
+    /// Each allow-listed table's `AUTO_INCREMENT`, `null` for a table
+    /// without one, by table name.
+    auto_increment: BTreeMap<&'static str, Option<u64>>,
+}
+
+/// The latest timestamp in the source.
+#[derive(Serialize)]
+struct LatestTimestampJson {
+    table: &'static str,
+    column: &'static str,
+    at: String,
+}
+
+impl SourceJson {
+    fn new(facts: &SourceFacts) -> Self {
+        Self {
+            fingerprint: "matched",
+            latest_timestamp: facts.latest_timestamp().map(|latest| LatestTimestampJson {
+                table: latest.table,
+                column: latest.column,
+                at: format_instant(latest.at),
+            }),
+            auto_increment: facts
+                .auto_increments()
+                .iter()
+                .map(|entry| (entry.table.name(), entry.next_id))
+                .collect(),
+        }
+    }
 }
 
 /// One row of `summary.json`'s `not_migrated` list.
@@ -151,8 +208,12 @@ impl RunSummary {
     /// newline. Every instant is RFC 3339 in UTC ([`format_instant`]), the
     /// duration is in whole milliseconds (`duration_ms`, rounded towards
     /// zero), `arguments` spells out every argument of the run with its
-    /// defaults ([`ImportOptions::to_arguments`]), and `error` is `null`
-    /// unless the run failed. Equal summaries give equal bytes.
+    /// defaults ([`ImportOptions::to_arguments`]), `error` is `null`
+    /// unless the run failed, and `source` is the source session's part,
+    /// `null` when the run stopped before the session ended: `fingerprint`
+    /// (`matched`), `latest_timestamp` (`table`, `column` and `at`, or
+    /// `null` for a source without one) and `auto_increment` by table.
+    /// Equal summaries give equal bytes.
     ///
     /// # Panics
     ///
@@ -173,6 +234,7 @@ impl RunSummary {
             finished_at: format_instant(self.finished_at),
             duration_ms: self.duration().num_milliseconds(),
             arguments: self.options.to_arguments(),
+            source: self.parts.source.as_ref().map(SourceJson::new),
             not_migrated: NOT_MIGRATED_TABLES
                 .iter()
                 .map(|row| NotMigratedJson {
@@ -188,9 +250,9 @@ impl RunSummary {
     }
 
     /// The contents of `report.md`: the privacy note, the summary table,
-    /// the error of a failed run, one section per entry of
-    /// [`STEP_SECTIONS`] and the not-migrated tables (data-migration.md
-    /// §9.1). Values from the arguments and the error are escaped, so no
+    /// the error of a failed run, the source session's part (`## Source`),
+    /// one section per entry of [`STEP_SECTIONS`] and the not-migrated
+    /// tables (data-migration.md §9.1). Values from the arguments and the error are escaped, so no
     /// path or message can break the Markdown structure.
     #[must_use]
     pub fn to_markdown(&self) -> String {
@@ -220,6 +282,7 @@ impl RunSummary {
             markdown.push_str("\n## Error\n\n");
             markdown.push_str(&fenced(message));
         }
+        markdown.push_str(&self.source_section());
         for (title, holds) in STEP_SECTIONS {
             markdown.push_str(&["\n## ", title, "\n\n", holds, "\n\n", NO_STEP_YET, "\n"].concat());
         }
@@ -232,6 +295,52 @@ impl RunSummary {
             markdown.push_str(&table_row(row.table, row.reason));
         }
         markdown
+    }
+
+    /// The `## Source` section of `report.md`: what the source session
+    /// established, with a table of every allow-listed table's
+    /// `AUTO_INCREMENT`, or a line that says the session did not end.
+    fn source_section(&self) -> String {
+        let mut section = String::from("\n## Source\n\n");
+        let Some(facts) = &self.parts.source else {
+            section.push_str(
+                "The run stopped before the source session ended, so nothing was read from the \
+                 source; the error above says why.\n",
+            );
+            return section;
+        };
+        // The table and column names are the fixed identifiers of
+        // `SOURCE_TABLES` and `SOURCE_TIMESTAMPS`, never input, so they go
+        // into code spans unescaped. Writing into a `String` cannot fail, so
+        // the results of `write!` are ignored.
+        let tables = SOURCE_TABLES.len();
+        let _ = write!(
+            section,
+            "The schema fingerprint of the {tables} legacy tables that the import reads matched \
+             the expected legacy DDL, and they were read under one LOCK TABLES ... READ \
+             (data-migration.md §3.3).\n\n"
+        );
+        match facts.latest_timestamp() {
+            Some(latest) => {
+                let _ = write!(
+                    section,
+                    "The latest timestamp in the source is `{}`.`{}` at {}, which snapshot\\_at \
+                     does not precede.\n\n",
+                    latest.table,
+                    latest.column,
+                    format_instant(latest.at)
+                );
+            }
+            None => section.push_str("No timestamp column of the source holds a value.\n\n"),
+        }
+        section.push_str("| Legacy table | AUTO\\_INCREMENT |\n|---|---|\n");
+        for entry in facts.auto_increments() {
+            let next_id = entry
+                .next_id
+                .map_or_else(|| "none".to_owned(), |next_id| next_id.to_string());
+            section.push_str(&table_row(entry.table.name(), &next_id));
+        }
+        section
     }
 }
 
@@ -306,7 +415,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::import_mysql::options::{CanteenAuditLocalBefore, Mode};
+    use crate::domain::import_mysql::{
+        options::{CanteenAuditLocalBefore, Mode},
+        source_session::{AutoIncrement, SOURCE_TIMESTAMPS, SourceTimestamp},
+    };
     use proptest::prelude::*;
 
     fn instant(rfc3339: &str) -> DateTime<Utc> {
@@ -332,6 +444,7 @@ mod tests {
             started_at: instant("2026-10-31T18:00:00Z"),
             finished_at: instant("2026-10-31T18:00:04.25Z"),
             outcome,
+            parts: ReportParts::default(),
         }
     }
 
@@ -378,6 +491,7 @@ mod tests {
             "\"finished_at\"",
             "\"duration_ms\"",
             "\"arguments\"",
+            "\"source\"",
             "\"not_migrated\"",
         ]
         .iter()
@@ -408,6 +522,102 @@ mod tests {
         );
     }
 
+    /// Facts of a source whose first table has an `AUTO_INCREMENT` of 621
+    /// and whose pivot tables report none.
+    fn source_facts(latest: Option<SourceTimestamp>) -> SourceFacts {
+        let auto_increments = SOURCE_TABLES
+            .iter()
+            .enumerate()
+            .map(|(index, table)| AutoIncrement {
+                table: *table,
+                next_id: (!table.name().contains("pivot"))
+                    .then(|| 621 + u64::try_from(index).expect("small")),
+            })
+            .collect();
+        // The latest instant chrono has: no timestamp lies after it.
+        SourceFacts::checked(auto_increments, latest, DateTime::<Utc>::MAX_UTC)
+            .expect("snapshot_at after every timestamp")
+    }
+
+    #[test]
+    fn the_source_part_shows_the_fingerprint_the_latest_timestamp_and_auto_increment() {
+        let mut run = summary(Outcome::Completed);
+        run.parts.source = Some(source_facts(Some(SourceTimestamp {
+            table: "posts_data",
+            column: "updated_at",
+            at: instant("2026-10-23T17:00:59Z"),
+        })));
+        let json: serde_json::Value = serde_json::from_str(&run.to_json()).expect("JSON");
+        assert_eq!(json["source"]["fingerprint"], "matched");
+        assert_eq!(
+            json["source"]["latest_timestamp"],
+            serde_json::json!({
+                "table": "posts_data",
+                "column": "updated_at",
+                "at": "2026-10-23T17:00:59Z",
+            })
+        );
+        let auto_increment = json["source"]["auto_increment"]
+            .as_object()
+            .expect("an object");
+        assert_eq!(auto_increment.len(), SOURCE_TABLES.len());
+        assert_eq!(auto_increment["posts_data"], 621);
+        assert_eq!(
+            auto_increment["posts_pivot_labels_data"],
+            serde_json::Value::Null
+        );
+        assert!(!auto_increment.contains_key("newsletter"));
+
+        let markdown = run.to_markdown();
+        assert!(
+            markdown.contains(
+                "\n## Source\n\nThe schema fingerprint of the 17 legacy tables that the import \
+                 reads matched the expected legacy DDL, and they were read under one LOCK TABLES \
+                 ... READ (data-migration.md §3.3).\n\nThe latest timestamp in the source is \
+                 `posts_data`.`updated_at` at 2026-10-23T17:00:59Z, which snapshot\\_at does not \
+                 precede.\n\n| Legacy table | AUTO\\_INCREMENT |\n|---|---|\n| posts\\_data | \
+                 621 |\n"
+            ),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| posts\\_pivot\\_labels\\_data | none |\n"),
+            "{markdown}"
+        );
+        // The source part lists only the tables the import reads; the
+        // newsletter appears only in the not-migrated table at the end.
+        let source_part = markdown
+            .split_once("\n## Source\n")
+            .and_then(|(_, rest)| rest.split_once("\n## Defects\n"))
+            .expect("a Source section before Defects")
+            .0;
+        assert!(!source_part.contains("newsletter"), "{source_part}");
+        assert_eq!(
+            source_part.matches("\n| ").count(),
+            1 + SOURCE_TABLES.len(),
+            "{source_part}"
+        );
+
+        // A source without a timestamp, and a run that stopped before the
+        // session ended.
+        run.parts.source = Some(source_facts(None));
+        let json: serde_json::Value = serde_json::from_str(&run.to_json()).expect("JSON");
+        assert_eq!(json["source"]["latest_timestamp"], serde_json::Value::Null);
+        assert!(
+            run.to_markdown()
+                .contains("No timestamp column of the source holds a value.\n"),
+        );
+        let stopped = summary(Outcome::Failed {
+            message: "refusing to import: the target table `users` already holds a row".to_owned(),
+        });
+        let json: serde_json::Value = serde_json::from_str(&stopped.to_json()).expect("JSON");
+        assert_eq!(json["source"], serde_json::Value::Null);
+        assert!(stopped.to_markdown().contains(
+            "\n## Source\n\nThe run stopped before the source session ended, so nothing was \
+                 read from the source; the error above says why.\n"
+        ));
+    }
+
     #[test]
     fn the_markdown_report_has_every_part_of_section_11_3() {
         let markdown = summary(Outcome::Completed).to_markdown();
@@ -434,6 +644,7 @@ mod tests {
         let mut last = 0;
         for title in [
             "Summary",
+            "Source",
             "Defects",
             "Rule hits",
             "Diffs",
@@ -543,6 +754,7 @@ mod tests {
             ],
             (any_instant(), any_instant()),
             proptest::option::of(any_text()),
+            proptest::option::of(any_source()),
         )
             .prop_map(
                 |(
@@ -552,6 +764,7 @@ mod tests {
                     cutoff,
                     (started_at, finished_at),
                     message,
+                    source,
                 )| {
                     RunSummary {
                         options: ImportOptions {
@@ -566,9 +779,38 @@ mod tests {
                         finished_at,
                         outcome: message
                             .map_or(Outcome::Completed, |message| Outcome::Failed { message }),
+                        parts: ReportParts { source },
                     }
                 },
             )
+    }
+
+    /// What any source session could establish.
+    fn any_source() -> impl Strategy<Value = SourceFacts> {
+        (
+            proptest::collection::vec(proptest::option::of(any::<u64>()), SOURCE_TABLES.len()),
+            proptest::option::of((
+                proptest::sample::select(SOURCE_TIMESTAMPS.to_vec()),
+                any_instant(),
+            )),
+        )
+            .prop_map(|(next_ids, latest)| {
+                let auto_increments = SOURCE_TABLES
+                    .iter()
+                    .zip(next_ids)
+                    .map(|(table, next_id)| AutoIncrement {
+                        table: *table,
+                        next_id,
+                    })
+                    .collect();
+                let latest = latest.map(|(columns, at)| SourceTimestamp {
+                    table: columns.table,
+                    column: columns.columns[0],
+                    at,
+                });
+                SourceFacts::checked(auto_increments, latest, DateTime::<Utc>::MAX_UTC)
+                    .expect("snapshot_at after every timestamp")
+            })
     }
 
     /// Splits `markdown` into the lines outside fenced code blocks and the
@@ -641,7 +883,7 @@ mod tests {
             message in proptest::option::of(".{0,80}"),
         ) {
             let outcome = message.clone().map_or(Outcome::Completed, |message| Outcome::Failed { message });
-            let run = RunSummary { options: options(), started_at, finished_at, outcome };
+            let run = RunSummary { options: options(), started_at, finished_at, outcome, parts: ReportParts::default() };
             let json: serde_json::Value = serde_json::from_str(&run.to_json()).expect("JSON");
             let (started, finished) = (format_instant(started_at), format_instant(finished_at));
             prop_assert_eq!(json["started_at"].as_str(), Some(started.as_str()));
@@ -669,6 +911,7 @@ mod tests {
             if matches!(run.outcome, Outcome::Failed { .. }) {
                 expected.push("Error");
             }
+            expected.push("Source");
             expected.extend(STEP_SECTIONS.iter().map(|(title, _)| *title));
             expected.push("Not migrated");
             prop_assert_eq!(headings, expected);
@@ -691,9 +934,13 @@ mod tests {
                 .split(|line| line.is_empty())
                 .filter(|paragraph| paragraph.get(1) == Some(&"|---|---|"))
                 .collect();
-            prop_assert_eq!(tables.len(), 2);
+            let source_tables = usize::from(run.parts.source.is_some());
+            prop_assert_eq!(tables.len(), 2 + source_tables);
             prop_assert_eq!(tables[0].len(), 2 + 4 + run.options.to_arguments().len());
-            prop_assert_eq!(tables[1].len(), 2 + NOT_MIGRATED_TABLES.len());
+            if source_tables == 1 {
+                prop_assert_eq!(tables[1].len(), 2 + SOURCE_TABLES.len());
+            }
+            prop_assert_eq!(tables[1 + source_tables].len(), 2 + NOT_MIGRATED_TABLES.len());
             for row in tables.iter().flat_map(|table| table.iter()) {
                 prop_assert!(row.starts_with("| ") || *row == "|---|---|", "{}", row);
                 prop_assert!(row.ends_with(" |") || *row == "|---|---|", "{}", row);

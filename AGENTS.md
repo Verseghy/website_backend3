@@ -150,7 +150,16 @@ In `test`, `development` and `e2e` the task refuses a source that is not
 local (localhost, 127.0.0.1, ::1 or a Unix socket), the container-network
 name `mysql` included (ADR 0024 §4, layer 3), and it reads only the legacy
 tables of its allow-list, never the newsletter's subscriber list
-(`src/domain/import_mysql/source_tables.rs`, NWS-01).
+(`src/domain/import_mysql/source_tables.rs`, NWS-01). It reads them in one
+locked session (`src/tasks/import_mysql/session.rs`, data-migration.md
+§3.3): `LOCK TABLES ... READ` over the allow-list only, the schema
+fingerprint against `src/tasks/import_mysql/expected_schema.rs`, every
+table's `AUTO_INCREMENT` and the refusal of a `snapshot_at` earlier than
+the latest timestamp in the source. The whole run is one transaction on
+the target, which `dry-run` rolls back and `apply` commits, and it first
+refuses a target whose `roles` or `user_permissions` CHECK differ from the
+code, or in which a table it writes holds a row (`src/tasks/import_mysql/target.rs`,
+data-migration.md §4.2; the invariant below).
 
 Uploaded media go below `settings.media` (ADR 0015 §3): locally
 `target/media/<env>/public` (the served tree), `tmp` (upload staging) and
@@ -246,6 +255,33 @@ production seed would leave a known account there and block the import
   every table, password hashes included, to files);
 - `Hooks::seed` itself refuses every environment but development, test and
   e2e (`domain::seed::check_environment`), whatever started it.
+
+### The pre-import invariant
+
+Nothing writes a row into production's `users`, `activity_log`,
+`revisions` or any other table that the cut-over import or the cut-over
+seed writes before the cut-over import runs; staging, which also runs
+`LOCO_ENV=production`, holds the same until its rehearsal import. The
+cut-over seed is the release-1 seed of ADR 0019 §5 (the partner banners,
+the site settings and one Diáktoll issue), which runs after the import
+(data-migration.md §13, open item 7). The maintainer accepted this
+invariant on 2026-10-25 (research: DECISIONS R9 (D10)).
+
+The import relies on it for the tables it writes: it never merges into
+existing data, so it refuses a target in which any of them holds a row,
+and names the first (data-migration.md §4.2; `IMPORT_TARGET_TABLES` in
+`src/domain/import_mysql/target.rs`, which lists them with the entity
+tables of data-migration.md §6). `roles` is the one exception: its
+migration seeds it, and the import only reads it. The seed's own tables
+are not on that list, because the import does not write them; the
+invariant keeps them empty all the same.
+
+So code that could write such a row in production refuses to before the
+import, or never runs there: every `db seed` is refused in production (the
+two refusals above), and a change that would let anything else write one
+there (an account, an activity entry, a revision, a seed record) needs a
+guard of its own in the same PR. To start a database over, recreate it
+(the commands above); never empty these tables in place.
 
 ## Rust dependencies
 

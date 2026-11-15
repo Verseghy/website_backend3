@@ -19,6 +19,16 @@
 //!   import reads, and the checked `SELECT` that is the only statement
 //!   form that names one; the newsletter's subscriber list is never read
 //!   (NWS-01);
+//! - [`source_session`]: the statements of the locked source session
+//!   (session settings, `LOCK TABLES`, the fingerprint and `AUTO_INCREMENT`
+//!   queries), the columns that hold the source's timestamps, and the
+//!   refusal of a `snapshot_at` earlier than the latest of them (§3.3,
+//!   §4.1);
+//! - [`fingerprint`]: the comparison of the source's columns with the
+//!   expected legacy DDL, naming every mismatch (§3.3);
+//! - [`target`]: the checks on backend3's own database before the import:
+//!   `roles` and the `user_permissions` CHECK agree with the code, and every
+//!   table the import writes is empty (§4.2);
 //! - [`report`]: the run report's `summary.json` and its Markdown skeleton
 //!   (data-migration.md §11.3), from the instants the task read from the app
 //!   clock;
@@ -31,9 +41,12 @@
 //! removes the importer (data-migration.md §13 item 9) removes them with the
 //! task.
 
+pub mod fingerprint;
 pub mod not_migrated;
 pub mod options;
 pub mod report;
 pub mod source;
 pub mod source_guard;
+pub mod source_session;
 pub mod source_tables;
+pub mod target;

@@ -22,7 +22,7 @@ use loco_rs::{Error, Result};
 
 use crate::domain::import_mysql::{
     options::ImportOptions,
-    report::{MARKDOWN_FILE, Outcome, RunSummary, SUMMARY_FILE, TASK_NAME},
+    report::{MARKDOWN_FILE, Outcome, ReportParts, RunSummary, SUMMARY_FILE, TASK_NAME},
 };
 
 /// The mode of both report files: read and write for the owner only.
@@ -36,6 +36,8 @@ pub const REPORT_FILE_MODE: u32 = 0o600;
 /// - `started_at`: the app clock's reading at the start of the run.
 /// - `finished_at`: the app clock's reading at its end, taken after the
 ///   import returned.
+/// - `parts`: what the import's steps found, filled by each step as it
+///   ended, so a run that failed later still reports them.
 /// - `result`: what the import returned. An error becomes the `failed`
 ///   outcome and its message the report's error.
 ///
@@ -52,6 +54,7 @@ pub fn finish(
     options: &ImportOptions,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
+    parts: ReportParts,
     result: Result<()>,
 ) -> Result<()> {
     let summary = RunSummary {
@@ -64,6 +67,7 @@ pub fn finish(
                 message: error.to_string(),
             },
         },
+        parts,
     };
     let written = write(&options.report, &summary);
     match &written {

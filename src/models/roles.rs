@@ -11,12 +11,35 @@
 //! `Cargo.toml`); roles go out only through the DTOs of
 //! `crate::dtos::admin::authz`.
 
-use sea_orm::entity::prelude::*;
+use sea_orm::{QueryOrder, entity::prelude::*};
 
 pub use super::_entities::roles::{ActiveModel, Entity, Model};
 
 /// The `roles` entity, under the name Loco's generated models use.
 pub type Roles = Entity;
+
+impl Model {
+    /// Every role row, in id order.
+    ///
+    /// - `db`: the connection or transaction to read on.
+    ///
+    /// The importer compares them with `crate::domain::authz::Role::ALL`
+    /// before it maps the legacy role names to them (data-migration.md
+    /// §6.13).
+    ///
+    /// # Errors
+    ///
+    /// A failed query.
+    pub async fn list_in_id_order<C>(db: &C) -> std::result::Result<Vec<Self>, DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        Entity::find()
+            .order_by_asc(super::_entities::roles::Column::Id)
+            .all(db)
+            .await
+    }
+}
 
 #[async_trait::async_trait]
 impl ActiveModelBehavior for ActiveModel {
