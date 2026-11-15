@@ -12,9 +12,8 @@
  * admin API requests of a page load. The server's access table
  * (`RESOURCE_ACCESS` in `src/domain/authz.rs`) has the labels row, so the
  * seed account's map is `{labels: ["list", "show"]}` and the check of the
- * map's lists runs on it. The admin registers no resource yet, so the
- * sidebar holds only the dashboard and the check of its resource links
- * starts to bite when the labels screen registers its resource. The
+ * map's lists runs on it. The sidebar links every resource the admin
+ * registers whose row offers `list`: so far the labels („Címkék”). The
  * redirect to the access-denied page needs a resource and an account that
  * may not list it, which the seed does not create, so the test opens the
  * pages directly; `src/auth/AccessPages.test.tsx` drives the redirects
@@ -93,6 +92,11 @@ test.describe("the access map", () => {
       const resource = (href ?? "").replace(/^\/admin\//, "").split("/")[0]
       expect(access[resource] ?? [], `sidebar link ${href}`).toContain("list")
     }
+    // The labels' row offers `list`, and the admin registers their list.
+    expect(access.labels ?? []).toContain("list")
+    await expect(
+      sidebar.getByRole("link", { name: "Címkék", exact: true })
+    ).toHaveAttribute("href", "/admin/labels")
 
     // The page load asked /auth/me and nothing else: the sidebar's access
     // questions were answered from it.

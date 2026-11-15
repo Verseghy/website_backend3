@@ -225,8 +225,9 @@ CI: the first makes any missing Hungarian string fail the run, the second adds
 the development-only clipboard recorder that its E2E test drives; then, from
 the repository root, `LOCO_ENV=e2e cargo loco start`, which migrates backend3_e2e
 on boot, and `LOCO_ENV=e2e cargo loco db seed`, which creates the seed account
-below). Every admin page but the sign-in screen needs a session, so the E2E
-tests sign in with that account (`signIn` in `admin/e2e/fixtures.ts`).
+and the seed labels below). Every admin page but the sign-in screen needs a
+session, so the E2E tests sign in with that account (`signIn` in
+`admin/e2e/fixtures.ts`).
 
 The E2E server also serves `/storage`, from `target/media/e2e/public`, with
 the fallback router (`config/e2e.yaml`): it stands in for the backend3 host,
@@ -254,6 +255,15 @@ existing account with that address exactly as it is, its roles included, so
 an account seeded before the roles existed keeps none; to start over,
 recreate the database. `admin/e2e/seed-account.ts` holds the same values for
 the E2E suite, and `tests/seed/mod.rs` fails when the two differ.
+
+The seed also creates 30 invented labels, `SEED_LABELS` in the same file,
+which the E2E suite pages through and sorts (`admin/e2e/labels.spec.ts`):
+more than one page of 25, colours that six labels share, and ADR 0020's ten
+words. A label whose name a live label already has, but for case, is left
+out, so a second seed adds nothing. They carry no revision and no activity
+entry, as the account carries none: only the local databases ever hold
+them. `admin/e2e/seed-labels.ts` holds the same list, which
+`tests/seed/mod.rs` checks too.
 
 Public-safety rule 1 allows the password in three files only: this one,
 `src/domain/seed.rs` and `admin/e2e/seed-account.ts` (ADR 0040 §5, which

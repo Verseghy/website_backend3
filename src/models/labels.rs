@@ -17,19 +17,38 @@
 //! in an UPDATE; research: DECISIONS R15, D90), never the app clock's, so
 //! the hook below stamps nothing.
 //!
+//! [`Model::seed_labels`] is the one write so far: the development, test and
+//! E2E seed's invented labels (`crate::domain::seed::SEED_LABELS`), which the
+//! E2E suite lists. Like the seed account, it writes no revision and no
+//! activity entry: only local databases ever hold those rows (ADR 0040).
+//!
 //! The entity derives no serde (`[package.metadata.db.entity]` in
 //! `Cargo.toml`): a label goes out only through
 //! `crate::dtos::admin::labels::LabelResponse`.
 
 use loco_rs::prelude::*;
-use sea_orm::{DatabaseConnection, Select};
+use sea_orm::{DatabaseConnection, Select, TransactionSession, sea_query::Func};
 
 pub use super::_entities::labels::{ActiveModel, Column, Entity, Model};
 use super::list_page::{self, Page};
-use crate::domain::list_query::ListQuery;
+use crate::domain::{list_query::ListQuery, seed::SeedLabel};
 
 /// The `labels` entity, under the name Loco's generated models use.
 pub type Labels = Entity;
+
+/// `lower(name) = lower($1)`: whether a label's name equals `name` but for
+/// case, the comparison of the live labels' unique index on `lower(name)`
+/// (the labels migration).
+///
+/// - `name`: the name to compare with, bound as a parameter.
+///
+/// sea-query's `ExprTrait` is imported only inside this function, for the
+/// reason `users::lower_email_equals` gives: in a wider scope its `eq`
+/// would compete with `ColumnTrait::eq` and `PartialEq::eq`.
+fn lower_name_equals(name: &str) -> Expr {
+    use sea_orm::sea_query::ExprTrait as _;
+    Func::lower(Expr::col(Column::Name)).eq(Func::lower(name))
+}
 
 #[async_trait::async_trait]
 impl ActiveModelBehavior for ActiveModel {
@@ -98,5 +117,63 @@ impl Model {
         query: &ListQuery,
     ) -> ModelResult<Page<Self>> {
         list_page::fetch(db, Self::find_live(), query).await
+    }
+
+    /// Creates the seed's labels that no live label names yet: the invented
+    /// labels of the development, test and E2E seed
+    /// (`crate::domain::seed::SEED_LABELS`), which `Hooks::seed` passes.
+    ///
+    /// - `db`: the connection to write with; the labels are written in one
+    ///   transaction of their own.
+    /// - `labels`: the labels to create, in order, so their ids grow in
+    ///   that order.
+    ///
+    /// A label whose name a live label already has, but for case (the
+    /// unique index's comparison), is left out, and the live label is left
+    /// exactly as it is, so seeding twice gives the result of seeding once,
+    /// as `find_or_create_by` does in a Rails seed. A trashed label with the
+    /// name does not count: the index leaves trashed rows out too.
+    /// `created_at` and `updated_at` come from PostgreSQL's clock, the
+    /// columns' defaults, and `created_by` and `updated_by` stay NULL: the
+    /// system created them (research: DECISIONS R15 (D90)). No revision or
+    /// activity entry is written: like the seed account
+    /// (`users::Model::seed_account`), these rows fill only local databases,
+    /// and the caller checks the environment first
+    /// (`crate::domain::seed::check_environment`); this method does not see
+    /// it.
+    ///
+    /// Returns how many labels it created.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::DbErr`] when a query fails, including the unique
+    /// violation of a concurrent seed that created one of the names first.
+    /// Nothing is written then.
+    pub async fn seed_labels<C>(db: &C, labels: &[SeedLabel]) -> ModelResult<u64>
+    where
+        C: ConnectionTrait + TransactionTrait,
+    {
+        let txn = db.begin().await?;
+        let mut created = 0;
+        for label in labels {
+            let taken = Self::find_live()
+                .filter(lower_name_equals(label.name))
+                .one(&txn)
+                .await?
+                .is_some();
+            if taken {
+                continue;
+            }
+            ActiveModel {
+                name: ActiveValue::Set(label.name.to_owned()),
+                color: ActiveValue::Set(label.color.to_owned()),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await?;
+            created += 1;
+        }
+        txn.commit().await?;
+        Ok(created)
     }
 }

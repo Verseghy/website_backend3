@@ -632,7 +632,9 @@ impl Hooks for App {
     /// Seeds a local database: `cargo loco db seed` (and `backend3-cli db
     /// seed`, which the E2E job runs) creates the invented account of
     /// [`seed::SEED_ACCOUNT`], with its `admin` role, unless an account
-    /// already has its address ([`users::Model::seed_account`]).
+    /// already has its address ([`users::Model::seed_account`]), and the
+    /// invented labels of [`seed::SEED_LABELS`] that no live label names yet
+    /// ([`labels::Model::seed_labels`]), which the E2E suite lists.
     ///
     /// - `ctx`: the application context; the hook takes the environment and
     ///   the database from it.
@@ -659,6 +661,12 @@ impl Hooks for App {
                 );
             }
         }
+        let created = labels::Model::seed_labels(&ctx.db, seed::SEED_LABELS).await?;
+        tracing::info!(
+            created,
+            listed = seed::SEED_LABELS.len(),
+            "created the seed labels that no live label named yet"
+        );
         Ok(())
     }
 }

@@ -19,6 +19,7 @@ import { createSessionExpiry } from "@/auth/session-expiry"
 import { createDataProvider } from "@/data-provider/data-provider"
 import { createI18nProvider } from "@/i18n/provider"
 import { shouldReportMissingKeys } from "@/i18n/report-missing-keys"
+import { createResourceHandlers } from "@/resources/handlers"
 import { createAdminRouter } from "@/router"
 import { ChunkLoadReloadPrompt, reloadPage } from "@/update-prompt/UpdatePrompt"
 
@@ -39,7 +40,7 @@ const i18nProvider = createI18nProvider({
   }),
 })
 // The browser's fetch, bound to window: called unbound, it throws
-// "Illegal invocation" in Chromium.
+// "Illegal invocation" in Chromium. Both providers call it.
 const browserFetch = window.fetch.bind(window)
 // One retry queue for the in-place sign-in (ADR 0006, "Follow-up work"):
 // both providers send through it, and the app's layout mounts the dialog
@@ -48,7 +49,9 @@ const browserFetch = window.fetch.bind(window)
 const sessionExpiry = createSessionExpiry()
 const dataProvider = createDataProvider({
   apiBaseUrl: "/api/admin",
-  resources: {},
+  // Every resource's handlers send through the provider's `request`, which
+  // calls `browserFetch` and holds a 401 for the in-place sign-in.
+  resources: createResourceHandlers(),
   fetch: browserFetch,
   sessionExpiry,
 })

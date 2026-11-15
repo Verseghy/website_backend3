@@ -488,8 +488,10 @@ jobs:
         # Hooks::seed loads the E2E fixtures into backend3_e2e after the
         # server has migrated it on boot (ADR 0022 section 3): the invented
         # account of src/domain/seed.rs, which the Playwright suite signs in
-        # with (admin/e2e/seed-account.ts). It runs only in development, test
-        # and e2e; production refuses `db seed`.
+        # with (admin/e2e/seed-account.ts), and the invented labels of
+        # SEED_LABELS there, which the label list's Playwright tests page
+        # through and sort (admin/e2e/seed-labels.ts). It runs only in
+        # development, test and e2e; production refuses `db seed`.
         run: target/debug/backend3-cli db seed
       - name: Install the Playwright browsers
         # Chromium for the admin suite, and all three engines for

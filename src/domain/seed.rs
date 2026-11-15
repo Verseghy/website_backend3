@@ -1,12 +1,19 @@
-//! The development, test and E2E seed: the one invented account that
-//! `cargo loco db seed` creates, and the environments in which seeding may
-//! run at all.
+//! The development, test and E2E seed: the one invented account and the
+//! invented labels that `cargo loco db seed` creates, and the environments in
+//! which seeding may run at all.
 //!
 //! Why it exists: the E2E suite signs in through the admin's sign-in screen,
 //! and a developer who runs `cargo loco start` beside the Vite dev server
 //! needs an account to sign in with. backend3 mounts no registration route
 //! (ADR 0006 §4), so `Hooks::seed` (`src/app.rs`) creates this account
 //! through the users model.
+//!
+//! The E2E suite also needs rows to list: the label list's tests page
+//! through, sort and order labels (parity SHR-02, SHR-03; ADR 0020 §4), and
+//! no route writes one yet. So the seed also creates the invented labels of
+//! [`SEED_LABELS`] through the labels model, in the same environments
+//! (recipe 1 step 11 of the project skill: an E2E fixture comes from the
+//! seed).
 //!
 //! The account is invented. Its name and address belong to no person
 //! (`example.org` is reserved for examples, RFC 2606), and its password,
@@ -67,6 +74,74 @@ pub const SEED_ACCOUNT: SeedAccount = SeedAccount {
     password: "public-throwaway-seed-password",
     roles: &[Role::Admin],
 };
+
+/// A label that the seed creates (`labels`, parity LBL-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedLabel {
+    /// The label's name, `labels.name`.
+    pub name: &'static str,
+    /// The label's colour, `labels.color`: `#rrggbb` in upper-case hex
+    /// digits.
+    pub color: &'static str,
+}
+
+/// One entry of [`SEED_LABELS`], written as a call so that rustfmt keeps
+/// each label on one line.
+///
+/// - `name`: the label's name.
+/// - `color`: its `#rrggbb` colour.
+const fn label(name: &'static str, color: &'static str) -> SeedLabel {
+    SeedLabel { name, color }
+}
+
+/// The invented labels of the development, test and E2E seed, in the order
+/// the seed writes them, so their ids grow down the list.
+///
+/// The E2E suite pages through and sorts the label list over them
+/// (`admin/e2e/labels.spec.ts`; `admin/e2e/seed-labels.ts` holds the same
+/// values, and `tests/seed/mod.rs` checks that the two agree), so the list
+/// is shaped for those checks:
+///
+/// - 30 labels: more than one page of the default 25 (parity SHR-02), and
+///   no more than the largest page of 100, so one page shows them all;
+/// - five colours, each shared by six labels, so a sort by colour has ties
+///   that only the id breaks (SHR-03);
+/// - ADR 0020's ten words, whose Hungarian order (`hu_icu`) no other
+///   collation gives, and 20 numbered „Próbacímke” labels.
+///
+/// Every name is invented and belongs to no person or real label.
+pub const SEED_LABELS: &[SeedLabel] = &[
+    label("ábra", "#1E88E5"),
+    label("alma", "#43A047"),
+    label("cukor", "#E53935"),
+    label("csiga", "#FDD835"),
+    label("olló", "#8E24AA"),
+    label("óra", "#1E88E5"),
+    label("öröm", "#43A047"),
+    label("őz", "#E53935"),
+    label("zúgó", "#FDD835"),
+    label("zsák", "#8E24AA"),
+    label("Próbacímke 01", "#1E88E5"),
+    label("Próbacímke 02", "#43A047"),
+    label("Próbacímke 03", "#E53935"),
+    label("Próbacímke 04", "#FDD835"),
+    label("Próbacímke 05", "#8E24AA"),
+    label("Próbacímke 06", "#1E88E5"),
+    label("Próbacímke 07", "#43A047"),
+    label("Próbacímke 08", "#E53935"),
+    label("Próbacímke 09", "#FDD835"),
+    label("Próbacímke 10", "#8E24AA"),
+    label("Próbacímke 11", "#1E88E5"),
+    label("Próbacímke 12", "#43A047"),
+    label("Próbacímke 13", "#E53935"),
+    label("Próbacímke 14", "#FDD835"),
+    label("Próbacímke 15", "#8E24AA"),
+    label("Próbacímke 16", "#1E88E5"),
+    label("Próbacímke 17", "#43A047"),
+    label("Próbacímke 18", "#E53935"),
+    label("Próbacímke 19", "#FDD835"),
+    label("Próbacímke 20", "#8E24AA"),
+];
 
 /// Why `Hooks::seed` refused to run. The `Display` text is the message the
 /// operator or developer sees.
@@ -204,6 +279,65 @@ mod tests {
                 .len(),
             crate::domain::authz::Permission::ALL.len()
         );
+    }
+
+    /// Whether `color` is `#rrggbb` in upper-case hex digits, a colour the
+    /// `labels` table's CHECK accepts written one way only, so that two
+    /// seed labels share a colour exactly when their text is equal.
+    fn is_upper_hex_colour(color: &str) -> bool {
+        color.len() == 7
+            && color.starts_with('#')
+            && color[1..]
+                .chars()
+                .all(|digit| digit.is_ascii_digit() || ('A'..='F').contains(&digit))
+    }
+
+    #[test]
+    fn the_seed_labels_are_storable_and_named_once() {
+        let mut names = std::collections::BTreeSet::new();
+        for label in SEED_LABELS {
+            assert_eq!(label.name.trim(), label.name, "{label:?}");
+            assert!(!label.name.is_empty(), "{label:?}");
+            assert!(is_upper_hex_colour(label.color), "{label:?}");
+            // The live labels' unique index is on lower(name) (labels
+            // migration), so no two names may differ only in case.
+            assert!(names.insert(label.name.to_lowercase()), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn the_seed_labels_fill_more_than_one_default_page_and_fit_on_the_largest() {
+        // The list contract's sizes (domain::list_query, parity SHR-02).
+        let default_page = usize::from(crate::domain::list_query::DEFAULT_PER_PAGE);
+        let largest_page = crate::domain::list_query::PAGE_SIZES
+            .into_iter()
+            .map(usize::from)
+            .max()
+            .expect("page sizes");
+        assert!(SEED_LABELS.len() > default_page, "{}", SEED_LABELS.len());
+        assert!(SEED_LABELS.len() <= largest_page, "{}", SEED_LABELS.len());
+    }
+
+    #[test]
+    fn every_seed_colour_is_shared_so_a_colour_sort_has_ties() {
+        // SHR-03: a sort by colour has ties, which only the id breaks.
+        let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+        for label in SEED_LABELS {
+            *counts.entry(label.color).or_default() += 1;
+        }
+        assert!(counts.len() > 1, "{counts:?}");
+        assert!(counts.values().all(|&count| count >= 2), "{counts:?}");
+    }
+
+    #[test]
+    fn the_seed_labels_hold_adr_0020s_ten_words() {
+        // ADR 0020, "Ordering of the same ten words": the order only `hu`
+        // gives, which the E2E suite checks on the label list.
+        for word in [
+            "ábra", "alma", "cukor", "csiga", "olló", "óra", "öröm", "őz", "zúgó", "zsák",
+        ] {
+            assert!(SEED_LABELS.iter().any(|label| label.name == word), "{word}");
+        }
     }
 
     proptest! {

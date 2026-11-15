@@ -39,6 +39,12 @@ if (hasWindow && typeof window.ResizeObserver !== "function") {
     disconnect() {}
   }
 }
+// jsdom's `scrollTo` only reports "Not implemented" on its virtual console.
+// ra-core scrolls to the top when a list changes its page or sort, which
+// the list screens' tests do, so it gets an inert stand-in: nothing scrolls.
+if (hasWindow) {
+  window.scrollTo = () => {}
+}
 
 let unexpected: unknown[][] = []
 

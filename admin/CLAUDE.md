@@ -16,14 +16,30 @@ ADR 0005 (bindings) before changing anything here.
   `/api/admin` (ADR 0004 §1). Never install or use `ra-data-json-server`,
   `ra-data-simple-rest` or JSONPlaceholder, and never use the kit's
   `example-admin` block. A slice adds a resource by registering
-  `ResourceHandlers` for it, typed against `src/bindings/`. A handler sends
-  every request with its context's `request(path, init)`, never with
-  `fetch` itself: that is what holds a `401 unauthorized` for the in-place
-  sign-in (Authentication, below). Its body must be one that can be sent
-  twice (a string, `Blob` or `FormData`, never a stream), and a query
-  handler passes ra-core's `params.signal` on: the provider declares
-  `supportAbortSignal`, so the signal is there, and it ends the request and
-  its wait when the screen unmounts (`src/data-provider/abort-signal.test.tsx`).
+  `ResourceHandlers` for it, typed against `src/bindings/`, in
+  `src/resources/handlers.ts`, and its `<Resource>` in `src/App.tsx`. A
+  handler sends every request with its context's `request(path, init)`,
+  never with `fetch` itself: that is what holds a `401 unauthorized` for
+  the in-place sign-in (Authentication, below). Its body must be one that
+  can be sent twice (a string, `Blob` or `FormData`, never a stream), and
+  a query handler passes ra-core's `params.signal` on: the provider
+  declares `supportAbortSignal`, so the signal is there, and it ends the
+  request and its wait when the screen unmounts
+  (`src/data-provider/abort-signal.test.tsx`). A resource's reads are
+  `createListHandlers` of `src/data-provider/list-handlers.ts` over the
+  shared admin list contract (`getList`, `getOne`, `getMany`), which
+  follow both rules, with a reader of one row of its binding; recipe 11
+  of the project skill (the list contract) has the steps.
+  `src/resources/resource-coverage.test.tsx` (ADR 0021 §7, "Resource
+  coverage") fails on a `<Resource>` without its handlers or without
+  `resources.<name>.name` in both forms in `hu.ts`.
+- **List screens.** A resource's list is `ResourceList` of
+  `src/resources/ResourceList.tsx`, never the kit's `List`: the kit's
+  defaults ask for 10 rows, offer 5, 10, 25 and 50, and add an export of
+  1,000 rows, none of which the list contract serves (25 rows to a page,
+  10, 25, 50 or 100, no "all": parity SHR-02).
+  `src/resources/ResourceList.test.tsx` fails on a screen under
+  `src/resources/` that imports the kit's `List`.
 - **TypeScript config.** Keep `verbatimModuleSyntax: true`; the kit's advice
   to set it to `false` does not apply (the copied files use `import type`, and
   `npm run typecheck` passes with it on).

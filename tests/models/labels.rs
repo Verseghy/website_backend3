@@ -1,15 +1,17 @@
 //! The `labels` model (parity LBL-01; ADR 0011 §3, ADR 0020 §4): the live
 //! finders leave trashed labels out; a page of the list comes in the
 //! Hungarian alphabet with the id tie-break, filtered and windowed as the
-//! checked query asks, with the total of the whole list; and `App::truncate`
-//! empties the table. Rows are written in SQL, because the label writes
-//! (and their safety net) come with a later slice. Every name is invented.
+//! checked query asks, with the total of the whole list; `App::truncate`
+//! empties the table; and the seed's labels are created once each. Rows are
+//! written in SQL, because the label writes (and their safety net) come with
+//! a later slice. Every name is invented.
 
 use backend3::{
     app::App,
     domain::{
         labels::LIST,
         list_query::{self, ListQuery},
+        seed::SeedLabel,
     },
     models::{
         labels::{Entity, Model},
@@ -290,6 +292,55 @@ async fn truncate_empties_the_labels_and_leaves_the_accounts() {
                 .expect("count"),
             1
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn seed_labels_creates_the_missing_names_once_and_counts_them() {
+    // The development, test and E2E seed's labels (`Hooks::seed`): a name
+    // that a live label has, but for case, is left out; a trashed label's
+    // name is free, as the live labels' unique index says.
+    with_app(|_router, ctx| async move {
+        let db = &ctx.db;
+        label(db, 900, "SPORT", "#000000").await;
+        label(db, 901, "Hírek", "#000000").await;
+        trash(db, 901).await;
+        let seed = [
+            SeedLabel {
+                name: "Sport",
+                color: "#1E88E5",
+            },
+            SeedLabel {
+                name: "Hírek",
+                color: "#43A047",
+            },
+            SeedLabel {
+                name: "Ünnep",
+                color: "#43A047",
+            },
+        ];
+
+        assert_eq!(Model::seed_labels(db, &seed).await.expect("first"), 2);
+        assert_eq!(Model::seed_labels(db, &seed).await.expect("second"), 0);
+
+        let mut live: Vec<(String, String)> = Model::find_live()
+            .all(db)
+            .await
+            .expect("live labels")
+            .into_iter()
+            .map(|label| (label.name, label.color))
+            .collect();
+        live.sort();
+        assert_eq!(
+            live,
+            [
+                ("Hírek".to_owned(), "#43A047".to_owned()),
+                ("SPORT".to_owned(), "#000000".to_owned()),
+                ("Ünnep".to_owned(), "#43A047".to_owned()),
+            ]
+        );
+        assert_eq!(Entity::find().count(db).await.expect("count"), 4);
     })
     .await;
 }
