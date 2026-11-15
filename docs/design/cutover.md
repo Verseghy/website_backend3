@@ -117,6 +117,7 @@ A scheduled job on staging (a Kubernetes CronJob, as in [ADR 0016](adr/0016-no-r
 The **import report** is machine-readable. It contains:
 
 - per-table counts: source rows, imported rows and the expected delta, with every delta traced to a rule in the resolution list or the import rules (ADR 0017);
+- the defects: every instance the import found and every entry or row it refused, all of them in the dry run, which goes on past each and exits non-zero at its end, while `apply` stops at the first ([ADR 0047](adr/0047-import-dry-runs-collect-every-defect-and-refusal.md)); beside it, the editors' sign-off sheet `signoff.md` ([data-migration.md](data-migration.md) §8.2);
 - the release-1 seed rows: 3 partner banners, 1 site-settings record, 1 Diáktoll issue, 0 notices;
 - integrity results: every constraint created and every check at zero;
 - the normalisation summary: rows changed per rule, and the images extracted to `/storage/uploads/posts/<id>/`;

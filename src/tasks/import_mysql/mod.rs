@@ -43,10 +43,16 @@
 //!    naming the first ([`target::refuse_non_empty`]);
 //! 3. reads the source in one locked session: the schema fingerprint,
 //!    every table's `AUTO_INCREMENT` and the latest timestamp, which
-//!    `snapshot_at` must not precede ([`session`]).
+//!    `snapshot_at` must not precede ([`session`]);
+//! 4. concludes the defect check, last: a run that collected a defect
+//!    problem fails here, naming every one (`DefectsPart::conclude`). Only
+//!    a dry run can collect one, because `apply` stops at the first
+//!    (ADR 0047, data-migration.md §4.2, §11.1).
 //!
-//! The defect detectors and the table steps follow; they take their
-//! entries from the validated resolution file. Until they arrive the run
+//! The table steps follow, each with the defect rules of its tables, which
+//! a `DefectDetector` built from the run's mode and the validated
+//! resolution file runs (`domain::import_mysql::defects`); the first of
+//! them passes the loaded file to [`run`]. Until they arrive the run
 //! imports nothing, and the report says so section by section. Every step
 //! reads the legacy tables through [`source::select_rows`] on the session's
 //! connection, the source query layer, which reads only the tables of the
@@ -169,20 +175,22 @@ impl Task for ImportMysql {
 ///
 /// Everything runs in one transaction on the target ([`target`]): the
 /// checks of the code tables, the refusal of a target that holds data, and
-/// the source session ([`session::read`]). `apply` commits it, `dry-run`
-/// rolls it back, and a failed run always rolls back. The defect detectors
-/// and the table steps come in the slices that follow (ADR 0025 class d),
-/// take their entries from the resolution file that [`ImportMysql::run`]
-/// has validated before the task lock, and each adds its part of the
-/// report.
+/// the source session ([`session::read`]), and, last, the conclusion of the
+/// defect check, which fails a dry run that collected a defect problem
+/// (ADR 0047). `apply` commits it, `dry-run` rolls it back, and a failed
+/// run always rolls back. The table steps come in the slices that follow
+/// (ADR 0025 class d), run their defect rules through a `DefectDetector`
+/// built from the resolution file that [`ImportMysql::run`] has validated
+/// before the task lock, and each adds its part of the report.
 ///
 /// # Errors
 ///
 /// The refusals of data-migration.md §4.2 that the steps so far make: a
 /// `roles` table or a permission CHECK that differs from the code, a
 /// target table that holds a row, a source whose schema differs from the
-/// expected DDL, and a `snapshot_at` earlier than the latest timestamp in
-/// the source; and any failed exchange with either database.
+/// expected DDL, a `snapshot_at` earlier than the latest timestamp in the
+/// source, and the defect problems a dry run collected
+/// (`DefectProblems`); and any failed exchange with either database.
 pub async fn run(
     source_db: &MySqlPool,
     target_db: &DatabaseConnection,
@@ -193,7 +201,12 @@ pub async fn run(
         target::check_code_tables(txn).await?;
         target::refuse_non_empty(txn).await?;
         parts.source = Some(session::read(source_db, options).await?);
-        Ok(())
+        // Last, so that a dry run has gone through every step before it
+        // fails on the problems it collected; `apply` stopped at the first.
+        parts
+            .defects
+            .conclude()
+            .map_err(|problems| Error::Message(problems.to_string()))
     })
     .await
 }

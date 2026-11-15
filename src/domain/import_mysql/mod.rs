@@ -33,9 +33,17 @@
 //!   `data/import/resolutions.toml`: its TOML schema, parsed and validated
 //!   into [`resolutions::ResolutionFile`] with a message that names the
 //!   entry and the field for every problem;
+//! - [`defects`]: the generic defect detector (ADR 0017 §3, ADR 0047): every
+//!   instance detected from its rule on every run and paired with the
+//!   resolution file's entry, whose precondition must hold; `apply` stops at
+//!   the first instance or entry it cannot resolve as signed, a dry run
+//!   lists them all and fails at its end;
 //! - [`report`]: the run report's `summary.json` and its Markdown skeleton
 //!   (data-migration.md §11.3), from the instants the task read from the app
-//!   clock;
+//!   clock, with the source session's and the defect detectors' parts;
+//! - [`signoff`]: the editors' sign-off sheet, `signoff.md`, an extract of
+//!   the Defects part with ids, public paths and proposed resolutions only
+//!   (data-migration.md §8.2);
 //! - [`not_migrated`]: the legacy tables that are not migrated, with their
 //!   reasons (data-migration.md §9.1).
 //!
@@ -45,11 +53,13 @@
 //! removes the importer (data-migration.md §13 item 9) removes them with the
 //! task.
 
+pub mod defects;
 pub mod fingerprint;
 pub mod not_migrated;
 pub mod options;
 pub mod report;
 pub mod resolutions;
+pub mod signoff;
 pub mod source;
 pub mod source_guard;
 pub mod source_session;

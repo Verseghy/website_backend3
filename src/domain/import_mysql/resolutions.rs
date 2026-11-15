@@ -1565,7 +1565,12 @@ fn instant_value(value: &Value) -> Result<DateTime<Utc>, String> {
 /// Whether `path` is a legacy index image path: `index/`, 32 lower-case hex
 /// digits, `.` and an extension of ASCII letters and digits, at most 191
 /// characters, the length of the `index_image` column (§6.1).
-fn is_index_image_path(path: &str) -> bool {
+///
+/// - `path`: a D3 entry's `expect_index_image`, or a source
+///   `posts_data.index_image` value that the defect detector shows
+///   (`defects::IndexImage`).
+#[must_use]
+pub fn is_index_image_path(path: &str) -> bool {
     let Some(name) = path.strip_prefix("index/") else {
         return false;
     };
