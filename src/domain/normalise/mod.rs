@@ -28,6 +28,10 @@
 //! - **N5**, its block rules (`blocks.rs`): `p[align]` to `text-align`,
 //!   `table[align]` dropped, `h5` and `h6` to `h4`, an italic `h2` to
 //!   `<h2><em>`, and `p[lang]` stripped;
+//! - **N5**, its inline rules (`marks.rs`): the legacy marks `b`, `i`,
+//!   `ins`, `strike` and `del` renamed to `strong`, `em`, `u` and `s`, `big`
+//!   unwrapped, `span.marker` turned into a yellow highlight, and
+//!   `span[dir]` unwrapped (a marker span loses only its `dir`);
 //! - **N6** (`dead_host.rs`): `src` and `href` on the dead host's
 //!   `/storage/` rewritten to root-relative `/storage/`;
 //! - **N8** (`dom.rs`): html5ever's serialisation, which leaves only
@@ -35,9 +39,8 @@
 //!
 //! The steps that later slices add slot in where §7.1 orders them: N1 and
 //! N2 (legacy embeds) between N0 and N3; N4 (inline `data:` images)
-//! between N3 and N5, N5's inline rules beside its block rules, and N5b
-//! (the content-v1 layout) between N5 and N6; N7 (the sanitiser with its
-//! planned removals) between N6 and N8.
+//! between N3 and N5, and N5b (the content-v1 layout) between N5 and N6;
+//! N7 (the sanitiser with its planned removals) between N6 and N8.
 //! Each step records what it changed for the
 //! run report ([`report`]), and the pass also lists, without changing them,
 //! the dead-host occurrences N6 leaves and the images without alt text
@@ -55,11 +58,11 @@
 //! normalise(x)` (editor.md §13.6, data-migration.md §11.2), holds for
 //! every body the normaliser accepts. The rules only remove what they look
 //! for (`center`; the `align` and `lang` attributes, the `h5` and `h6` tag
-//! names and the italic `font-style` of N5's block rules; the dead
-//! `/storage/` prefixes), so the passes after the first only re-parse. A
-//! body that is still changing after the last pass is refused with
-//! [`NormaliseError::NotNormalisable`], and the import treats that like a
-//! failed N9 check (data-migration.md §4.2): for example
+//! names and the italic `font-style` of N5's block rules; the legacy marks
+//! of its inline rules; the dead `/storage/` prefixes), so the passes after
+//! the first only re-parse. A body that is still changing after the last
+//! pass is refused with [`NormaliseError::NotNormalisable`], and the import
+//! treats that like a failed N9 check (data-migration.md §4.2): for example
 //! one with a `plaintext` element, whose end tag the serialiser writes and
 //! no parser reads, a `pre` whose content starts with three or more line
 //! feeds (each parse drops one, and the third pass still drops one), tag
@@ -83,7 +86,8 @@
 //! pass and looks at most at two children of a crowded parent (`center.rs`,
 //! "Cost"). The other rules are linear: N5's block rules plan every edit in
 //! one walk, the `em` and `i` inside nested italic headings included
-//! (`blocks.rs`, "Cost"). The normaliser has no limit of its own, which is
+//! (`blocks.rs`, "Cost"), and its inline rules look at each element once
+//! (`marks.rs`, "Cost"). The normaliser has no limit of its own, which is
 //! acceptable only because of its two inputs: the import's is the fixed
 //! legacy dump, and backend3's own bodies, which `content_normalize` reads,
 //! hold no `center` and are bounded by the sanitiser's size and depth
@@ -110,6 +114,7 @@ mod dead_host;
 mod dom;
 pub mod fixed_point;
 mod images;
+mod marks;
 pub mod report;
 
 use std::borrow::Cow;
@@ -189,6 +194,11 @@ fn pass(input: &str, report: &mut NormaliseReport) -> (String, Observations) {
     // among the aligned headings and must centre an italic `h2` before N5
     // puts an `em` inside it (`blocks.rs`, "Order").
     blocks::map_blocks(&mut html, report);
+    // N5's inline rules, after its block rules: an `i` that the
+    // italic-heading rule unwraps is gone before the `i` rule runs, so it is
+    // not also counted as `i_to_em` (`marks.rs`, "After N3 and N5's block
+    // rules").
+    marks::map_marks(&mut html, report);
     dead_host::rewrite_links(&mut html, report);
     let observations = Observations {
         dead_host_kept: dead_host::occurrences(&html),

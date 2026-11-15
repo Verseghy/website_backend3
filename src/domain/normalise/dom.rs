@@ -306,29 +306,42 @@ pub(super) fn remove_attribute(element: &mut Element, name: &str) -> Option<StrT
     Some(element.attrs.remove(at).1)
 }
 
+/// Whether the `style` attribute value `style` holds no declaration text at
+/// all: only ASCII white space and `;`. Such a value styles nothing, so a
+/// rule may treat it as a missing `style`, and N7 removes it.
+///
+/// - `style`: a `style` attribute value.
+pub(super) fn is_blank_style(style: &str) -> bool {
+    style
+        .trim_matches(|c: char| c.is_ascii_whitespace() || c == ';')
+        .is_empty()
+}
+
 /// Gives `element` the CSS declaration `declaration` in front of its
-/// `style`, or as its whole `style` when it has none or only white space
-/// and `;`. In front, never after: a declaration that the legacy style
-/// leaves open, such as an unclosed bracket or comment, would swallow
-/// anything appended, so the new declaration always reads back as the
-/// first one. The rules write one only where nothing in the old value that
-/// N7 keeps can override it, and N7 then writes the style canonically
-/// (editor.md §3.1).
+/// `style`, or as its whole `style` when it has none or a blank one
+/// ([`is_blank_style`]).
+///
+/// In front, never after: a declaration that the legacy style leaves open,
+/// such as an unclosed bracket or comment, would swallow anything appended,
+/// so the new declaration always reads back as the first one. In front also
+/// gives the new declaration the lowest precedence, because a later
+/// declaration of the same property wins when its value is accepted: in a
+/// browser, any valid CSS value; in N7's cascade (editor.md §3.1 rule 5),
+/// only a value content-v1 keeps. N3 and N5's paragraph rule write one only
+/// where nothing in the old value that N7 keeps can override it; N5's
+/// marker rule relies on that precedence, so that a span's own background
+/// still wins over the highlight, as it won over the class rule. N7 then
+/// writes the style canonically (editor.md §3.1).
 ///
 /// - `element`: the element to change.
-/// - `declaration`: one declaration, such as `text-align: center`.
+/// - `declaration`: one declaration in its canonical spelling, such as
+///   `text-align: center`, without a `;`.
 pub(super) fn prepend_declaration(element: &mut Element, declaration: &str) {
     let value = match element.attr("style") {
-        Some(style)
-            if !style
-                .trim_matches(|c: char| c.is_ascii_whitespace() || c == ';')
-                .is_empty() =>
-        {
-            format!(
-                "{declaration}; {}",
-                style.trim_start_matches(|c: char| c.is_ascii_whitespace())
-            )
-        }
+        Some(style) if !is_blank_style(style) => format!(
+            "{declaration}; {}",
+            style.trim_start_matches(|c: char| c.is_ascii_whitespace())
+        ),
         _ => declaration.to_owned(),
     };
     set_attribute(element, "style", &value);
@@ -521,6 +534,33 @@ mod tests {
             serialise(&html),
             r#"<p style="color: red" align="center" xml:lang="en">x</p>"#
         );
+        // An attribute in another namespace is not the one in no namespace.
+        let mut html = parse(r#"<svg><a xlink:href="/x"></a></svg>"#);
+        let a = html
+            .root_element()
+            .descendants()
+            .find(|node| {
+                node.value()
+                    .as_element()
+                    .is_some_and(|e| &*e.name.local == "a")
+            })
+            .expect("an SVG link")
+            .id();
+        assert_eq!(
+            edit_element(&mut html, a, |element| remove_attribute(element, "href")),
+            Some(None)
+        );
+        assert_eq!(serialise(&html), r#"<svg><a xlink:href="/x"></a></svg>"#);
+    }
+
+    #[test]
+    fn a_blank_style_holds_only_white_space_and_semicolons() {
+        for blank in ["", " ", " ; ;\t\n", ";"] {
+            assert!(is_blank_style(blank), "{blank:?}");
+        }
+        for style in ["color: red", " ;x", "/* */", "\u{a0}"] {
+            assert!(!is_blank_style(style), "{style:?}");
+        }
     }
 
     #[test]
@@ -538,15 +578,21 @@ mod tests {
             .expect("an element")
         };
         assert_eq!(prepended(None), "text-align: right");
+        assert_eq!(prepended(Some("")), "text-align: right");
         assert_eq!(prepended(Some(" ;; ")), "text-align: right");
         assert_eq!(
             prepended(Some("\n color: red")),
             "text-align: right; color: red"
         );
-        // An unclosed comment would swallow an appended declaration.
+        // An unclosed comment or bracket would swallow an appended
+        // declaration; whatever the old value leaves open stays at the end.
         assert_eq!(
             prepended(Some("color: red; /* x")),
             "text-align: right; color: red; /* x"
+        );
+        assert_eq!(
+            prepended(Some("color: red; background: url(")),
+            "text-align: right; color: red; background: url("
         );
     }
 
@@ -775,6 +821,40 @@ mod tests {
             prop_assert_eq!(after.read.first().map(|d| d.name.as_str()), Some("text-align"), "{:?}", written);
             prop_assert_eq!(&after.read[1..], &before.read[..], "{:?}", written);
             prop_assert_eq!(after.unreadable, before.unreadable, "{:?}", written);
+        }
+
+        // The blank test is exactly "nothing but ASCII white space and `;`".
+        #[test]
+        fn blank_styles_are_white_space_and_semicolons(style in any::<String>()) {
+            prop_assert_eq!(
+                is_blank_style(&style),
+                style.chars().all(|c| c.is_ascii_whitespace() || c == ';')
+            );
+        }
+
+        // The declaration always comes first, and the old value follows it
+        // unchanged but for its leading white space; a blank value is
+        // replaced.
+        #[test]
+        fn a_prepended_declaration_leads_and_keeps_the_old_value(style in proptest::option::of(any::<String>())) {
+            let mut html = parse("<span>x</span>");
+            let span = elements_named(&html, "span")[0];
+            let written = edit_element(&mut html, span, |element| {
+                if let Some(style) = &style {
+                    set_attribute(element, "style", style);
+                }
+                prepend_declaration(element, "color: #000000");
+                element.attr("style").map(str::to_owned)
+            })
+            .expect("an element")
+            .expect("a style");
+            match style.as_deref().filter(|style| !is_blank_style(style)) {
+                None => prop_assert_eq!(written, "color: #000000"),
+                Some(old) => prop_assert_eq!(
+                    written,
+                    format!("color: #000000; {}", old.trim_start_matches(|c: char| c.is_ascii_whitespace()))
+                ),
+            }
         }
     }
 }
