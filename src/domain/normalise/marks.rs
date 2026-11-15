@@ -285,11 +285,12 @@ fn dir_rule(marker: bool, style: Option<&str>) -> Rule {
 /// does not hold it; otherwise the other classes, in their order, joined by
 /// one space, which is empty when none is left. The list is split at ASCII
 /// white space and each class compared exactly, as HTML's class attribute
-/// and a selector in a document without quirks read it.
+/// and a selector in a document without quirks read it. N5b removes the
+/// float classes of an image with it too (`image_layout.rs`).
 ///
 /// - `classes`: a `class` attribute value.
 /// - `class`: the class to remove, without white space.
-fn without_class(classes: &str, class: &str) -> Option<String> {
+pub(super) fn without_class(classes: &str, class: &str) -> Option<String> {
     let all = classes.split_ascii_whitespace();
     if !all.clone().any(|token| token == class) {
         return None;

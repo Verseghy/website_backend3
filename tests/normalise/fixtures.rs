@@ -5,20 +5,20 @@
 //! Each fixture is a pair of files: `<name>.html`, a legacy body, and
 //! `<name>.out.html`, what the normaliser must write for it. Both are read
 //! as bytes, so a trailing newline is part of the fixture. The name starts
-//! with the step it shows (`n0-`, `n3-`, `n5-`, `n6-`, `n7-`, `n8-`, `n9-`)
-//! or with `alt-` for the images without alt text. For every pair the
-//! runner checks:
+//! with the step it shows (`n0-`, `n3-`, `n5-`, `n5b-`, `n6-`, `n7-`,
+//! `n8-`, `n9-`) or with `alt-` for the images without alt text. For every
+//! pair the runner checks:
 //!
 //! - the output equals the expected file, byte for byte;
 //! - the expected file is the normaliser's fixed point: normalising it
 //!   again returns it with no rule hit, no unplanned removal and the same
 //!   observations (P4);
 //! - the step the name gives fired: an `n3-` fixture records an N3 hit, an
-//!   `n5-` fixture an N5 hit, an `n6-` fixture an N6 hit or a dead-host
-//!   occurrence, an `n7-` fixture an N7 hit or an unplanned removal, an
-//!   `alt-` fixture an image without alt text, and an `n0-`, `n8-` or
-//!   `n9-` fixture no hit at all, because parsing and writing are not rule
-//!   hits;
+//!   `n5-` fixture an N5 hit, an `n5b-` fixture an N5b hit, an `n6-`
+//!   fixture an N6 hit or a dead-host occurrence, an `n7-` fixture an N7
+//!   hit or an unplanned removal, an `alt-` fixture an image without alt
+//!   text, and an `n0-`, `n8-` or `n9-` fixture no hit at all, because
+//!   parsing and writing are not rule hits;
 //! - the text a reader reads is unchanged, `text(source) == text(target)`
 //!   (data-migration.md §10, V5(c)): the input and the expected file have
 //!   the same search text (ADR 0020 §2), which keeps every text node in
@@ -39,8 +39,10 @@
 //!   case stays tested whatever a checkout does to line ends (the
 //!   repository's `.gitattributes` also turns conversion off for them).
 //!
-//! The admin's editor round trip, the third check of N9, will read the same
-//! `.out.html` files (ADR 0013 §10); it must expect the outputs of
+//! The admin's editor round trip, the third check of N9, reads the same
+//! `.out.html` files (ADR 0013 §10, editor.md §13.4): so far the `n5b-` and
+//! `alt-` ones, in `admin/src/rich-text/normaliser-round-trip.test.ts`; the
+//! rest join it with N5b's structure rules. It must expect the outputs of
 //! [`NOT_YET_EDITOR_FORM`] to change. The fixtures are invented markup,
 //! never production content (CLAUDE.md, public-safety rules).
 
@@ -71,6 +73,18 @@ const UNPLANNED: &[(&str, &str)] = &[
         "N5b gives the tables the content-v1 table shape, without the table width",
     ),
     (
+        "n5b-image-sizing-dropped",
+        "no step plans them: the border and the percentage width that N5b leaves after the \
+         canonical declarations, which an editor reviews before the import may drop them \
+         (D168, N7-accept)",
+    ),
+    (
+        "n5b-image-width-over-bound",
+        "no step plans it: the width over the 2000 px bound that N5b keeps, which stops the \
+         import until a policy change raises the bound or an N7-accept entry lets it go \
+         (editor.md §16 item 5, reading (e))",
+    ),
+    (
         "n7-unplanned-removals",
         "no step plans them: Word's wrapper, classes, margin and font, which an editor reviews \
          before the import may drop them (N7-accept)",
@@ -96,7 +110,9 @@ const NOT_YET_EDITOR_FORM: &[(&str, &str)] = &[
 const CRLF_INPUTS: &[&str] = &["n0-upper-case-markup", "n3-center-around-embed"];
 
 /// The name prefixes a fixture may start with.
-const PREFIXES: &[&str] = &["n0-", "n3-", "n5-", "n6-", "n7-", "n8-", "n9-", "alt-"];
+const PREFIXES: &[&str] = &[
+    "n0-", "n3-", "n5-", "n5b-", "n6-", "n7-", "n8-", "n9-", "alt-",
+];
 
 /// The directory of the fixtures.
 fn fixtures_dir() -> PathBuf {
@@ -199,6 +215,11 @@ fn every_fixture_comes_out_as_expected_and_stays_there() {
             once.report.images_without_alt(),
             "{name}"
         );
+        assert_eq!(
+            again.report.wide_images(),
+            [],
+            "{name}: N7 dropped every width over the bound"
+        );
 
         let hits = |step| {
             once.report
@@ -212,6 +233,7 @@ fn every_fixture_comes_out_as_expected_and_stays_there() {
             }
             Some("n3") => assert!(hits(Step::N3) > 0, "{name}: no N3 hit"),
             Some("n5") => assert!(hits(Step::N5) > 0, "{name}: no N5 hit"),
+            Some("n5b") => assert!(hits(Step::N5b) > 0, "{name}: no N5b hit"),
             Some("n6") => assert!(
                 hits(Step::N6) > 0 || !once.report.dead_host_kept().is_empty(),
                 "{name}: N6 neither rewrote nor reported anything"
@@ -432,6 +454,180 @@ fn the_production_shapes_report_what_the_sign_off_sheet_lists() {
     assert_eq!(n5("n5-minor-headings"), [(Rule::HeadingToH4, 2)]);
     assert_eq!(n5("n5-italic-heading"), [(Rule::ItalicHeadingToEm, 2)]);
     assert_eq!(n5("n5-paragraph-lang"), [(Rule::ParagraphLangStripped, 2)]);
+    // The image over the 2000 px bound is listed for the policy change of
+    // editor.md §16 item 5, and the image without alt for the editors.
+    let wide: Vec<_> = report("n5b-image-width-over-bound")
+        .wide_images()
+        .iter()
+        .map(|image| (image.position, image.width.to_string()))
+        .collect();
+    assert_eq!(wide, [(1, "2400".to_owned())]);
+    let alts: Vec<_> = report("n5b-image-without-alt")
+        .images_without_alt()
+        .iter()
+        .map(|image| (image.position, image.alt))
+        .collect();
+    assert_eq!(alts, [(1, Missing)]);
+    for name in fixtures
+        .keys()
+        .filter(|name| *name != "n5b-image-width-over-bound")
+    {
+        assert_eq!(report(name.as_str()).wide_images(), [], "{name}");
+    }
+}
+
+#[test]
+fn each_image_fixture_counts_its_rules() {
+    // The exact hits of each `n5b-` pair: one per image and rule, so the
+    // run report's N5b counts are image counts (data-migration.md §7.1,
+    // "7 floated images", "about 11 images inside headings, inline
+    // formatting or links").
+    let fixtures = fixtures();
+    let sanitizer = sanitizer();
+    let sized = [(Rule::ImageHeightAuto, 1), (Rule::ImageShaped, 1)];
+    let moved = |count| {
+        [
+            (Rule::ImageMovedBeforeBlock, count),
+            (Rule::ImageHeightAuto, count),
+            (Rule::ImageShaped, count),
+        ]
+    };
+    let expected: &[(&str, &[(Rule, usize)])] = &[
+        ("n5b-image-legacy-size", &sized),
+        ("n5b-image-wide", &sized),
+        ("n5b-image-without-alt", &sized),
+        ("n5b-image-width-over-bound", &sized),
+        (
+            "n5b-image-float-style",
+            &[
+                (Rule::ImageParagraphSplit, 1),
+                (Rule::ImageFloatRemoved, 1),
+                (Rule::ImageHeightAuto, 1),
+                (Rule::ImageShaped, 1),
+            ],
+        ),
+        (
+            "n5b-image-float-class",
+            &[
+                (Rule::ImageFloatRemoved, 2),
+                (Rule::ImageHeightAuto, 1),
+                (Rule::ImageShaped, 2),
+            ],
+        ),
+        (
+            "n5b-image-in-text",
+            &[
+                (Rule::ImageParagraphSplit, 1),
+                (Rule::ImageHeightAuto, 1),
+                (Rule::ImageShaped, 1),
+            ],
+        ),
+        ("n5b-image-in-heading", &moved(1)),
+        ("n5b-image-in-inline-formatting", &moved(2)),
+        ("n5b-image-in-list-item", &moved(2)),
+        ("n5b-image-in-cell", &moved(2)),
+        ("n5b-image-in-quote", &moved(1)),
+        (
+            "n5b-image-in-link",
+            &[
+                (Rule::ImageMovedBeforeBlock, 2),
+                (Rule::ImageLinkDropped, 2),
+                (Rule::ImageHeightAuto, 2),
+                (Rule::ImageShaped, 2),
+            ],
+        ),
+        (
+            "n5b-image-centred",
+            &[
+                (Rule::CenterUnwrapped, 1),
+                (Rule::CenterRunWrapped, 1),
+                (Rule::ImageWrapped, 1),
+                (Rule::ImageHeightAuto, 1),
+                (Rule::ImageShaped, 1),
+            ],
+        ),
+        (
+            "n5b-image-bare",
+            &[(Rule::ImageWrapped, 1), (Rule::ImageShaped, 1)],
+        ),
+        // N7 reviews the first image's border (D168); N5b counts the second's.
+        (
+            "n5b-image-sizing-dropped",
+            &[
+                (Rule::ImageHeightAuto, 2),
+                (Rule::ImageShaped, 2),
+                (Rule::ImageSizingDropped, 1),
+            ],
+        ),
+    ];
+    for (name, hits) in expected {
+        assert_eq!(all_hits(&fixtures, &sanitizer, name), *hits, "{name}");
+    }
+    // Every `n5b-` pair is listed here, and every N5b rule has a pair.
+    let listed: Vec<_> = expected.iter().map(|(name, _)| *name).collect();
+    for name in fixtures.keys().filter(|name| name.starts_with("n5b-")) {
+        assert!(
+            listed.contains(&name.as_str()),
+            "{name}: list its hits in this test"
+        );
+    }
+    for rule in Rule::ALL
+        .into_iter()
+        .filter(|rule| rule.step() == Step::N5b)
+    {
+        assert!(
+            expected
+                .iter()
+                .any(|(_, hits)| hits.iter().any(|(hit, _)| *hit == rule)),
+            "{rule:?} has no fixture"
+        );
+    }
+}
+
+#[test]
+fn the_image_fixtures_for_review_list_what_n7_removes() {
+    // What N7 removes from the images that no step planned, so that the
+    // import stops on these rows until an `N7-accept` entry accepts them:
+    // what N5b leaves for N7's review (D168), and a width over the bound
+    // (reading (e)).
+    let fixtures = fixtures();
+    let sanitizer = sanitizer();
+    let unplanned = |name: &str| -> Vec<(String, usize)> {
+        normalise(&fixtures[name].0, &sanitizer)
+            .expect("a fixture settles")
+            .report
+            .unplanned_removals()
+            .map(|(removal, count)| (removal.to_string(), count))
+            .collect()
+    };
+    assert_eq!(
+        unplanned("n5b-image-sizing-dropped"),
+        [
+            (
+                "style_declaration_rejected img[style] border-style".to_owned(),
+                1
+            ),
+            (
+                "style_declaration_rejected img[style] border-width".to_owned(),
+                1
+            ),
+            ("style_declaration_rejected img[style] width".to_owned(), 1),
+        ]
+    );
+    assert_eq!(
+        unplanned("n5b-image-width-over-bound"),
+        [("style_declaration_rejected img[style] width".to_owned(), 1)]
+    );
+    // These two are the `n5b-` pairs in UNPLANNED.
+    let listed: Vec<_> = UNPLANNED
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| name.starts_with("n5b-"))
+        .collect();
+    assert_eq!(
+        listed,
+        ["n5b-image-sizing-dropped", "n5b-image-width-over-bound"]
+    );
 }
 
 /// The N7 counts of one `n7-` fixture: the planned rule it is named after
@@ -485,8 +681,8 @@ const N7_FIXTURES: &[N7Fixture] = &[
     },
     N7Fixture {
         rule: Rule::LockedMarkupAdded,
-        hits: &[(Rule::LockedMarkupAdded, 2)],
-        why: "a link and an image",
+        hits: &[(Rule::LockedMarkupAdded, 1)],
+        why: "the link; N5b writes the image's locked declarations before N7 sees it",
     },
     N7Fixture {
         rule: Rule::InvalidStyleValueDropped,
@@ -539,6 +735,22 @@ const N7_FIXTURES: &[N7Fixture] = &[
         why: "",
     },
 ];
+
+/// Every rule hit of the fixture `name`, in the order of `Rule`.
+fn all_hits(
+    fixtures: &BTreeMap<String, (String, String)>,
+    sanitizer: &Sanitizer,
+    name: &str,
+) -> Vec<(Rule, usize)> {
+    let (input, _) = fixtures
+        .get(name)
+        .unwrap_or_else(|| panic!("{name} has no fixture"));
+    normalise(input, sanitizer)
+        .unwrap_or_else(|error| panic!("{name}: refused: {error}"))
+        .report
+        .hits()
+        .collect()
+}
 
 /// The N7 counts of the fixture `name`, in the order of `Rule`.
 fn n7_hits(

@@ -20,7 +20,14 @@
 //! added up over the passes like rule hits, but they are not rule hits: the
 //! import stops on a body that has any, unless an `N7-accept` entry of the
 //! resolution file accepts them (data-migration.md §7.1 N7, §8.2;
-//! `domain::import_mysql::n7_review`).
+//! `domain::import_mysql::n7_review`). The **wide images** ([`WideImage`])
+//! name one kind of them by image: the images whose width over content-v1's
+//! 2000 px bound N5b kept and N7 dropped (editor.md §16 item 5), which the
+//! maintainer reads, because a policy change that raises the bound lets
+//! such a body in too. They are read from the tree that N7 is given, since
+//! its output no longer holds the width, and added up over the passes like
+//! the removals; N7 drops the width in the pass that lists it, so an image
+//! is listed once.
 //!
 //! The `snake_case` names of [`Rule::as_str`] are provisional in the same
 //! way as the sanitiser's: the run report that the importer slices write
@@ -30,9 +37,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::domain::rich_text::RemovalRule;
+use crate::domain::rich_text::css::values::Hundredths;
 
 /// A step of data-migration.md §7.1 that records rule hits. The steps that
-/// later slices add (N1, N2, N4 and N5b) join this list with their rules.
+/// later slices add (N1, N2 and N4) join this list with their rules, and
+/// N5b's table and structure rules join [`Step::N5b`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Step {
     /// N3: `<center>` unwrapped into `text-align: center`.
@@ -40,6 +49,9 @@ pub enum Step {
     /// N5: legacy presentational markup mapped onto content-v1: its block
     /// rules, then its inline rules, the legacy marks.
     N5,
+    /// N5b: the content-v1 layout (decision 15b), so far its image rules:
+    /// every image in the canonical image paragraph.
+    N5b,
     /// N6: links to the dead host rewritten to root-relative.
     N6,
     /// N7: the sanitiser's planned changes (`sanitise.rs`).
@@ -53,6 +65,7 @@ impl Step {
         match self {
             Self::N3 => "N3",
             Self::N5 => "N5",
+            Self::N5b => "N5b",
             Self::N6 => "N6",
             Self::N7 => "N7",
         }
@@ -139,6 +152,54 @@ pub enum Rule {
     /// N5: a marker `span` (see [`Self::MarkerHighlighted`]) with a `dir`
     /// attribute lost the `dir` and stayed, with its new highlight.
     SpanDirRemoved,
+    /// N5b: an image that stood at the top level outside a paragraph, or in
+    /// a top-level paragraph beside nothing a reader sees (white space, a
+    /// comment, another image) or with an alignment, now stands alone in a
+    /// `<p>` of its own: a new one without attributes at the top level, and
+    /// otherwise the old paragraph without its alignment, which the centred
+    /// image shows anyway. The old paragraph's other attributes (a class,
+    /// an `id`, another declaration) stay on it for N7, which removes them
+    /// as removals that no step planned, so the row goes to review
+    /// (data-migration.md §7.4, reading (f), the maintainer's answer of
+    /// 2026-11-15; research: DECISIONS R39 (D168)).
+    ImageWrapped,
+    /// N5b: an image in the running text of a top-level paragraph split the
+    /// paragraph: the text before it and the text after it each keep the
+    /// paragraph's attributes, and the image paragraph stands between them
+    /// (editor.md §5.2 step 11a).
+    ImageParagraphSplit,
+    /// N5b: an image inside a heading, a link, inline formatting, a cell, a
+    /// list item, a quote or any other element moved into its own paragraph
+    /// in front of the top-level block that held it, where content-v1 keeps
+    /// every image (editor.md §3.7, §9).
+    ImageMovedBeforeBlock,
+    /// N5b: a link held an image that moved out of it, so the image no
+    /// longer links anywhere. The link keeps its other content, and goes
+    /// when it held nothing else. Counted for review: a reader could follow
+    /// the image before.
+    ImageLinkDropped,
+    /// N5b: an image lost its float (a `float` declaration, the class `left`
+    /// or `right`, or an `align` of `left` or `right`) and is centred.
+    ImageFloatRemoved,
+    /// N5b: an image's `height` declaration became `height: auto`; the
+    /// ratio it showed is kept in the `width` and `height` attributes.
+    ImageHeightAuto,
+    /// N5b: an image's `width`, `height` or `style` attribute was rewritten
+    /// into the canonical image shape (editor.md §3.7).
+    ImageShaped,
+    /// N5b: an image's legacy markup fixed a height that cannot become a
+    /// ratio, a height without a width or one whose ratio gives a `height`
+    /// attribute outside the attributes' range, and it went with the rest
+    /// of the legacy height, since content-v1 locks `height: auto`
+    /// (data-migration.md §7.4, reading (g), which the maintainer confirmed
+    /// as built on 2026-11-15: research: DECISIONS R39 (D169)). The count
+    /// lists the body in the dry run; N7 never meets the height, so it does
+    /// not stop `apply`. Everything else in an image's legacy sizing that
+    /// the canonical shape does not keep (a border, a padding, a `display:
+    /// none`, a last `width` that is no length N5b keeps, `width: auto`
+    /// included, an unreadable declaration or `width` attribute) N5b leaves
+    /// in place for N7's review instead (reading (f), D168).
+    ImageSizingDropped,
     /// N6: a `src` or `href` on the dead host's `/storage/` was rewritten to
     /// the root-relative `/storage/` path.
     DeadHostLinkRewritten,
@@ -214,7 +275,7 @@ pub enum Rule {
 
 impl Rule {
     /// Every rule, in the order of [`Ord`].
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 48] = [
         Self::CenterUnwrapped,
         Self::CenterBlockAligned,
         Self::CenterRunWrapped,
@@ -237,6 +298,14 @@ impl Rule {
         Self::SpanDirUnwrapped,
         Self::SpanDirStyleDropped,
         Self::SpanDirRemoved,
+        Self::ImageWrapped,
+        Self::ImageParagraphSplit,
+        Self::ImageMovedBeforeBlock,
+        Self::ImageLinkDropped,
+        Self::ImageFloatRemoved,
+        Self::ImageHeightAuto,
+        Self::ImageShaped,
+        Self::ImageSizingDropped,
         Self::DeadHostLinkRewritten,
         Self::NamedColourToHex,
         Self::BorderSideToNone,
@@ -283,6 +352,14 @@ impl Rule {
             | Self::SpanDirUnwrapped
             | Self::SpanDirStyleDropped
             | Self::SpanDirRemoved => Step::N5,
+            Self::ImageWrapped
+            | Self::ImageParagraphSplit
+            | Self::ImageMovedBeforeBlock
+            | Self::ImageLinkDropped
+            | Self::ImageFloatRemoved
+            | Self::ImageHeightAuto
+            | Self::ImageShaped
+            | Self::ImageSizingDropped => Step::N5b,
             Self::DeadHostLinkRewritten => Step::N6,
             Self::NamedColourToHex
             | Self::BorderSideToNone
@@ -330,6 +407,14 @@ impl Rule {
             Self::SpanDirUnwrapped => "span_dir_unwrapped",
             Self::SpanDirStyleDropped => "span_dir_style_dropped",
             Self::SpanDirRemoved => "span_dir_removed",
+            Self::ImageWrapped => "image_wrapped",
+            Self::ImageParagraphSplit => "image_paragraph_split",
+            Self::ImageMovedBeforeBlock => "image_moved_before_block",
+            Self::ImageLinkDropped => "image_link_dropped",
+            Self::ImageFloatRemoved => "image_float_removed",
+            Self::ImageHeightAuto => "image_height_auto",
+            Self::ImageShaped => "image_shaped",
+            Self::ImageSizingDropped => "image_sizing_dropped",
             Self::DeadHostLinkRewritten => "dead_host_link_rewritten",
             Self::NamedColourToHex => "named_colour_to_hex",
             Self::BorderSideToNone => "border_side_to_none",
@@ -467,6 +552,29 @@ pub struct ImageWithoutAlt {
     pub alt: AltState,
 }
 
+/// An image of a legacy body that was wider than content-v1's bound on an
+/// image's `width` declaration, 2000 px (editor.md §3.3). N5b keeps the
+/// width in the `style`, as every legacy value over a limit is reported and
+/// never truncated (data-migration.md §5), and N7's sanitiser drops it, a
+/// removal that no step planned, so the import stops on the body until a
+/// policy change raises the bound before the import (editor.md §16 item 5)
+/// or an `N7-accept` entry lets the width go (data-migration.md §7.1, N7;
+/// §7.4, reading (e)). Only the images that N5b places, the ones N7 keeps,
+/// are listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideImage {
+    /// The image's place among the `img` elements of the normalised body,
+    /// from 1, in document order, counted as for
+    /// [`ImageWithoutAlt::position`]: among the images that N7 keeps.
+    pub position: usize,
+    /// Its `src`, shown as for [`ImageWithoutAlt::src`]. A listed image
+    /// always has one: N5b places only images whose `src` the sanitiser
+    /// keeps.
+    pub src: String,
+    /// Its width in px, as N5b read it and wrote it into the `style` for N7.
+    pub width: Hundredths,
+}
+
 /// What one normaliser run recorded about one body.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NormaliseReport {
@@ -474,6 +582,7 @@ pub struct NormaliseReport {
     unplanned: BTreeMap<UnplannedRemoval, usize>,
     dead_host_kept: Vec<DeadHostOccurrence>,
     images_without_alt: Vec<ImageWithoutAlt>,
+    wide_images: Vec<WideImage>,
 }
 
 /// The observations of one pass, which replace those of the pass before.
@@ -538,6 +647,13 @@ impl NormaliseReport {
         !self.unplanned.is_empty()
     }
 
+    /// The images whose width over content-v1's 2000 px bound N7 dropped,
+    /// in document order (editor.md §16 item 5).
+    #[must_use]
+    pub fn wide_images(&self) -> &[WideImage] {
+        &self.wide_images
+    }
+
     /// Counts one hit of `rule`.
     pub(super) fn record(&mut self, rule: Rule) {
         self.record_many(rule, 1);
@@ -563,6 +679,14 @@ impl NormaliseReport {
         if count > 0 {
             *self.unplanned.entry(removal).or_insert(0) += count;
         }
+    }
+
+    /// Adds the wide images that one pass found before N7 dropped their
+    /// width, after those of the earlier passes.
+    ///
+    /// - `images`: the pass's wide images, in document order.
+    pub(super) fn record_wide_images(&mut self, images: Vec<WideImage>) {
+        self.wide_images.extend(images);
     }
 
     /// Replaces the observations with those of a later pass.
@@ -625,6 +749,14 @@ mod tests {
                 ("span_dir_unwrapped", "N5"),
                 ("span_dir_style_dropped", "N5"),
                 ("span_dir_removed", "N5"),
+                ("image_wrapped", "N5b"),
+                ("image_paragraph_split", "N5b"),
+                ("image_moved_before_block", "N5b"),
+                ("image_link_dropped", "N5b"),
+                ("image_float_removed", "N5b"),
+                ("image_height_auto", "N5b"),
+                ("image_shaped", "N5b"),
+                ("image_sizing_dropped", "N5b"),
                 ("dead_host_link_rewritten", "N6"),
                 ("named_colour_to_hex", "N7"),
                 ("border_side_to_none", "N7"),
@@ -647,10 +779,16 @@ mod tests {
         );
         assert_eq!(Step::N3.as_str(), "N3");
         assert_eq!(Step::N5.as_str(), "N5");
+        assert_eq!(Step::N5b.as_str(), "N5b");
         assert_eq!(Step::N6.as_str(), "N6");
         assert_eq!(Step::N7.as_str(), "N7");
         // The steps are ordered as data-migration.md §7.1 runs them.
-        assert!(Step::N3 < Step::N5 && Step::N5 < Step::N6 && Step::N6 < Step::N7);
+        assert!(
+            Step::N3 < Step::N5
+                && Step::N5 < Step::N5b
+                && Step::N5b < Step::N6
+                && Step::N6 < Step::N7
+        );
     }
 
     fn removal(
@@ -796,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_pass_replaces_the_observations_and_keeps_the_hits() {
+    fn a_later_pass_replaces_the_observations_and_keeps_the_hits_and_wide_images() {
         let image = |position| ImageWithoutAlt {
             position,
             src: None,
@@ -807,18 +945,28 @@ mod tests {
             count: 1,
             excerpt: "backend.verseghy-gimnazium.net".to_owned(),
         };
+        let wide = |position| WideImage {
+            position,
+            src: "/storage/uploads/a.jpg".to_owned(),
+            width: Hundredths::whole(2400),
+        };
         let mut report = NormaliseReport::default();
         report.record(Rule::CenterUnwrapped);
+        report.record_wide_images(vec![wide(1), wide(3)]);
         report.observe(Observations {
             dead_host_kept: vec![occurrence.clone()],
             images_without_alt: vec![image(1), image(2)],
         });
+        report.record_wide_images(Vec::new());
         report.observe(Observations {
             dead_host_kept: vec![occurrence.clone()],
             images_without_alt: vec![image(1)],
         });
         assert_eq!(report.images_without_alt(), [image(1)]);
         assert_eq!(report.dead_host_kept(), [occurrence]);
+        // N7 drops a wide width in the pass that lists it, so the passes
+        // after it list nothing: the wide images are kept, like the hits.
+        assert_eq!(report.wide_images(), [wide(1), wide(3)]);
         assert_eq!(report.count(Rule::CenterUnwrapped), 1);
     }
 }

@@ -1,5 +1,8 @@
-//! The images of a normalised body that have no usable alt text
-//! (data-migration.md §7.1, "Missing alt (no change)"; editor.md §9).
+//! The images of a body that the report lists without changing them:
+//! those of the normalised body that have no usable alt text
+//! (data-migration.md §7.1, "Missing alt (no change)"; editor.md §9), and
+//! those whose width over content-v1's bound N7 drops (editor.md §16 item
+//! 5).
 //!
 //! The importer never invents alt text: an image without one is imported
 //! as it is. ADR 0013 §2 makes alt text mandatory for the next save, and
@@ -8,11 +11,27 @@
 //! [`validate::is_blank`](crate::domain::rich_text::validate::is_blank), the
 //! rule the admin write path refuses with `image_alt_missing`, so the list
 //! names exactly the images that will block a save.
+//!
+//! N5b keeps a legacy image's width also above content-v1's bound of
+//! 2000 px (`image_layout.rs`), because a value over a limit is reported,
+//! never truncated (data-migration.md §5). N7's sanitiser drops such a
+//! width, a removal that no step planned, so the import stops on the body
+//! until a policy change raises the bound or an `N7-accept` entry lets the
+//! width go (data-migration.md §7.1, N7; §7.4, reading (e)). The list,
+//! read from the tree that N7 is given, tells the maintainer which images
+//! a policy change that raises the bound must cover before the import. It
+//! names only the images that N5b places, the ones N7 keeps, and counts
+//! their positions among those, which are the positions in N7's output:
+//! an image that N7 removes (one without `src`, with a `src` the sanitiser
+//! refuses, or inside an element removed with its content) blocks nothing,
+//! so it says nothing about the bound.
 
 use scraper::Html;
 
 use super::dom;
-use super::report::{AltState, ImageWithoutAlt};
+use super::image_layout::{Bounds, is_placeable};
+use super::report::{AltState, ImageWithoutAlt, WideImage};
+use crate::domain::rich_text::SanitizePolicy;
 use crate::domain::rich_text::validate::is_blank;
 
 /// Every image of `html` without alt text or with a blank one, in document
@@ -34,6 +53,37 @@ pub(super) fn without_alt(html: &Html) -> Vec<ImageWithoutAlt> {
                 position: index + 1,
                 src: element.attr("src").map(shown_src),
                 alt,
+            })
+        })
+        .collect()
+}
+
+/// Every image of `html` that N5b places and whose `style` declares a width
+/// above content-v1's bound, in document order, positioned among the
+/// images that N5b places, as [`without_alt`] positions the images of N7's
+/// output. The width is read as N5b reads it ([`Bounds::styled_width`]), so
+/// after N5b, which writes every kept width into the `style`, an image is
+/// listed exactly when its legacy width was over the bound. An image N5b
+/// leaves for N7 to remove is neither listed nor counted (see the module
+/// documentation).
+///
+/// - `html`: a parsed body, after every rule of the pass and before N7.
+pub(super) fn wider_than_bound(html: &Html) -> Vec<WideImage> {
+    let bounds = Bounds::of_policy();
+    let policy = SanitizePolicy::content_v1();
+    dom::elements_named(html, "img")
+        .into_iter()
+        .map(|id| dom::node(html, id))
+        .filter(|&node| is_placeable(node, &policy))
+        .enumerate()
+        .filter_map(|(index, node)| {
+            let element = node.value().as_element()?;
+            let width = bounds.styled_width(element.attr("style")?)?;
+            let src = element.attr("src")?;
+            (width > bounds.max_width).then(|| WideImage {
+                position: index + 1,
+                src: shown_src(src),
+                width,
             })
         })
         .collect()
@@ -108,6 +158,64 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].position, 1);
         assert_eq!(listed[0].src.as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn images_wider_than_the_bound_are_listed_by_position() {
+        use crate::domain::rich_text::css::values::Hundredths;
+        let listed = wider_than_bound(&dom::parse(concat!(
+            r#"<p><img src="/storage/uploads/a.jpg" style="width: 2000px"></p>"#,
+            r#"<p><img src="/storage/uploads/b.jpg" style="display: block; width: 2000.01px"></p>"#,
+            r#"<p><img src="/storage/uploads/c.jpg" width="2400"></p>"#,
+            r#"<p><img src="/storage/uploads/e.png" style="width: 2400px; width: 1600pt"></p>"#,
+            r#"<p><img src="/storage/uploads/d.jpg" style="width: 3000px; width: 50%"></p>"#,
+        )));
+        assert_eq!(
+            listed,
+            [
+                WideImage {
+                    position: 2,
+                    src: "/storage/uploads/b.jpg".to_owned(),
+                    width: Hundredths::from_hundredths(200_001),
+                },
+                // 1600 pt is 2133.33 px; the last declaration counts.
+                WideImage {
+                    position: 4,
+                    src: "/storage/uploads/e.png".to_owned(),
+                    width: Hundredths::from_hundredths(213_333),
+                },
+            ],
+            "a width at the bound, one only in the attribute and one that a later declaration replaces are not listed"
+        );
+    }
+
+    #[test]
+    fn images_that_n7_removes_are_not_listed_as_wide() {
+        // They block nothing, so they say nothing about the bound: no
+        // `src`, a `src` the sanitiser refuses, and an image inside an
+        // element it removes with its content. N7 removes them, so they do
+        // not count for the position of the next image either: the
+        // positions are those of N7's output.
+        let listed = wider_than_bound(&dom::parse(concat!(
+            r#"<p><img style="width: 2400px"></p>"#,
+            r#"<p><img src="https://example.com/a.jpg" style="width: 2400px"></p>"#,
+            r#"<p><img src="" style="width: 2400px"></p>"#,
+            r#"<p><img src="data:image/png;base64,iVBO" style="width: 2400px"></p>"#,
+            r#"<object><img src="/storage/uploads/a.jpg" style="width: 2400px"></object>"#,
+            r#"<template><img src="/storage/uploads/a.jpg" style="width: 2400px"></template>"#,
+            r#"<p><img src="https://backend.verseghy-gimnazium.net/storage/uploads/f.jpg" style="width: 2400px"></p>"#,
+        )));
+        // The dead host's image is N6's to rewrite, and N7 keeps it then.
+        assert_eq!(
+            listed
+                .iter()
+                .map(|image| (image.position, image.src.as_str()))
+                .collect::<Vec<_>>(),
+            [(
+                1,
+                "https://backend.verseghy-gimnazium.net/storage/uploads/f.jpg"
+            )]
+        );
     }
 
     #[test]

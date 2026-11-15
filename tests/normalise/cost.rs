@@ -1,8 +1,12 @@
 //! The normaliser's running time on the shapes that once made N3 quadratic
 //! (`src/domain/normalise/center.rs`, "Cost"), on the nested italic headings
-//! that N5 plans in one walk (`src/domain/normalise/blocks.rs`, "Cost"), and
-//! on deep legacy marks, which N5 maps in one walk
-//! (`src/domain/normalise/marks.rs`, "Cost").
+//! that N5 plans in one walk (`src/domain/normalise/blocks.rs`, "Cost"), on
+//! deep legacy marks, which N5 maps in one walk
+//! (`src/domain/normalise/marks.rs`, "Cost"), and on the images that N5b
+//! places: many in one paragraph, which it splits in one go, many in marks
+//! or spans of one block, whose leftovers it removes in one walk, and one
+//! deep in inline elements (`src/domain/normalise/image_layout.rs`,
+//! "Cost").
 //!
 //! The normaliser has no size or depth limit of its own, because its inputs
 //! are the fixed legacy dump and backend3's own, already bounded, bodies
@@ -13,6 +17,11 @@
 //! What the rules make of every level of these bodies is checked by the
 //! unit test `the_rules_handle_every_level_of_a_deep_body` in
 //! `src/domain/normalise/mod.rs`, on the rules alone, without a clock.
+//! The images in marks and spans are timed the same way: N5b's output for
+//! them is larger than the sanitiser's size limit, so N7 refuses them as
+//! `content_too_large` after the rules, and the unit test
+//! `many_images_in_marks_and_spans_leave_one_clean_up` in
+//! `src/domain/normalise/image_layout.rs` checks what N5b made of them.
 //! N3 still must not rescan a subtree or a crowded parent once per
 //! `center`: before it kept its answers and stopped at two children, the
 //! heading below took about 20 seconds in a debug build, against well under
@@ -40,6 +49,17 @@ fn assert_too_deep<T: std::fmt::Debug>(result: Result<T, NormaliseError>) {
             assert_eq!(error.code(), Some("content_too_deep"), "{error}");
         }
         other => panic!("expected content_too_deep, got {other:?}"),
+    }
+}
+
+/// Asserts that `result` is N7's refusal of a body larger than the
+/// sanitiser's limit.
+fn assert_too_large<T: std::fmt::Debug>(result: Result<T, NormaliseError>) {
+    match result {
+        Err(NormaliseError::SanitiseRefused(error)) => {
+            assert_eq!(error.code(), Some("content_too_large"), "{error}");
+        }
+        other => panic!("expected content_too_large, got {other:?}"),
     }
 }
 
@@ -146,5 +166,96 @@ fn deep_legacy_marks_are_mapped_in_one_walk() {
     let result = normalise(&body, &sanitizer());
     let elapsed = started.elapsed();
     assert_too_deep(result);
+    assert!(elapsed < BOUND, "{elapsed:?}");
+}
+
+/// The four locked declarations of every stored image (editor.md §3.3).
+const IMAGE_STYLE: &str = "display: block; height: auto; margin: 0 auto; max-width: 100%";
+
+#[test]
+fn many_images_split_their_paragraph_in_one_go() {
+    // N5b splits a paragraph at all of its images at once, so each node of
+    // the paragraph moves once (`src/domain/normalise/image_layout.rs`,
+    // "Cost"); one split per image would move the rest of the paragraph
+    // each time, and grow with the square of the number of images.
+    let count = 5_000;
+    let image = r#"<img src="/storage/uploads/a.jpg" alt="a">"#;
+    let body = format!("<p>{}</p>", format!("x {image} ").repeat(count));
+    let started = Instant::now();
+    let out = normalise(&body, &sanitizer()).expect("the body settles");
+    let elapsed = started.elapsed();
+    let paragraph = format!(
+        r#"<p>x</p><p><img src="/storage/uploads/a.jpg" alt="a" style="{IMAGE_STYLE}"></p>"#
+    );
+    assert_eq!(out.html, paragraph.repeat(count));
+    assert_eq!(out.report.count(Rule::ImageParagraphSplit), count);
+    assert_eq!(out.report.count(Rule::ImageShaped), count);
+    assert!(elapsed < BOUND, "{elapsed:?}");
+}
+
+#[test]
+fn many_images_in_marks_leave_their_paragraph_in_one_clean_up() {
+    // Each image moves out of its `strong` in front of the paragraph, and
+    // leaves its white space and its emptied mark behind, before the
+    // marks still to come. Asking the paragraph whether it still shows
+    // something after each move would scan that growing run once per
+    // image, which grows with the square of the number of images (about
+    // 5 seconds for 8,000 in a debug build); the clean-up after the last
+    // move asks each node once (`src/domain/normalise/image_layout.rs`,
+    // "Cost"). With 20,000 images, the body that N5b gives N7 is larger
+    // than the sanitiser's limit, so N7 refuses it right after the rules
+    // of the first pass, and the time is the rules' own; the unit test
+    // `many_images_in_marks_and_spans_leave_one_clean_up` in that file
+    // checks what N5b makes of it.
+    let count = 20_000;
+    let image = r#"<img src="/storage/uploads/a.jpg" alt="a">"#;
+    let body = format!(
+        "<p>{}</p>",
+        format!(" <strong>{image}</strong>").repeat(count)
+    );
+    let started = Instant::now();
+    let result = normalise(&body, &sanitizer());
+    let elapsed = started.elapsed();
+    assert_too_large(result);
+    assert!(elapsed < BOUND, "{elapsed:?}");
+}
+
+#[test]
+fn many_images_in_spans_leave_their_block_in_one_clean_up() {
+    // The same in a `div`, with an empty `span` beside each image's own:
+    // the empty elements that stay are asked once too (about 10 seconds
+    // for 8,000 in a debug build when asked once per image). N7 refuses
+    // this body as too large too, after the rules.
+    let count = 16_000;
+    let image = r#"<img src="/storage/uploads/a.jpg" alt="a">"#;
+    let body = format!(
+        "<div>{}szöveg</div>",
+        format!("<span></span><span>{image}</span>").repeat(count)
+    );
+    let started = Instant::now();
+    let result = normalise(&body, &sanitizer());
+    let elapsed = started.elapsed();
+    assert_too_large(result);
+    assert!(elapsed < BOUND, "{elapsed:?}");
+}
+
+#[test]
+fn an_image_deep_in_inline_elements_moves_out_once() {
+    // The image walks its ancestors once to find its top-level block, and
+    // the clean-up removes each emptied element once, innermost first.
+    let depth = 2_000;
+    let body = format!(
+        r#"<h2>{}<img src="/storage/uploads/a.jpg" alt="a">{}</h2>"#,
+        "<span>".repeat(depth),
+        "</span>".repeat(depth)
+    );
+    let started = Instant::now();
+    let out = normalise(&body, &sanitizer()).expect("the body settles");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        out.html,
+        format!(r#"<p><img src="/storage/uploads/a.jpg" alt="a" style="{IMAGE_STYLE}"></p>"#)
+    );
+    assert_eq!(out.report.count(Rule::ImageMovedBeforeBlock), 1);
     assert!(elapsed < BOUND, "{elapsed:?}");
 }

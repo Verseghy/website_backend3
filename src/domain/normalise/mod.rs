@@ -32,6 +32,13 @@
 //!   `ins`, `strike` and `del` renamed to `strong`, `em`, `u` and `s`, `big`
 //!   unwrapped, `span.marker` turned into a yellow highlight, and
 //!   `span[dir]` unwrapped (a marker span loses only its `dir`);
+//! - **N5b**, its image rules (`image_layout.rs`): every image that N7
+//!   keeps in the canonical image paragraph, alone at the top level, its
+//!   float removed, its legacy height turned into `height: auto` with the
+//!   ratio in its `width` and `height` attributes, and its width kept; an
+//!   image in a paragraph's running text splits the paragraph, and one
+//!   anywhere else moves in front of its top-level block, without a link
+//!   around it;
 //! - **N6** (`dead_host.rs`): `src` and `href` on the dead host's
 //!   `/storage/` rewritten to root-relative `/storage/`;
 //! - **N7** (`sanitise.rs`): the sanitiser that every write uses, given as
@@ -45,11 +52,13 @@
 //!
 //! The steps that later slices add slot in where §7.1 orders them: N1 and
 //! N2 (legacy embeds) between N0 and N3; N4 (inline `data:` images)
-//! between N3 and N5, and N5b (the content-v1 layout) between N5 and N6.
-//! Each step records what it changed for the
+//! between N3 and N5; the rest of N5b (tables, tightening and structure)
+//! after its image rules. Each step records what it changed for the
 //! run report ([`report`]), and the pass also lists, without changing them,
 //! the dead-host occurrences N6 leaves and the images without alt text
-//! (editor.md §9), from the tree that N7 left.
+//! (editor.md §9), from the tree that N7 left. It also records the images
+//! wider than content-v1's 2000 px bound whose width N7 drops (editor.md
+//! §16 item 5), from the tree that N7 is given.
 //!
 //! **The fixed-point loop.** A pass's output is parsed again by the next
 //! reader, and html5ever's markup for a tree does not always parse back
@@ -65,7 +74,8 @@
 //! for (`center`; the `align` and `lang` attributes, the `h5` and `h6` tag
 //! names and the italic `font-style` of N5's block rules; the legacy marks
 //! of its inline rules; the dead `/storage/` prefixes; what N7's sanitiser
-//! removes, whose output is its own fixed point), so the passes after the
+//! removes, whose output is its own fixed point), or write what they leave
+//! alone (N5b's canonical image paragraph), so the passes after the
 //! first only re-parse. A body that is still changing after the last pass
 //! is refused with [`NormaliseError::NotNormalisable`], and the import
 //! treats that like a failed N9 check (data-migration.md §4.2). Before N7
@@ -117,11 +127,15 @@
 //! "Cost"). The other rules are linear: N5's block rules plan every edit in
 //! one walk, the `em` and `i` inside nested italic headings included
 //! (`blocks.rs`, "Cost"), and its inline rules look at each element once
-//! (`marks.rs`, "Cost"). The normaliser has no limit of its own, which is
-//! acceptable only because of its two inputs: the import's is the fixed
-//! legacy dump, and backend3's own bodies, which `content_normalize` reads,
-//! hold no `center` and are bounded by the sanitiser's size and depth
-//! limits (editor.md §7.2; research: DECISIONS R11). N7 applies those
+//! (`marks.rs`, "Cost"). N5b's image rules walk each image's ancestors
+//! once, so they grow with the number of images times their depth, like
+//! the parse, move each node of a split paragraph once, and remove what
+//! the moves leave empty in one walk over the body after the last move
+//! (`image_layout.rs`, "Cost"). The normaliser has no limit of its own,
+//! which is acceptable only because of its two inputs: the import's is the
+//! fixed legacy dump, and backend3's own bodies, which `content_normalize`
+//! reads, hold no `center` and are bounded by the sanitiser's size and
+//! depth limits (editor.md §7.2; research: DECISIONS R11). N7 applies those
 //! limits to the import too, after the rules of the first pass: a deeper or
 //! larger legacy body is refused ([`NormaliseError::SanitiseRefused`]).
 //! N7 adds a sanitiser run per pass and the N9 run at the end, each
@@ -157,6 +171,7 @@ mod center;
 mod dead_host;
 mod dom;
 pub mod fixed_point;
+mod image_layout;
 mod images;
 mod invalid_css;
 mod marks;
@@ -168,7 +183,7 @@ use std::borrow::Cow;
 pub use fixed_point::{FixedPointError, check_fixed_point};
 pub use report::{
     AltState, DeadHostOccurrence, ImageWithoutAlt, NormaliseReport, Place, Rule, Step,
-    UnplannedRemoval,
+    UnplannedRemoval, WideImage,
 };
 
 use crate::domain::rich_text::{RemovalReport, SanitizeError, Sanitizer};
@@ -346,6 +361,10 @@ fn pass(
     let mut html = dom::parse(input);
     let unclear_before = unclear_blocks(report);
     apply_rules(&mut html, report);
+    // The images whose width is over content-v1's bound, from the tree
+    // that N7 is given: N7 drops that width, so its output no longer shows
+    // it (`images.rs`).
+    report.record_wide_images(images::wider_than_bound(&html));
     // N7 after every rule, so that it sees what they planned: the
     // alignment N3 and N5 write in front of an unclear one, for as many
     // blocks as they counted unclear in this pass.
@@ -360,11 +379,11 @@ fn pass(
 }
 
 /// The rules of one pass in their order, N3, N5 (its block rules, then its
-/// inline rules) and N6, on the tree that N0 parsed; they add their hits to
-/// `report`. A step of its own, apart from N7, so that the tests can check
-/// what the rules do to a body deeper than N7's sanitiser accepts (the
-/// cost tests' shapes): N7 refuses such a body after the rules of the first
-/// pass, and its refusal carries no report.
+/// inline rules), N5b (its image rules) and N6, on the tree that N0 parsed;
+/// they add their hits to `report`. A step of its own, apart from N7, so
+/// that the tests can check what the rules do to a body deeper than N7's
+/// sanitiser accepts (the cost tests' shapes): N7 refuses such a body
+/// after the rules of the first pass, and its refusal carries no report.
 ///
 /// - `html`: the parsed body, edited in place.
 /// - `report`: the report of the current run.
@@ -379,6 +398,10 @@ fn apply_rules(html: &mut scraper::Html, report: &mut NormaliseReport) {
     // not also counted as `i_to_em` (`marks.rs`, "After N3 and N5's block
     // rules").
     marks::map_marks(html, report);
+    // N5b's image rules, after N5: the marks around an image are
+    // content-v1's by then, and N3's centred paragraph around an image
+    // becomes the plain image paragraph (`image_layout.rs`, "Order").
+    image_layout::shape_images(html, report);
     dead_host::rewrite_links(html, report);
 }
 
@@ -462,9 +485,10 @@ mod tests {
             r#"<table border="1"><tr><td style="border-top: 1px solid black">y<!-- z --></td></tr></table>"#,
         );
         let out = run(raw).expect("a body that settles");
-        // N7 gives the iframe, the image, the link, the table and its
-        // `tbody` what content-v1 always writes on them; adding is no
-        // removal, but it is a planned change, counted per element.
+        // N7 gives the iframe, the link, the table and its `tbody` what
+        // content-v1 always writes on them; adding is no removal, but it is
+        // a planned change, counted per element. N5b has already given the
+        // image its locked declarations.
         assert_eq!(
             out.html,
             concat!(
@@ -480,14 +504,16 @@ mod tests {
             [
                 (Rule::CenterUnwrapped, 2),
                 (Rule::CenterBlockAligned, 1),
+                (Rule::ImageShaped, 1),
                 (Rule::DeadHostLinkRewritten, 1),
                 (Rule::NamedColourToHex, 1),
-                (Rule::LockedMarkupAdded, 5),
+                (Rule::LockedMarkupAdded, 4),
                 (Rule::TableBorderDropped, 1),
                 (Rule::CommentRemoved, 1),
             ]
         );
         assert!(!out.report.has_unplanned_removals());
+        assert_eq!(out.report.wide_images(), []);
         assert_eq!(out.report.dead_host_kept().len(), 1);
         assert_eq!(
             out.report.images_without_alt(),
@@ -1106,6 +1132,8 @@ mod tests {
                 prop_assert!(!twice.report.has_unplanned_removals(), "{:?}: {:?}", raw, twice.report);
                 prop_assert_eq!(twice.report.dead_host_kept(), once.report.dead_host_kept());
                 prop_assert_eq!(twice.report.images_without_alt(), once.report.images_without_alt());
+                // N7 dropped every width over the bound, so none is left to list.
+                prop_assert_eq!(twice.report.wide_images(), []);
             }
         }
 

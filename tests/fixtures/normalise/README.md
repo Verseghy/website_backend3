@@ -13,7 +13,9 @@ Each fixture is a pair:
 The name starts with the step it shows: `n0-` (the parse: character
 references, tag case, line ends), `n3-` (`<center>`), `n5-` (legacy
 presentational markup: the block rules (`p[align]`, `table[align]`, `h5` and
-`h6`, the italic `h2`, `p[lang]`) and the inline marks), `n6-` (the dead
+`h6`, the italic `h2`, `p[lang]`) and the inline marks), `n5b-` (the
+content-v1 layout, so far its image rules: the canonical image paragraph,
+the float, the legacy height, and the image's place), `n6-` (the dead
 host's links), `n7-` (the sanitiser: one fixture per planned N7 rule, named
 after it, `n7-` and the rule's name with `-` for `_`, and one whose removals
 no step plans), `n8-` (the serialisation: only five character references
@@ -29,9 +31,12 @@ that `<name>.out.html` is the sanitiser's fixed point too (N9). Since N7 runs
 in the normaliser, every output is content-v1. A fixture from which N7
 removes something that no step planned is listed in the runner's
 `UNPLANNED`, with the later step that will plan it or why no step does;
-every other fixture must have no unplanned removal. The runner also pins
-the N7 counts of each `n7-` fixture: its own rule, and the locked markup
-that a legacy table or link gets beside it.
+every other fixture must have no unplanned removal. An image wider than
+2000 px is one of them: N5b keeps the legacy width for N7 to drop, so the
+import stops on the body until a policy change raises the bound or an
+`N7-accept` entry lets the width go (editor.md §16 item 5). The runner also
+pins the N7 counts of each `n7-` fixture: its own rule, and the locked
+markup that a legacy table or link gets beside it.
 
 The `.out.html` files are also the bodies that the admin's editor round trip
 (ADR 0013 §10, editor.md §13.4) loads and saves, so each one is written in
@@ -40,6 +45,15 @@ that the editor would still change is listed in the runner's
 `NOT_YET_EDITOR_FORM` with the step that will settle it, and the runner
 fails on an unlisted output with a line feed, tab or form feed in its text,
 which the editor's whitespace rule (editor.md §3.8) never leaves.
+
+The admin's suite loads the `n5b-` and `alt-` outputs into the editor and
+asserts that it saves each byte for byte
+(`admin/src/rich-text/normaliser-round-trip.test.ts`, data-migration.md
+§12); the other outputs join that test with N5b's structure rules
+(normaliser-tables).
+An `n5b-` output is therefore written in the editor's stored form:
+canonical tables and links in the input, and no white space left beside a
+moved image, which only N5b's whitespace rule removes.
 
 Some inputs hold `\r\n` line ends on purpose (`n0-upper-case-markup`,
 `n3-center-around-embed`, listed in the runner's `CRLF_INPUTS`).
@@ -52,8 +66,10 @@ runner fails if one of those loses its `\r\n`.
   here, with its step as the prefix. The runner pins the exact hits of each
   `n5-` pair of the inline marks, fails when another `n5-` pair hits an
   inline-mark rule without being listed there, and fails when an
-  inline-mark rule has no pair. A new N7 rule gets its own `n7-` pair, named
-  after it, which the runner requires.
+  inline-mark rule has no pair. It pins the exact hits of every `n5b-` pair
+  as well, fails on an `n5b-` pair it does not list, and fails when an N5b
+  rule has no pair. A new N7 rule gets its own `n7-` pair, named after it,
+  which the runner requires.
 - Write the input by hand in the legacy form: CKEditor 4's named character
   references, upper-case tags typed in source mode, `\r\n` line ends.
   Fixtures are invented markup, never copied from production content
