@@ -10,9 +10,11 @@
  * kit configures only stock members and every one of these is changed:
  *
  * - **Parse.** Each attribute reads its declaration through the raw style
- *   reader and keeps it only in the policy's grammar and spelling: colours as
- *   lower-case hex (`color` opaque `#rrggbb` only, `background-color` also
- *   `#rrggbbaa`, `transparent` and `currentcolor`), and `font-size` in `em`
+ *   reader, which sends the `style` attribute through `canonicalStyle`
+ *   (editor.md §4.3 row 4), so it keeps what the server keeps, in the
+ *   server's spelling: colours as lower-case hex (`color` opaque `#rrggbb`
+ *   only, `background-color` also `#rrggbbaa`, `transparent` and
+ *   `currentcolor`; `red` and `rgb()` become hex), and `font-size` in `em`
  *   from 0.5 to 3. Stock keeps any value that is not empty, quotes stripped,
  *   so `var(--mt-accent-…)` (the kit's palette) or `12pt` would be stored.
  * - **Render.** An attribute renders only a value its grammar accepts, so a
@@ -50,11 +52,7 @@ import {
 import type { RichTextPolicy } from "../policy"
 import { requireStyleGrammar } from "../policy"
 import type { ScalarGrammar } from "../style-decls"
-import {
-  isCanonicalValue,
-  keptDeclarations,
-  resolveStoredDeclarations,
-} from "../style-decls"
+import { isCanonicalValue, readStoredDeclarations } from "../style-decls"
 
 /** The mark the three attributes belong to. */
 const TEXT_STYLE = "textStyle"
@@ -63,21 +61,22 @@ const TEXT_STYLE = "textStyle"
  * The stored `span` declarations that apply to a parsed `span`: its own,
  * over those of the spans around it.
  *
- * Each `style` attribute is resolved on its own with
- * `resolveStoredDeclarations`, and the resolutions are folded from the
- * outermost span inwards, so for each property the innermost span that sets
- * it decides. A property whose winning declaration there is refused (`null`)
- * stays refused: an outer value never stands in for an inner declaration
- * the server would store differently. This is the result stock's
- * `mergeNestedSpanStyles` gives for spans of a few levels, without its
- * growing style strings.
+ * Each `style` attribute is read on its own with `readStoredDeclarations`,
+ * which keeps what the server's grammar keeps of that one attribute, and
+ * the reads are folded from the outermost span inwards, so for each
+ * property the innermost span that stores it decides. A property an inner
+ * span's own style does not keep (it has none, or the grammar refuses its
+ * value) shows the outer value, as the inherited style does on the public
+ * sites. This is the result stock's `mergeNestedSpanStyles` gives for spans
+ * of a few levels, without its growing style strings.
  *
  * The walk stops below an element with a `contenteditable` attribute: when
  * ProseMirror re-reads the editor's own DOM, the spans above the editor's
  * root are the application's, not the document's.
  *
  * Its cost is linear in the nesting depth, which the server bounds (256,
- * editor.md §7.2) for every stored body.
+ * editor.md §7.2) for every stored body; the reads of repeated styles are
+ * memoised.
  *
  * @param policy - the content-v1 policy.
  * @param element - the `span` a parse rule matched.
@@ -97,9 +96,9 @@ export function readSpanDeclarations(
       spans.push(current)
     }
   }
-  const folded = new Map<string, string | null>()
+  const folded = new Map<string, string>()
   for (const span of spans.reverse()) {
-    for (const [property, value] of resolveStoredDeclarations(
+    for (const [property, value] of readStoredDeclarations(
       policy,
       "span",
       span.getAttribute("style")
@@ -107,7 +106,7 @@ export function readSpanDeclarations(
       folded.set(property, value)
     }
   }
-  return keptDeclarations(folded)
+  return folded
 }
 
 /**

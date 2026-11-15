@@ -61,6 +61,41 @@ describe("loadDocument", () => {
     expect(html(target)).toBe(body)
   })
 
+  // A body without text loaded while the whole old document was selected,
+  // as it is when the document is one rule: TipTap's clearDocument plugin
+  // turned its first block into a plain paragraph.
+  const emptyFirstBlocks = [
+    '<h3 style="text-align: center"></h3>',
+    "<h2></h2><ul><li><p></p></li></ul>",
+    '<p style="text-align: right"></p>',
+  ]
+
+  it.each(emptyFirstBlocks)(
+    "loads %s the same whatever the editor showed before",
+    (body) => {
+      const target = createEditor()
+      for (const before of [
+        "<hr>",
+        "<hr><p>a</p>",
+        "<ul><li>a</li></ul>",
+        "",
+      ]) {
+        loadDocument(target, before)
+        loadDocument(target, body)
+        expect(html(target), before).toBe(body)
+      }
+    }
+  )
+
+  it("is needed: a plain setContent after a lone rule loses the first block's type", () => {
+    const target = createEditor()
+    for (const body of emptyFirstBlocks) {
+      target.commands.setContent("<hr>")
+      target.commands.setContent(body)
+      expect(html(target)).not.toBe(body)
+    }
+  })
+
   it("keeps source indentation out of the document", () => {
     const target = createEditor()
     loadDocument(target, "<p>Első</p>\n    <p>Második</p>\n")

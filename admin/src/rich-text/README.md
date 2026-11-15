@@ -32,7 +32,7 @@ The TipTap 3.32 schema of content-v1 (editor.md §4.2, §4.3):
 | `policy.ts`          | `policy.json` read, validated and typed (`CONTENT_V1_POLICY`); a manifest the admin does not understand fails at load with the member and the fix          |
 | `site-extensions.ts` | `siteExtensions({ policy, media })`, the extension list of every editor                                                                                    |
 | `extensions/`        | the site versions of the document, headings, lists, link, alignment, sub and superscript and text style, one module each, with why each differs from stock |
-| `style-decls.ts`     | the raw style reader of the parse rules: content-v1's own spelling only, resolved in source order, checked against the policy's grammars                   |
+| `style-decls.ts`     | the raw style reader of the parse rules: every `style` through `canonicalStyle`, so a rule reads what the server stores; the checks of the one spelling    |
 | `link-href.ts`       | the server's `a[href]` rule, for the link mark                                                                                                             |
 | `load-document.ts`   | `loadDocument(editor, html)`, the one way a body enters an editor                                                                                          |
 
@@ -43,3 +43,42 @@ not follow fails there. `pins.test.ts` holds the package pins of editor.md
 §4.1: every `@tiptap/*` package at one exact version, and prosemirror-view,
 prosemirror-model and prosemirror-tables through `overrides` in
 `package.json`, each installed once.
+
+## Canonical styles
+
+`css/` is `canonicalStyle(policy, tag, style)`, the admin's half of
+content-v1's one spelling of every style (editor.md §3.1). The server's
+grammar in `src/domain/rich_text/css/` is the other half, and both write the
+output of every line of `css-vectors.jsonl` (`css/canonical-style.test.ts`).
+
+| Module                   | What it is                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `css/declarations.ts`    | the declaration reader: cssparser 0.38's tokenizer and recovery rules, as `declarations.rs` uses them        |
+| `css/values.ts`          | lengths in px, `em`, percentages, numbers in hundredths, colours (hex, named, `rgb()`), each in one spelling |
+| `css/named-colours.ts`   | the 148 named colours of CSS Color 4                                                                         |
+| `css/canonical-style.ts` | the grammar from the policy, the cascade of §3.1 rule 1, the writer of rules 2 and 5, the alphabet guard     |
+
+## The stored-HTML serialiser
+
+`serialize/` is `toStoredHtml(doc, { policy, document })`, the only way a
+document becomes the HTML that is saved (editor.md §6). Never use
+`editor.getHTML()`, which returns the engine's CSSOM spelling. The editor
+input calls it as
+`toStoredHtml(editor.state.doc, { policy: CONTENT_V1_POLICY, document: editor.view.dom.ownerDocument })`:
+nothing is created in that document, only in the inert one `inertDocument`
+makes from it, so a save never fetches an image.
+
+| Module                        | What it is                                                                                                                                                              |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `serialize/to-stored-html.ts` | the three steps; `verbatimDocument`, which keeps the CSSOM out of prosemirror-model's rendering; `inertDocument`, the document without a browsing context it renders in |
+| `serialize/whitespace.ts`     | the whitespace rule of §3.8, applied to every textblock of the document, after U+0000 is dropped                                                                        |
+| `serialize/stored-tree.ts`    | the plain tree that the rendered DOM is copied into before the post-pass                                                                                                |
+| `serialize/post-pass.ts`      | canonical styles, bare spans and equal neighbours, tightening (with editor.md §3.7's empty-paragraph exception, item D148), attribute order                             |
+| `serialize/write-html.ts`     | the writer in html5ever 0.40.1's dialect, writing each value as an HTML parse reads it back, so the server writes the same bytes again                                  |
+
+Its tests are editor.md §13.4's L2: `toStoredHtml(load(z)) == z` for the
+canonical shapes, `J(J(x)) == J(x)` over the server's regression fixtures
+(`tests/fixtures/regressions/`, which `vitest.config.ts` lets Vite read),
+fast-check documents with every kind of whitespace and U+0000, and the guard that the
+output never holds `rgb(` or `border-width:` and that prosemirror-model's
+`style` branch is unchanged. `src/test/stored-html.ts` has the `J` harness.
