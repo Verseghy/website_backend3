@@ -169,7 +169,11 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    `controllers::admin::session::AdminSession`, which loads the account on
    every request and answers `401 unauthorized` itself when it is trashed,
    anonymised or inactive, when the token's `tv` is stale, or when the scope
-   is not the route's (ADR 0006 §1). The default accepts only a full
+   is not the route's (ADR 0006 §1). Once the session holds, it also reads
+   the roles and extra grants the account holds into `session.grants`
+   (`domain::authz::AccountGrants`: `effective()` and `is_admin()`), so a
+   role change applies on the next request (ADR 0007 §5); never query
+   `user_roles` or `user_permissions` in a handler. The default accepts only a full
    `admin` session; `AdminSession<AdminOrPasswordChange>` is for the three
    routes ADR 0006 §4 opens to a `password_change` session. Never take
    Loco's `JWT` or `JWTWithUser` in an admin handler: they skip these

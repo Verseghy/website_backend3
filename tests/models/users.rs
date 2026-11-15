@@ -1,9 +1,10 @@
 //! The `users` model (ADR 0006, ADR 0011): password hashing and the cost of
 //! every failed check, then, against PostgreSQL, the two finders, the `pid`
 //! hook, a hash that round-trips through the table, `App::truncate`, which
-//! leaves the accounts alone, sign-in and its cost, the session token, the
-//! session state the admin extractor checks, the `Authenticable` impl, the
-//! seed account, which the seed creates once and never changes, the
+//! leaves the accounts and their roles and grants alone, sign-in and its
+//! cost, the session token, the session state the admin extractor checks,
+//! the `Authenticable` impl, the seed account, which the seed creates once
+//! with its roles, in one transaction, and never changes, the
 //! stored TOTP secret, which decrypts only for its own row (ADR 0006
 //! §6), and the revocation of every session, one atomic increment of
 //! `token_version` that leaves `updated_at` alone (ADR 0006 §2, ADR 0011
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 use backend3::{
     app::App,
     domain::{
+        authz::{AccountGrants, Role},
         password_hash::DUMMY_PASSWORD_HASH,
         seed::SeedAccount,
         session::AccountState,
@@ -343,11 +345,13 @@ async fn a_stored_hash_round_trips_through_the_table() {
 }
 
 /// An invented seed account for the `seed_account` tests; its password is a
-/// test value, not the published seed password.
+/// test value, not the published seed password. It has two roles, so the
+/// tests see every role written.
 const SEED: SeedAccount = SeedAccount {
     name: "Mag Próba",
     email: "Mag.Proba@example.test",
     password: "egy kitalált magjelszó",
+    roles: &[Role::Writer, Role::Secretary],
 };
 
 #[tokio::test]
@@ -372,6 +376,55 @@ async fn seed_account_creates_an_active_account_that_signs_in() {
             .await
             .expect("authenticate");
         assert_eq!(signed_in.map(|user| user.id), Some(created.id));
+        // Its roles, and no extra grant.
+        assert_eq!(
+            created.grants(&ctx.db).await.expect("grants"),
+            AccountGrants {
+                roles: [Role::Writer, Role::Secretary].into(),
+                extra: [].into(),
+            }
+        );
+    })
+    .await;
+}
+
+/// The account and its roles are one transaction: when a role cannot be
+/// written, no account is left behind without it.
+#[tokio::test]
+async fn seed_account_writes_nothing_when_a_role_cannot_be_written() {
+    with_app(|_router, ctx| async move {
+        // This test's own database only: without the secretary row, the
+        // second role link fails its foreign key.
+        ctx.db
+            .execute_unprepared("DELETE FROM roles WHERE id = 2")
+            .await
+            .expect("remove the secretary row");
+
+        let error = Model::seed_account(&ctx.db, &SEED)
+            .await
+            .expect_err("the secretary link is refused");
+
+        assert!(
+            error.to_string().contains("user_roles_role_id_fkey"),
+            "{error}"
+        );
+        assert_eq!(
+            users::Entity::find().count(&ctx.db).await.expect("count"),
+            0,
+            "the account was rolled back with its roles"
+        );
+        let links = ctx
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) FROM user_roles",
+            ))
+            .await
+            .expect("count the links")
+            .expect("a row")
+            .try_get_by_index::<i64>(0)
+            .expect("a count");
+        assert_eq!(links, 0);
     })
     .await;
 }
@@ -403,6 +456,11 @@ async fn seed_account_leaves_an_existing_account_with_the_address_alone() {
             .await
             .expect("stored");
         assert_eq!(stored, existing, "the row is unchanged");
+        // Not even its roles: the seed gives that account none.
+        assert_eq!(
+            stored.grants(&ctx.db).await.expect("grants"),
+            AccountGrants::default()
+        );
         assert_eq!(
             users::Entity::find().count(&ctx.db).await.expect("count"),
             1
@@ -414,12 +472,37 @@ async fn seed_account_leaves_an_existing_account_with_the_address_alone() {
 #[tokio::test]
 async fn truncate_never_empties_the_accounts() {
     // The append-only history tables reference users and reject TRUNCATE, so
-    // App::truncate leaves users alone (AGENTS.md, "Commands").
+    // App::truncate leaves users alone (AGENTS.md, "Commands"), and with them
+    // the roles and grants they hold and the four seeded roles.
     with_app(|_router, ctx| async move {
         let user = insert(&ctx.db, "marad@example.test", |_| {}).await;
+        ctx.db
+            .execute_unprepared(&format!(
+                "INSERT INTO user_roles (user_id, role_id) VALUES ({0}, 1); \
+                 INSERT INTO user_permissions (user_id, permission) VALUES ({0}, 'edit events')",
+                user.id
+            ))
+            .await
+            .expect("a role and a grant");
         App::truncate(&ctx).await.expect("truncate");
         let found = Model::find_by_pid(&ctx.db, &user.pid.to_string()).await;
         assert_eq!(found.map(|found| found.id).ok(), Some(user.id));
+        assert_eq!(
+            user.grants(&ctx.db).await.expect("grants"),
+            AccountGrants::from_stored([1], ["edit events"]).expect("known values")
+        );
+        let roles = ctx
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) FROM roles",
+            ))
+            .await
+            .expect("count the roles")
+            .expect("a row")
+            .try_get_by_index::<i64>(0)
+            .expect("a count");
+        assert_eq!(roles, 4);
     })
     .await;
 }

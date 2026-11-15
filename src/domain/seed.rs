@@ -31,7 +31,7 @@
 //! loads; [`check_environment`] is the second wall, which `Hooks::seed` runs
 //! on every call, whatever started it and whatever the environment is called.
 
-use super::database_target::LOCAL_ONLY_ENVIRONMENTS;
+use super::{authz::Role, database_target::LOCAL_ONLY_ENVIRONMENTS};
 
 /// The environments in which `Hooks::seed` runs: exactly those whose
 /// database must be local ([`LOCAL_ONLY_ENVIRONMENTS`]). Seeding is tied to
@@ -48,18 +48,24 @@ pub struct SeedAccount {
     pub email: &'static str,
     /// The plain-text password, which the seed hashes when it runs.
     pub password: &'static str,
+    /// The roles the account holds (`user_roles`, ADR 0007 §3), written in
+    /// the same transaction as the account.
+    pub roles: &'static [Role],
 }
 
 /// The invented account of the development, test and E2E seed.
 ///
 /// Its password is public and throwaway, as its text says, and at least 12
 /// characters long, so the forced change of short passwords (ADR 0006 §6)
-/// never applies to it. Production never holds this account
+/// never applies to it. It holds the `admin` role, so it holds every
+/// permission and can reach every admin screen that the E2E suite and a
+/// developer open (ADR 0007 §2). Production never holds this account
 /// ([`check_environment`]).
 pub const SEED_ACCOUNT: SeedAccount = SeedAccount {
     name: "Próba Adminisztrátor",
     email: "seed-admin@example.org",
     password: "public-throwaway-seed-password",
+    roles: &[Role::Admin],
 };
 
 /// Why `Hooks::seed` refused to run. The `Display` text is the message the
@@ -183,6 +189,21 @@ mod tests {
         let length = SEED_ACCOUNT.password.chars().count();
         assert!((12..=128).contains(&length), "{length}");
         assert!(SEED_ACCOUNT.password.contains("public"));
+    }
+
+    #[test]
+    fn the_seed_account_is_an_admin_with_every_permission() {
+        // The E2E suite and a local developer reach every admin screen with
+        // it, whatever permission a screen needs (ADR 0007 §2).
+        assert_eq!(SEED_ACCOUNT.roles, [Role::Admin]);
+        assert!(crate::domain::authz::is_admin(
+            SEED_ACCOUNT.roles.iter().copied()
+        ));
+        assert_eq!(
+            crate::domain::authz::effective_permissions(SEED_ACCOUNT.roles.iter().copied(), [])
+                .len(),
+            crate::domain::authz::Permission::ALL.len()
+        );
     }
 
     proptest! {

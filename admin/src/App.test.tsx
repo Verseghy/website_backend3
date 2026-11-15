@@ -31,6 +31,9 @@ const ME: MeResponse = {
   name: "Próba Szerkesztő",
   email: "proba@example.test",
   scope: "admin",
+  roles: ["writer"],
+  permissions: ["edit posts", "edit labels", "edit authors", "manage media"],
+  is_admin: false,
 }
 
 /**

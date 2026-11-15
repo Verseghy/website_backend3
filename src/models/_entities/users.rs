@@ -39,6 +39,10 @@ pub enum Relation {
     ActivityLog,
     #[sea_orm(has_many = "super::revisions::Entity")]
     Revisions,
+    #[sea_orm(has_many = "super::user_permissions::Entity")]
+    UserPermissions,
+    #[sea_orm(has_many = "super::user_roles::Entity")]
+    UserRoles,
     #[sea_orm(
         belongs_to = "Entity",
         from = "Column::CreatedBy",
@@ -74,5 +78,26 @@ impl Related<super::activity_log::Entity> for Entity {
 impl Related<super::revisions::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Revisions.def()
+    }
+}
+
+impl Related<super::user_permissions::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::UserPermissions.def()
+    }
+}
+
+impl Related<super::user_roles::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::UserRoles.def()
+    }
+}
+
+impl Related<super::roles::Entity> for Entity {
+    fn to() -> RelationDef {
+        super::user_roles::Relation::Roles.def()
+    }
+    fn via() -> Option<RelationDef> {
+        Some(super::user_roles::Relation::Users.def().rev())
     }
 }

@@ -1,7 +1,8 @@
 //! The development, test and E2E seed, `Hooks::seed` (`src/domain/seed.rs`).
 //!
 //! The seed creates the invented account of `SEED_ACCOUNT` in development,
-//! test and e2e, signs in through the browser sign-in like any account,
+//! test and e2e, with the `admin` role, signs in through the browser sign-in
+//! like any account,
 //! leaves an existing account alone, and refuses every other environment
 //! before it writes anything: production never holds the account
 //! (ADR 0040). `tests/cli/precheck.rs` covers the CLI
@@ -17,6 +18,7 @@ use axum::http::{StatusCode, header::COOKIE};
 use backend3::{
     app::App,
     domain::{
+        authz::{AccountGrants, Permission, Role},
         password_hash::{self, PasswordHashKind},
         seed::SEED_ACCOUNT,
         session_cookie::SESSION_COOKIE_NAME,
@@ -79,6 +81,14 @@ async fn the_seed_creates_the_invented_account_with_a_hash_made_at_seed_time() {
         assert!(user.deleted_at.is_none());
         assert!(user.anonymised_at.is_none());
         assert_eq!(user.created_by, None, "the system created it");
+        // The admin role and no extra grant (ADR 0007 §3).
+        assert_eq!(
+            user.grants(&ctx.db).await.expect("grants"),
+            AccountGrants {
+                roles: [Role::Admin].into(),
+                extra: [].into(),
+            }
+        );
         assert!(
             users::Model::authenticate(&ctx.db, SEED_ACCOUNT.email, SEED_ACCOUNT.password)
                 .await
@@ -189,6 +199,11 @@ async fn the_seed_account_signs_in_through_the_admin_api() {
                 "name": SEED_ACCOUNT.name,
                 "email": SEED_ACCOUNT.email,
                 "scope": "admin",
+                // The admin role, and with it every permission (ADR 0007
+                // §2), so the E2E suite reaches every screen.
+                "roles": ["admin"],
+                "permissions": Permission::ALL.map(Permission::name),
+                "is_admin": true,
             })
         );
     })

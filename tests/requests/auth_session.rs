@@ -10,7 +10,12 @@
 //! route does not accept. The session cookie is read before the Bearer
 //! header. The account is read on every request, so an account event
 //! applies to the next one (ADR 0016), and a database failure answers `500`,
-//! never `401`. Every account here is invented.
+//! never `401`. So are the account's roles and extra grants, once the
+//! session holds: `/auth/me` answers them with the effective permissions and
+//! the admin flag, a role or grant change applies to the next request, and
+//! a stored value that the code does not know, or a database failure of that
+//! read alone, answers `500` (ADR 0007 §3, §5, §7). Every account here is
+//! invented.
 
 use axum::{
     extract::FromRequestParts,
@@ -22,7 +27,11 @@ use axum::{
 use axum_test::{TestResponse, TestServer};
 use backend3::{
     controllers::admin::session::{AdminOrPasswordChange, AdminScope, AdminSession},
-    domain::{session::SessionScope, session_cookie::SESSION_COOKIE_NAME},
+    domain::{
+        authz::{AccountGrants, Permission, Role},
+        session::SessionScope,
+        session_cookie::SESSION_COOKIE_NAME,
+    },
     models::users::{self, ActiveModel, Model},
 };
 use base64::{
@@ -34,7 +43,7 @@ use hmac::{Hmac, KeyInit as _, Mac as _};
 use loco_rs::{
     app::AppContext,
     auth::jwt::JWT,
-    prelude::{ActiveModelTrait, ActiveValue, IntoActiveModel},
+    prelude::{ActiveModelTrait, ActiveValue, ConnectionTrait, IntoActiveModel},
 };
 use serde_json::{Map, Value, json};
 use sha2::{Sha256, Sha512};
@@ -170,14 +179,41 @@ fn observable(response: &TestResponse) -> (StatusCode, HeaderMap, Vec<u8>) {
     )
 }
 
-/// The `/auth/me` answer for `user` with `scope`.
+/// The `/auth/me` answer for `user` with `scope`, holding no role and no
+/// grant.
 fn me_body(user: &Model, scope: &str) -> Value {
     json!({
         "pid": user.pid.to_string(),
         "name": user.name,
         "email": user.email,
-        "scope": scope
+        "scope": scope,
+        "roles": [],
+        "permissions": [],
+        "is_admin": false
     })
+}
+
+/// Gives `user` the roles `role_ids` and the extra grants `permissions`, in
+/// SQL, as the user editor will.
+async fn give(ctx: &AppContext, user: &Model, role_ids: &[i64], permissions: &[&str]) {
+    for role_id in role_ids {
+        ctx.db
+            .execute_unprepared(&format!(
+                "INSERT INTO user_roles (user_id, role_id) VALUES ({}, {role_id})",
+                user.id
+            ))
+            .await
+            .expect("a role");
+    }
+    for permission in permissions {
+        ctx.db
+            .execute_unprepared(&format!(
+                "INSERT INTO user_permissions (user_id, permission) VALUES ({}, '{permission}')",
+                user.id
+            ))
+            .await
+            .expect("a grant");
+    }
 }
 
 #[tokio::test]
@@ -571,6 +607,193 @@ async fn the_account_is_read_on_every_request() {
     .await;
 }
 
+#[tokio::test]
+async fn me_answers_the_roles_the_effective_permissions_and_the_admin_flag() {
+    // ADR 0007 §3, §7: the union of the roles' sets and the extra grants,
+    // each permission once and in the ADR's order, the roles in id order.
+    with_server(|server, ctx| async move {
+        let user = account(&ctx, "jogok@example.test", |_| {}).await;
+        // writer (1) and secretary (2), plus view logs and edit posts, which
+        // the writer role already gives.
+        give(&ctx, &user, &[2, 1], &["view logs", "edit posts"]).await;
+        let response = me_with_cookie(&server, &admin_token(&ctx, &user)).await;
+        assert_eq!(response.status_code(), StatusCode::OK);
+        let mut expected = me_body(&user, "admin");
+        expected["roles"] = json!(["writer", "secretary"]);
+        expected["permissions"] = json!([
+            "edit posts",
+            "edit labels",
+            "edit authors",
+            "edit events",
+            "edit canteens",
+            "edit colleagues",
+            "manage media",
+            "view logs"
+        ]);
+        assert_eq!(response.json::<Value>(), expected);
+
+        // The admin role: all sixteen and the flag.
+        let admin = account(&ctx, "fo@example.test", |_| {}).await;
+        give(&ctx, &admin, &[4], &[]).await;
+        let body = me_with_cookie(&server, &admin_token(&ctx, &admin))
+            .await
+            .json::<Value>();
+        assert_eq!(body["roles"], json!(["admin"]));
+        assert_eq!(body["permissions"].as_array().map(Vec::len), Some(16));
+        assert_eq!(body["is_admin"], json!(true));
+
+        // Every permission as an extra grant is no admin (ADR 0007 §2).
+        let granted = account(&ctx, "mind@example.test", |_| {}).await;
+        let names: Vec<&str> = Permission::ALL
+            .iter()
+            .map(|permission| permission.name())
+            .collect();
+        give(&ctx, &granted, &[], &names).await;
+        let body = me_with_cookie(&server, &admin_token(&ctx, &granted))
+            .await
+            .json::<Value>();
+        assert_eq!(body["roles"], json!([]));
+        assert_eq!(body["permissions"], json!(names));
+        assert_eq!(body["is_admin"], json!(false));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_role_or_grant_change_applies_on_the_next_request() {
+    // ADR 0007 §5, "Fresh data": the extractor reads the roles and grants
+    // on every request, and the change needs no new token (ADR 0006 §2).
+    with_server(|server, ctx| async move {
+        let user = account(&ctx, "valtozik@example.test", |_| {}).await;
+        let token = admin_token(&ctx, &user);
+        let permissions = |body: Value| body["permissions"].clone();
+        assert_eq!(
+            permissions(me_with_cookie(&server, &token).await.json()),
+            json!([])
+        );
+
+        give(&ctx, &user, &[3], &[]).await;
+        let body = me_with_cookie(&server, &token).await.json::<Value>();
+        assert_eq!(body["roles"], json!(["supervisor"]));
+        assert_eq!(
+            permissions(body),
+            json!([
+                "edit posts",
+                "publish posts",
+                "edit labels",
+                "edit authors",
+                "manage media"
+            ])
+        );
+
+        give(&ctx, &user, &[4], &[]).await;
+        assert_eq!(
+            me_with_cookie(&server, &token).await.json::<Value>()["is_admin"],
+            json!(true)
+        );
+
+        ctx.db
+            .execute_unprepared(&format!(
+                "DELETE FROM user_roles WHERE user_id = {}",
+                user.id
+            ))
+            .await
+            .expect("take the roles away");
+        let response = me_with_cookie(&server, &token).await;
+        // Still signed in: an account without roles uses its own account.
+        assert_eq!(response.status_code(), StatusCode::OK);
+        assert_eq!(response.json::<Value>(), me_body(&user, "admin"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_refused_session_answers_401_before_any_grant_is_read() {
+    // The session check comes first: a stored grant that the code cannot
+    // read does not turn a refused session into a 500.
+    with_server(|server, ctx| async move {
+        let user = account(&ctx, "elutasitott@example.test", |new| {
+            new.active = ActiveValue::Set(false);
+        })
+        .await;
+        ctx.db
+            .execute_unprepared(&format!(
+                "INSERT INTO roles (id, name) VALUES (9, 'editor'); \
+                 INSERT INTO user_roles (user_id, role_id) VALUES ({}, 9)",
+                user.id
+            ))
+            .await
+            .expect("a role the code does not define, in this test's database");
+        let response = me_with_cookie(&server, &admin_token(&ctx, &user)).await;
+        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.json::<Value>(), unauthorized());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_stored_grant_the_code_does_not_know_answers_500_never_401() {
+    // Only a change outside the migrations can store one. The admin UI signs
+    // out on 401, so the defect must not look like an ended session; and an
+    // unknown value is never dropped or guessed.
+    with_server(|server, ctx| async move {
+        let user = account(&ctx, "ismeretlen@example.test", |_| {}).await;
+        give(&ctx, &user, &[1], &[]).await;
+        ctx.db
+            .execute_unprepared(&format!(
+                "ALTER TABLE user_permissions DROP CONSTRAINT user_permissions_permission_known; \
+                 INSERT INTO user_permissions (user_id, permission) \
+                 VALUES ({}, 'manage backups')",
+                user.id
+            ))
+            .await
+            .expect("a permission the code does not define, in this test's database");
+        let response = me_with_cookie(&server, &admin_token(&ctx, &user)).await;
+        assert_eq!(response.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.json::<Value>()["error"],
+            json!("internal_server_error")
+        );
+        assert_eq!(response.header("cache-control"), "no-store");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_database_failure_while_reading_the_grants_answers_500_never_401() {
+    // The account read succeeds and the session check passes; only the
+    // grants query fails. That failure is the extractor's own mapping, apart
+    // from the account read's, so it gets its own test: a 401 here would sign
+    // the admin UI out (ADR 0006, follow-up work) for a server fault.
+    with_server(|server, ctx| async move {
+        let user = account(&ctx, "jogkieses@example.test", |_| {}).await;
+        give(&ctx, &user, &[1], &[]).await;
+        let token = admin_token(&ctx, &user);
+        // Only in this test's own database. `users` stays readable, so the
+        // statement that fails is the grants read, which names the table.
+        ctx.db
+            .execute_unprepared("ALTER TABLE user_permissions RENAME TO user_permissions_gone")
+            .await
+            .expect("hide the grants table in this test's database");
+        let response = me_with_cookie(&server, &token).await;
+        assert_eq!(response.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.json::<Value>()["error"],
+            json!("internal_server_error")
+        );
+        assert_eq!(response.header("cache-control"), "no-store");
+        // The same token with the table back: the failure was the read, not
+        // the session.
+        ctx.db
+            .execute_unprepared("ALTER TABLE user_permissions_gone RENAME TO user_permissions")
+            .await
+            .expect("restore the grants table");
+        let response = me_with_cookie(&server, &token).await;
+        assert_eq!(response.status_code(), StatusCode::OK);
+    })
+    .await;
+}
+
 /// Runs the extractor for the scopes `A` on a request that carries `token`
 /// in the session cookie, and returns the session's scope or the refusal's
 /// status.
@@ -626,7 +849,9 @@ async fn a_full_session_route_refuses_a_password_change_session() {
             extract::<AdminOrPasswordChange>(&ctx, &mfa).await,
             Err(StatusCode::UNAUTHORIZED)
         );
-        // The session carries the account as read for the request.
+        // The session carries the account as read for the request, with its
+        // roles and grants (ADR 0007 §5).
+        give(&ctx, &user, &[2], &["edit menu"]).await;
         let request = Request::get("/api/admin/x")
             .header(AUTHORIZATION, format!("Bearer {admin}"))
             .body(())
@@ -639,6 +864,13 @@ async fn a_full_session_route_refuses_a_password_change_session() {
         assert_eq!(
             (session.user.id, session.claims.pid.as_str()),
             (user.id, pid.as_str())
+        );
+        assert_eq!(
+            session.grants,
+            AccountGrants {
+                roles: [Role::Secretary].into(),
+                extra: [Permission::EditMenu].into(),
+            }
         );
     })
     .await;

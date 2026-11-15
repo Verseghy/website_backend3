@@ -36,9 +36,11 @@
 //! ([`Model::generate_session_token`]) live here too. The [`Authenticable`]
 //! impl lets Loco's `JWTWithUser` extractor load the account a token names,
 //! and [`Model::session_state`] hands the admin extractor the columns that
-//! decide whether the session still holds (ADR 0006 §1).
+//! decide whether the session still holds (ADR 0006 §1). [`Model::grants`]
+//! reads the roles and extra grants that the account holds, which the admin
+//! extractor loads on every request (ADR 0007 §5, "Fresh data").
 //! [`Model::seed_account`] creates the invented account of the development,
-//! test and E2E seed (`crate::domain::seed`).
+//! test and E2E seed (`crate::domain::seed`) with its roles.
 //!
 //! The entity derives no serde (`[package.metadata.db.entity]` in
 //! `Cargo.toml`), so a [`Model`] can be neither a response nor a request
@@ -49,10 +51,12 @@
 
 use chrono::{DateTime, Utc};
 use loco_rs::{auth::jwt::JWT, hash, prelude::*};
-use sea_orm::sea_query::Func;
+use sea_orm::{DbBackend, FromQueryResult, Statement, TransactionSession, sea_query::Func};
 
 pub use super::_entities::users::{self, ActiveModel, Column, Entity, Model};
+use super::user_roles;
 use crate::domain::{
+    authz::AccountGrants,
     email_address,
     password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind},
     seed::SeedAccount,
@@ -60,6 +64,32 @@ use crate::domain::{
     totp::TotpSecret,
     totp_secret::{self, DecryptError, TotpEncryptionKey},
 };
+
+/// The roles and the extra grants of the account `$1`, in one statement:
+/// each row carries either a `user_roles.role_id` or a
+/// `user_permissions.permission`, never both.
+///
+/// One statement on purpose: PostgreSQL gives a statement one snapshot, so
+/// the two lists always come from the same committed state. Two separate
+/// queries could read the roles from before a concurrent role change and the
+/// grants from after it, a mixture that neither state held, which a guard
+/// such as "grant only what you hold" (ADR 0007 §6) must never see. The
+/// primary keys' indexes, whose leading column is `user_id`, serve both
+/// halves.
+const GRANTS_QUERY: &str = "SELECT role_id, NULL::text AS permission FROM user_roles \
+                            WHERE user_id = $1 \
+                            UNION ALL \
+                            SELECT NULL::bigint AS role_id, permission FROM user_permissions \
+                            WHERE user_id = $1";
+
+/// A row of [`GRANTS_QUERY`]: a role id or a permission identifier.
+#[derive(Debug, FromQueryResult)]
+struct StoredGrant {
+    /// A `user_roles.role_id`, or `None` on a grant's row.
+    role_id: Option<i64>,
+    /// A `user_permissions.permission`, or `None` on a role's row.
+    permission: Option<String>,
+}
 
 /// `lower(email) = lower($1)`: the e-mail comparison of sign-in, written as
 /// the expression of the unique index `users_lower_email_key`.
@@ -408,10 +438,12 @@ impl Model {
         Ok((password_matches && may_sign_in).then_some(user))
     }
 
-    /// Creates the seed account `account` unless an account already has its
-    /// address, for `Hooks::seed` (`crate::domain::seed`).
+    /// Creates the seed account `account`, with its roles, unless an account
+    /// already has its address, for `Hooks::seed` (`crate::domain::seed`).
     ///
-    /// - `db`: the connection or transaction to write to.
+    /// - `db`: the connection or transaction to write to; the method runs in
+    ///   a transaction of its own (a savepoint inside a caller's
+    ///   transaction).
     /// - `account`: the account to create; its password is hashed here, with
     ///   [`hash_password`] and a fresh salt, so no hash of it is ever
     ///   committed.
@@ -419,17 +451,21 @@ impl Model {
     /// The address is compared as sign-in compares it (`lower(email)`), over
     /// every row, trashed ones included, because the unique index
     /// `users_lower_email_key` covers them too. An account that has it is
-    /// left exactly as it is, whatever its state, so seeding twice gives the
-    /// result of seeding once, as `find_or_create_by` does in a Rails seed.
-    /// To start over, recreate the database (`AGENTS.md`, "Commands").
+    /// left exactly as it is, whatever its state and its roles, so seeding
+    /// twice gives the result of seeding once, as `find_or_create_by` does in
+    /// a Rails seed. To start over, recreate the database (`AGENTS.md`,
+    /// "Commands").
     ///
     /// The new account is active, has a password and no two-factor, and needs
-    /// no password change, so the browser sign-in gives it a full session.
-    /// `created_at` and `updated_at` come from PostgreSQL's clock, the
-    /// columns' default (research: DECISIONS R15 (D90)), and `created_by`
-    /// stays NULL: the system created it. No revision or activity entry is
-    /// written: the seed fills only local development, test and E2E
-    /// databases (`crate::domain::seed::check_environment`).
+    /// no password change, so the browser sign-in gives it a full session. It
+    /// holds `account.roles` (`user_roles`) and no extra grant; the account
+    /// and its roles are written in one transaction, so no account is ever
+    /// left without the roles the seed promises. `created_at` and
+    /// `updated_at` come from PostgreSQL's clock, the columns' default
+    /// (research: DECISIONS R15 (D90)), and `created_by` stays NULL: the
+    /// system created it. No revision or activity entry is written: the seed
+    /// fills only local development, test and E2E databases
+    /// (`crate::domain::seed::check_environment`).
     ///
     /// The caller checks the environment first; this method does not see it.
     ///
@@ -437,16 +473,18 @@ impl Model {
     ///
     /// [`ModelError::Any`] when hashing fails; [`ModelError::DbErr`] when a
     /// query fails, including the unique violation of a concurrent seed that
-    /// inserted the same address first.
+    /// inserted the same address first. Nothing is written then.
     pub async fn seed_account<C>(db: &C, account: &SeedAccount) -> ModelResult<SeedOutcome>
     where
-        C: ConnectionTrait,
+        C: ConnectionTrait + TransactionTrait,
     {
+        let txn = db.begin().await?;
         if let Some(existing) = Entity::find()
             .filter(lower_email_equals(account.email))
-            .one(db)
+            .one(&txn)
             .await?
         {
+            txn.commit().await?;
             return Ok(SeedOutcome::AlreadyPresent(existing));
         }
         let created = ActiveModel {
@@ -455,9 +493,57 @@ impl Model {
             password_hash: ActiveValue::Set(Some(hash_password(account.password)?)),
             ..Default::default()
         }
-        .insert(db)
+        .insert(&txn)
         .await?;
+        for role in account.roles {
+            user_roles::ActiveModel {
+                user_id: ActiveValue::Set(created.id),
+                role_id: ActiveValue::Set(role.id()),
+            }
+            .insert(&txn)
+            .await?;
+        }
+        txn.commit().await?;
         Ok(SeedOutcome::Created(created))
+    }
+
+    /// The roles and the extra grants that this account holds, as stored now
+    /// (ADR 0007 §3).
+    ///
+    /// - `db`: the connection or transaction to query.
+    ///
+    /// The admin session extractor calls it on every request, after the
+    /// session check, so a role or grant change applies on the account's
+    /// next request (ADR 0007 §5, "Fresh data"; ADR 0006 §2); nothing is
+    /// cached (ADR 0016). Both lists come from one statement, and so from one
+    /// committed state ([`GRANTS_QUERY`] says why that matters). The account's
+    /// state (trashed, inactive) is not checked here: the session check has
+    /// done that.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::DbErr`] when the query fails, and [`ModelError::Any`]
+    /// with a [`crate::domain::authz::StoredGrantError`] when a stored role id
+    /// or permission is not one that `crate::domain::authz` defines, which
+    /// the schema's foreign key and CHECK rule out. Never
+    /// [`ModelError::EntityNotFound`], which Loco would answer with `404`: an
+    /// account without roles or grants has an empty [`AccountGrants`].
+    pub async fn grants<C>(&self, db: &C) -> ModelResult<AccountGrants>
+    where
+        C: ConnectionTrait,
+    {
+        let rows = StoredGrant::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            GRANTS_QUERY,
+            [self.id.into()],
+        ))
+        .all(db)
+        .await?;
+        AccountGrants::from_stored(
+            rows.iter().filter_map(|row| row.role_id),
+            rows.iter().filter_map(|row| row.permission.as_deref()),
+        )
+        .map_err(ModelError::wrap)
     }
 
     /// Signs a full admin session token for this account (ADR 0006 §1).

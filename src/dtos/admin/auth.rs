@@ -18,10 +18,11 @@ use serde::{
 };
 use ts_rs::TS;
 
-// The domain's scope only: DTOs depend on `domain/` and on no model
-// (ADR 0008, "Allowed dependencies"). The handler takes the account's
+// The domain's scope and grants only: DTOs depend on `domain/` and on no
+// model (ADR 0008, "Allowed dependencies"). The handler takes the account's
 // columns apart and passes them in.
-use crate::domain::session;
+use super::authz::{Permission, Role};
+use crate::domain::{authz::AccountGrants, session};
 
 /// The body of a browser sign-in: the account's e-mail address and password.
 ///
@@ -137,10 +138,11 @@ pub enum SessionScope {
 /// `GET /api/admin/auth/me`.
 ///
 /// The admin UI reads it after sign-in and on every reload, to show who is
-/// signed in and to send a `password_change` session to the password form.
-// Exported doc comment above. ADR 0007 §7 adds the roles, the effective
-// permissions, `is_admin` and the access map; the slices that add roles
-// and the access map add those fields here.
+/// signed in, to send a `password_change` session to the password form, and
+/// to hide what the account may not use. The server decides every access
+/// itself; these fields only spare the UI a refused request (ADR 0007 §7).
+// Exported doc comment above. ADR 0007 §7 also lists the access map, which
+// the access-map slice adds here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export, export_to = "../admin/src/bindings/")]
 pub struct MeResponse {
@@ -152,6 +154,17 @@ pub struct MeResponse {
     pub email: String,
     /// What this session may do.
     pub scope: SessionScope,
+    /// The roles the account holds, in id order (writer, secretary,
+    /// supervisor, admin); empty for an account with no role.
+    pub roles: Vec<Role>,
+    /// The account's effective permissions: those of its roles and its
+    /// extra grants together, each once, in the order of ADR 0007 §1.
+    pub permissions: Vec<Permission>,
+    /// Whether the account holds the `admin` role, which unlocks what no
+    /// permission gives: permanent delete, actions on other admin-role
+    /// accounts and figures about individual people (ADR 0007 §2). All
+    /// sixteen permissions as extra grants still make no admin.
+    pub is_admin: bool,
 }
 
 /// Why a [`MeResponse`] could not be built. Either one is a defect, never a
@@ -198,17 +211,22 @@ impl TryFrom<session::SessionScope> for SessionScope {
 
 impl MeResponse {
     /// Builds the answer for a signed-in account from its allow-listed
-    /// columns.
+    /// columns and what it holds.
     ///
     /// - `pid`: the account's public id (`users.pid`).
     /// - `name`: the account's display name (`users.name`).
     /// - `email`: the account's e-mail address (`users.email`), which only
     ///   an anonymised account lacks.
     /// - `scope`: the session's scope, which the route accepted.
+    /// - `grants`: the account's roles and extra grants, as the session
+    ///   extractor read them for this request; the answer carries the roles,
+    ///   the effective permissions and the admin flag computed from them.
     ///
     /// It takes these values, never the account's row, so nothing else can
     /// go out: not the password hash, the TOTP secret or the database id
-    /// (ADR 0005, ADR 0011 §4).
+    /// (ADR 0005, ADR 0011 §4). The extra grants are not sent apart from the
+    /// effective set: the admin needs what the account may do, not where
+    /// each permission came from.
     ///
     /// # Errors
     ///
@@ -220,14 +238,24 @@ impl MeResponse {
         name: String,
         email: Option<String>,
         scope: session::SessionScope,
+        grants: &AccountGrants,
     ) -> Result<Self, MeResponseError> {
         let scope = SessionScope::try_from(scope)?;
         let email = email.ok_or(MeResponseError::NoEmail)?;
+        // Both sets are ordered by the domain enums' declaration order, so
+        // the lists come out in id order and in ADR 0007 §1 order.
         Ok(Self {
             pid: pid.to_string(),
             name,
             email,
             scope,
+            roles: grants.roles.iter().copied().map(Role::from).collect(),
+            permissions: grants
+                .effective()
+                .into_iter()
+                .map(Permission::from)
+                .collect(),
+            is_admin: grants.is_admin(),
         })
     }
 }
@@ -348,16 +376,27 @@ mod tests {
     const PID: &str = "0b9c6a1e-3f2d-4c5b-8a79-6e5d4c3b2a19";
 
     /// [`MeResponse::new`] for the invented account with `email` and
-    /// `scope`.
+    /// `scope`, holding no role and no grant.
     fn me(
         email: Option<&str>,
         scope: session::SessionScope,
+    ) -> Result<MeResponse, MeResponseError> {
+        me_holding(email, scope, &AccountGrants::default())
+    }
+
+    /// [`MeResponse::new`] for the invented account with `email`, `scope`
+    /// and `grants`.
+    fn me_holding(
+        email: Option<&str>,
+        scope: session::SessionScope,
+        grants: &AccountGrants,
     ) -> Result<MeResponse, MeResponseError> {
         MeResponse::new(
             Uuid::parse_str(PID).expect("a UUID"),
             "Próba Szerkesztő".to_owned(),
             email.map(str::to_owned),
             scope,
+            grants,
         )
     }
 
@@ -402,7 +441,10 @@ mod tests {
                 "pid": PID,
                 "name": "Próba Szerkesztő",
                 "email": "szerkeszto@example.test",
-                "scope": "admin"
+                "scope": "admin",
+                "roles": [],
+                "permissions": [],
+                "is_admin": false
             })
         );
         let password_change = me(
@@ -415,6 +457,76 @@ mod tests {
             serde_json::to_value(password_change.scope).expect("serializes"),
             json!("password_change")
         );
+    }
+
+    #[test]
+    fn me_sends_the_roles_the_effective_permissions_and_the_admin_flag() {
+        use crate::domain::authz::{Permission as P, Role as R};
+
+        // Roles in id order, permissions once each in ADR 0007 §1 order:
+        // a supervisor's five, then the extra grants, edit posts (which the
+        // role already gives) only once.
+        let holding = AccountGrants {
+            roles: [R::Supervisor, R::Secretary].into(),
+            extra: [P::EditDiaktoll, P::EditPosts].into(),
+        };
+        let body = serde_json::to_value(
+            me_holding(
+                Some("szerkeszto@example.test"),
+                session::SessionScope::Admin,
+                &holding,
+            )
+            .expect("valid"),
+        )
+        .expect("serializes");
+        assert_eq!(body["roles"], json!(["secretary", "supervisor"]));
+        assert_eq!(
+            body["permissions"],
+            json!([
+                "edit posts",
+                "publish posts",
+                "edit labels",
+                "edit authors",
+                "edit events",
+                "edit canteens",
+                "edit colleagues",
+                "manage media",
+                "edit diaktoll"
+            ])
+        );
+        assert_eq!(body["is_admin"], json!(false));
+
+        // The admin role: every permission and the flag.
+        let admin = me_holding(
+            Some("szerkeszto@example.test"),
+            session::SessionScope::Admin,
+            &AccountGrants {
+                roles: [R::Admin].into(),
+                extra: [].into(),
+            },
+        )
+        .expect("valid");
+        assert_eq!(admin.roles, [Role::Admin]);
+        assert_eq!(
+            admin.permissions,
+            P::ALL.map(Permission::from).to_vec(),
+            "every permission"
+        );
+        assert!(admin.is_admin);
+
+        // Every permission as an extra grant: no admin (ADR 0007 §2).
+        let granted = me_holding(
+            Some("szerkeszto@example.test"),
+            session::SessionScope::PasswordChange,
+            &AccountGrants {
+                roles: [].into(),
+                extra: P::ALL.into(),
+            },
+        )
+        .expect("valid");
+        assert_eq!(granted.roles, Vec::<Role>::new());
+        assert_eq!(granted.permissions.len(), 16);
+        assert!(!granted.is_admin);
     }
 
     #[test]
@@ -454,6 +566,9 @@ mod tests {
             "name: string",
             "email: string",
             "scope: SessionScope",
+            "roles: Array<Role>",
+            "permissions: Array<Permission>",
+            "is_admin: boolean",
         ] {
             assert!(me.contains(field), "{field}: {me}");
         }

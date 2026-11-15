@@ -60,6 +60,8 @@ import type { LoginStep } from "@/bindings/LoginStep"
 import type { MeResponse } from "@/bindings/MeResponse"
 import type { MessageKey } from "@/i18n/keys"
 
+import { readPermissions, readRoles } from "./authz"
+
 /** The sign-in endpoint, relative to the API base path. */
 export const LOGIN_PATH = "/auth/login"
 /** The signed-in account's endpoint, relative to the API base path. */
@@ -274,23 +276,34 @@ export function parseLoginResponse(body: unknown): LoginResponse | undefined {
  * Reads a `200` answer of `/auth/me`.
  *
  * @param body - the parsed JSON body.
- * @returns the account, or `undefined` when the body is not a `MeResponse`.
+ * @returns the account with its roles, effective permissions and admin flag
+ *   (ADR 0007 §7), or `undefined` when the body is not a `MeResponse`: a
+ *   member is missing or of the wrong type, or a role or permission is one
+ *   this build does not know (`./authz.ts`). The server and this build ship
+ *   together in one image, so an unknown value means a broken build, and the
+ *   provider treats the answer as a server failure rather than guess.
  */
 export function parseMeResponse(body: unknown): MeResponse | undefined {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return undefined
   }
-  const { pid, name, email, scope } = body as Record<string, unknown>
+  const member = body as Record<string, unknown>
+  const { pid, name, email, scope, is_admin } = member
+  const roles = readRoles(member.roles)
+  const permissions = readPermissions(member.permissions)
   if (
     typeof pid !== "string" ||
     pid === "" ||
     typeof name !== "string" ||
     typeof email !== "string" ||
-    (scope !== "admin" && scope !== "password_change")
+    (scope !== "admin" && scope !== "password_change") ||
+    roles === undefined ||
+    permissions === undefined ||
+    typeof is_admin !== "boolean"
   ) {
     return undefined
   }
-  return { pid, name, email, scope }
+  return { pid, name, email, scope, roles, permissions, is_admin }
 }
 
 /**

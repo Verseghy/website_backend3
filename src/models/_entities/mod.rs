@@ -4,4 +4,7 @@ pub mod prelude;
 
 pub mod activity_log;
 pub mod revisions;
+pub mod roles;
+pub mod user_permissions;
+pub mod user_roles;
 pub mod users;

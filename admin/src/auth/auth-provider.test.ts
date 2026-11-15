@@ -28,6 +28,9 @@ const ME: MeResponse = {
   name: "Próba Szerkesztő",
   email: "proba@example.test",
   scope: "admin",
+  roles: ["writer"],
+  permissions: ["edit posts", "edit labels", "edit authors", "manage media"],
+  is_admin: false,
 }
 
 /**
@@ -614,8 +617,40 @@ describe("parseMeResponse", () => {
     ["a numeric name", { ...ME, name: 1 }],
     ["no email", { ...ME, email: null }],
     ["an mfa scope", { ...ME, scope: "mfa" }],
+    ["no roles", { ...ME, roles: undefined }],
+    ["an unknown role", { ...ME, roles: ["editor"] }],
+    ["a role twice", { ...ME, roles: ["writer", "writer"] }],
+    ["roles that are not a list", { ...ME, roles: "writer" }],
+    ["no permissions", { ...ME, permissions: undefined }],
+    // Never created (ADR 0007 follow-up points 1 and 2).
+    ["a retired permission", { ...ME, permissions: ["edit newsletter"] }],
+    [
+      "a permission in another spelling",
+      { ...ME, permissions: ["edit_posts"] },
+    ],
+    ["permissions that are not a list", { ...ME, permissions: {} }],
+    ["no admin flag", { ...ME, is_admin: undefined }],
+    ["an admin flag that is not a boolean", { ...ME, is_admin: "true" }],
   ])("refuses %s", (_case, body) => {
     expect(parseMeResponse(body)).toBeUndefined()
+  })
+
+  it("reads the roles, the permissions and the admin flag as sent", () => {
+    const admin: MeResponse = {
+      ...ME,
+      roles: ["secretary", "admin"],
+      permissions: ["edit posts", "view logs", "edit diaktoll"],
+      is_admin: true,
+    }
+    expect(parseMeResponse(admin)).toEqual(admin)
+    // An account without roles or grants is still an account.
+    expect(
+      parseMeResponse({ ...ME, roles: [], permissions: [], is_admin: false })
+    ).toEqual({ ...ME, roles: [], permissions: [], is_admin: false })
+  })
+
+  it("keeps no member beyond the MeResponse ones", () => {
+    expect(parseMeResponse({ ...ME, token: "x", access: {} })).toEqual(ME)
   })
 
   it("never throws on any JSON value", () => {
