@@ -1,6 +1,6 @@
 # 0013. Rich-text editor and HTML sanitiser
 
-- Status: Amended by [0037](0037-nested-links-unwrapped-by-the-sanitiser-s-structural-pass.md) (2026-10-31)
+- Status: Amended by [0037](0037-nested-links-unwrapped-by-the-sanitiser-s-structural-pass.md) (2026-10-31) and [0043](0043-youtube-embed-input-playlists-ids-minimum-height-and-referer.md) (2026-11-01)
 - Decision questions: Q15 and the follow-up answers 15a-15g
 
 ## Context
