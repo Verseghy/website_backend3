@@ -10,6 +10,9 @@
 //! - [`activity_log`]: the append-only activity log (ADR 0011 §5).
 //! - [`job_queue`]: Loco's job queue table, read for `/metrics`; a model
 //!   module without an entity.
+//! - [`media`]: the uploads volume: an upload streamed to staging, optimised
+//!   and renamed into place (ADR 0015 §6, §7); a model module without an
+//!   entity.
 //! - [`revisions`]: the append-only revisions of every admin-editable
 //!   entity, and the save that writes a revision with its activity entry
 //!   (ADR 0011 §4, §7).
@@ -33,6 +36,7 @@
 pub mod _entities;
 pub mod activity_log;
 pub mod job_queue;
+pub mod media;
 pub mod revisions;
 pub mod task_lock;
 pub mod users;

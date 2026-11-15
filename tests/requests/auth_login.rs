@@ -7,8 +7,8 @@
 //! same `401`, including, for now, the right password of an account with
 //! two-factor on or a forced password change. A body that is not
 //! `{email, password}` answers byte for byte the same `422`, and one above
-//! the request body limit `413` (research: DECISIONS R15 (D74)). Every account
-//! and password here is invented.
+//! the admin API's 4 MiB JSON body limit `413` (research: DECISIONS R15
+//! (D74); ADR 0023 §5). Every account and password here is invented.
 
 use axum::{
     extract::FromRequestParts,
@@ -20,6 +20,7 @@ use axum::{
 use axum_test::{TestResponse, TestServer};
 use backend3::{
     app::App,
+    controllers::admin::JSON_BODY_LIMIT,
     domain::{api_path::ADMIN_API_PREFIX, session_cookie::SESSION_COOKIE_NAME},
     models::users::{self, ActiveModel, Model},
 };
@@ -374,9 +375,10 @@ fn credentials_of_length(len: usize) -> String {
 async fn a_body_above_the_size_limit_gets_413() {
     with_server(|server, ctx| async move {
         account(&ctx, "aktiv@example.test", |_| {}).await;
-        // The limit the configuration gives the server; no config sets
-        // `limit_payload`, so it is Loco's default of 2,000,000 bytes.
-        let limit = match ctx
+        // The sign-in reads JSON, so the admin API's 4 MiB JSON limit
+        // applies (ADR 0023 §5), not the 128 MiB that the configuration
+        // gives every request for the uploads (ADR 0015 §6).
+        let global = match ctx
             .config
             .server
             .middlewares
@@ -388,6 +390,9 @@ async fn a_body_above_the_size_limit_gets_413() {
             DefaultBodyLimitKind::Limit(limit) => limit,
             DefaultBodyLimitKind::Disable => panic!("the body limit is on"),
         };
+        assert_eq!(global, 134_217_728);
+        let limit = JSON_BODY_LIMIT;
+        assert_eq!(limit, 4_194_304);
         let send = |len: usize| {
             server
                 .post(LOGIN)

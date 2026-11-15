@@ -23,7 +23,7 @@ use std::{
     io::{self, Read},
     net::{SocketAddr, TcpListener},
     panic::AssertUnwindSafe,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     thread,
@@ -44,9 +44,11 @@ use backend3::{
     controllers::v1::openapi::DOCUMENT_ROUTE,
     domain::{
         api_path::{ApiFamily, api_family},
+        base_url::BaseUrl,
         clock::Clock,
         task_lock_key::task_lock_key,
     },
+    settings::MediaSettings,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -732,4 +734,109 @@ pub fn assert_public_not_found(response: &TestResponse, context: &str) {
         json!({ "error": "not_found", "description": "Resource was not found" }),
         "{context}"
     );
+}
+
+/// `MEDIA_PUBLIC_BASE_URL` for the child processes that load
+/// config/production.yaml ([`run_cli`]): the production value of
+/// public-api.md §2.3, a public address that the public website already
+/// shows, not a secret.
+pub const CLI_MEDIA_PUBLIC_BASE_URL: &str =
+    "https://backend.microshift.verseghy-gimnazium.net/storage";
+
+/// A media volume of one test's own: a new directory below Cargo's
+/// per-target scratch directory (`target/tmp`, `CARGO_TARGET_TMPDIR`), which
+/// is git-ignored and never `/tmp`, so tests that write image files run in
+/// parallel without sharing a file. It holds the three directories of
+/// `settings.media` (ADR 0015 §3), as siblings: the root exists, the staging
+/// and trash directories do not until an upload creates them. Everything is
+/// removed when the value is dropped, also when the test fails.
+pub struct TempMedia {
+    /// The directory that holds the three.
+    base: PathBuf,
+    /// The media settings that point into it.
+    settings: MediaSettings,
+}
+
+impl TempMedia {
+    /// A new, empty media volume with no free-space reserve.
+    pub fn new() -> Self {
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("media-{}", Uuid::new_v4().simple()));
+        let root = base.join("public");
+        std::fs::create_dir_all(&root)
+            .unwrap_or_else(|error| panic!("create {}: {error}", root.display()));
+        let settings = MediaSettings {
+            root,
+            tmp_dir: base.join("tmp"),
+            trash_dir: base.join("trash"),
+            min_free_bytes: 0,
+            public_base_url: BaseUrl::parse("http://localhost/storage").expect("a base URL"),
+            serve_storage: false,
+        };
+        Self { base, settings }
+    }
+
+    /// The media settings of this volume.
+    pub fn settings(&self) -> &MediaSettings {
+        &self.settings
+    }
+
+    /// The media settings of this volume with `min_free_bytes` set.
+    ///
+    /// - `min_free_bytes`: the free-space reserve to use.
+    pub fn settings_with_reserve(&self, min_free_bytes: u64) -> MediaSettings {
+        MediaSettings {
+            min_free_bytes,
+            ..self.settings.clone()
+        }
+    }
+
+    /// The directory that holds the volume's three directories.
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+
+    /// Every file below `dir`, its symbolic links included and followed by
+    /// none, as paths relative to `dir`, sorted. A missing `dir` has none.
+    ///
+    /// - `dir`: the directory to list, such as the root or the staging
+    ///   directory.
+    pub fn files(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_owned()];
+        while let Some(current) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries {
+                let entry = entry.expect("a directory entry");
+                let path = entry.path();
+                if entry.file_type().expect("a file type").is_dir() {
+                    pending.push(path);
+                } else {
+                    found.push(path.strip_prefix(dir).expect("below dir").to_owned());
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+}
+
+impl Drop for TempMedia {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+/// The bytes of a file of the image corpus (`tests/fixtures/images/`,
+/// ADR 0015 "Image tests").
+///
+/// - `relative`: the path below the corpus directory, such as
+///   `jpeg/camera.jpg`.
+pub fn image_fixture(relative: &str) -> Vec<u8> {
+    let path = repository_root()
+        .join("tests/fixtures/images")
+        .join(relative);
+    std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }

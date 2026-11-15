@@ -20,6 +20,10 @@
 //!    (50 megapixels unless configured otherwise) is refused from its header,
 //!    so nothing is decoded and no memory is allocated for it.
 //!
+//! The upload model asks the third question already while the body arrives,
+//! with [`inspect_start`] on the bytes received so far, so that an upload
+//! above the budget is refused before the rest of it is read or written.
+//!
 //! Each reader follows the header rules of its format's reference decoder:
 //! libjpeg's marker reader, libpng's `IHDR` checks, the block structure of
 //! the `gif` crate, and libwebp's RIFF, VP8, VP8L and VP8X checks. The
@@ -46,7 +50,9 @@
 //! [`optimise_webp`] strips a WebP and re-encodes a lossy still one; and
 //! [`optimise_gif`] strips a GIF. The WebP and GIF optimisers return an
 //! [`Optimised`] value whose [`Treatment`] says what was done; their parsers
-//! follow libwebp and the `gif` crate (ADR 0033 §3). Every optimiser refuses
+//! follow libwebp and the `gif` crate (ADR 0033 §3). Uploads call
+//! [`optimise_image`], which picks the optimiser by the sniffed format and
+//! returns an [`Optimised`] value for all four. Every optimiser refuses
 //! with an [`ImageError`], and an animation of any of the three animated
 //! formats is held to [`MAX_ANIMATION_FRAMES`] and [`MAX_ANIMATION_PIXELS`]
 //! before any frame is decoded ([`ImageError::AnimationTooLarge`], ADR 0033
@@ -413,6 +419,102 @@ pub fn inspect(bytes: &[u8], budget: PixelBudget) -> Result<ImageHeader, ImageEr
     Ok(ImageHeader { format, dimensions })
 }
 
+/// What the first bytes of an upload say about its header while the rest is
+/// still arriving: [`inspect_start`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarlyHeader {
+    /// The header does not end within these bytes: read on and ask again.
+    Incomplete,
+    /// The header ends within these bytes and fits the budget, or it cannot
+    /// be read; either way only the whole upload can tell more, and
+    /// [`optimise_image`] refuses it then if it must.
+    Undecided,
+    /// The header declares more pixels than the budget: the
+    /// [`ImageError::OverPixelBudget`] that [`inspect`] gave these bytes.
+    /// The upload can be refused now.
+    OverBudget(ImageError),
+}
+
+/// Reads the header of an upload from the bytes that have arrived so far,
+/// so that an upload above the pixel budget is refused from its header
+/// before the rest of its body is read or anything is written (ADR 0015
+/// §7, "Image tests": "rejected from its header dimensions, before any
+/// decode, ... and nothing is written to the volume").
+///
+/// - `start`: the bytes of the upload received so far, from its first byte.
+/// - `budget`: as [`inspect`] takes it.
+///
+/// [`inspect`] wants the whole upload, because a prefix can end before a
+/// JPEG frame header, which then reads as cut short, and before a GIF frame,
+/// which is then not budgeted. Here both only give
+/// [`EarlyHeader::Incomplete`] or [`EarlyHeader::Undecided`], never a
+/// refusal. A refusal is safe to give early: each reader takes the
+/// dimensions from bytes that the prefix holds, and reads them the same way
+/// in the whole upload, while a GIF's canvas only grows with its later
+/// frames. So the whole upload declares at least as many pixels, or its
+/// header is malformed further on; either way [`optimise_image`] would
+/// refuse it too.
+#[must_use]
+pub fn inspect_start(start: &[u8], budget: PixelBudget) -> EarlyHeader {
+    match inspect(start, budget) {
+        Err(error @ ImageError::OverPixelBudget { .. }) => EarlyHeader::OverBudget(error),
+        Err(ImageError::Truncated { .. }) => EarlyHeader::Incomplete,
+        Ok(_) | Err(_) => EarlyHeader::Undecided,
+    }
+}
+
+/// Optimises an image upload of any accepted format: the one entry point of
+/// the upload code (ADR 0015 §7, as ADR 0033 amends it).
+///
+/// - `bytes`: the whole upload.
+/// - `budget`: the pixel budget from the settings
+///   (`settings.image_optimisation.pixel_budget`); an image above it is
+///   refused from its header, before anything is decoded.
+/// - `png_effort`: the oxipng presets by image size from the settings
+///   (`settings.image_optimisation.png`, ADR 0033 §5); only a PNG uses it.
+///
+/// The magic bytes pick the optimiser: [`optimise_jpeg`], [`optimise_png`],
+/// [`optimise_webp`] or [`optimise_gif`]. Each returns the bytes it would
+/// return on its own, in an [`Optimised`] value whose [`Treatment`] says
+/// what was done (a JPEG's [`JpegKept`] converts to it, and a PNG is
+/// [`Treatment::Recompressed`]), so the caller stores [`Optimised::bytes`]
+/// without knowing the format. The caller has already checked that the
+/// format agrees with the file's extension; the stored bytes keep that
+/// format, so the extension stays right.
+///
+/// It is CPU-bound and may hold several hundred MiB at the budget (each
+/// optimiser documents its own peak), so the caller runs it on a blocking
+/// thread, one at a time per process (ADR 0015 §7).
+///
+/// # Errors
+///
+/// [`ImageError::UnrecognisedFormat`] when the bytes start with none of the
+/// four signatures, and otherwise the errors of the format's optimiser.
+pub fn optimise_image(
+    bytes: &[u8],
+    budget: PixelBudget,
+    png_effort: PngEffort,
+) -> Result<Optimised, ImageError> {
+    match sniff(bytes) {
+        None => Err(ImageError::UnrecognisedFormat),
+        Some(ImageFormat::Jpeg) => optimise_jpeg(bytes, budget).map(Optimised::from),
+        Some(ImageFormat::Png) => {
+            // `optimise_png` returns only the bytes, and reads the same
+            // header itself: `IHDR`, 25 bytes after the signature, so the
+            // second read costs nothing.
+            let header = inspect(bytes, budget)?;
+            optimise_png(bytes, budget, png_effort).map(|bytes| Optimised {
+                header,
+                bytes,
+                treatment: Treatment::Recompressed,
+                re_encode_failure: None,
+            })
+        }
+        Some(ImageFormat::Gif) => optimise_gif(bytes, budget),
+        Some(ImageFormat::WebP) => optimise_webp(bytes, budget),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::header::samples;
@@ -470,6 +572,55 @@ mod tests {
                 dimensions: dimensions(10_000, 5_001),
                 budget: PixelBudget::DEFAULT,
             })
+        );
+    }
+
+    #[test]
+    fn the_start_of_an_upload_above_the_budget_is_refused_once_its_header_is_in() {
+        // A JPEG whose frame header follows 70 KiB of metadata: incomplete
+        // until the frame header has arrived, then refused from it.
+        let mut jpeg = vec![0xFF, 0xD8];
+        for _ in 0..7 {
+            jpeg.extend([0xFF, 0xE1, 0x27, 0x12]);
+            jpeg.extend([0_u8; 0x2710]);
+        }
+        let frame_at = jpeg.len();
+        jpeg.extend(samples::jpeg_frame(10_000, 5_001));
+        jpeg.extend([0xFF, 0xDA]);
+        let over = ImageError::OverPixelBudget {
+            format: ImageFormat::Jpeg,
+            dimensions: dimensions(10_000, 5_001),
+            budget: PixelBudget::DEFAULT,
+        };
+        assert_eq!(
+            inspect_start(&jpeg[..frame_at], PixelBudget::DEFAULT),
+            EarlyHeader::Incomplete
+        );
+        assert_eq!(
+            inspect_start(&jpeg, PixelBudget::DEFAULT),
+            EarlyHeader::OverBudget(over)
+        );
+        // At the budget the header passes, and the rest decides later.
+        assert_eq!(
+            inspect_start(&samples::jpeg(10_000, 5_000), PixelBudget::DEFAULT),
+            EarlyHeader::Undecided
+        );
+        // A malformed header is left to the whole upload too.
+        assert_eq!(
+            inspect_start(
+                &[b"\x89PNG\r\n\x1A\n".as_slice(), &[0; 25]].concat(),
+                PixelBudget::DEFAULT
+            ),
+            EarlyHeader::Undecided
+        );
+        // No signature, or not all of it: nothing to judge yet.
+        assert_eq!(
+            inspect_start(b"\x89PN", PixelBudget::DEFAULT),
+            EarlyHeader::Undecided
+        );
+        assert_eq!(
+            inspect_start(b"GIF89a", PixelBudget::DEFAULT),
+            EarlyHeader::Incomplete
         );
     }
 
@@ -615,7 +766,133 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optimise_image_refuses_what_is_no_image() {
+        for bytes in [
+            &b""[..],
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+            b"%PDF-1.7",
+        ] {
+            assert_eq!(
+                optimise_image(bytes, PixelBudget::DEFAULT, PngEffort::DEFAULT),
+                Err(ImageError::UnrecognisedFormat)
+            );
+        }
+    }
+
+    #[test]
+    fn optimise_image_refuses_from_the_header_before_decoding() {
+        // Headers of 50 MP and more, with no image data after them: each is
+        // refused by the budget, in each format, as its own optimiser does.
+        for (format, bytes) in [
+            (ImageFormat::Jpeg, samples::jpeg(10_000, 5_001)),
+            (ImageFormat::Png, samples::png(10_000, 5_001)),
+            (ImageFormat::Gif, samples::gif(10_000, 5_001)),
+            (ImageFormat::WebP, samples::webp_extended(10_000, 5_001)),
+        ] {
+            assert_eq!(
+                optimise_image(&bytes, PixelBudget::DEFAULT, PngEffort::DEFAULT),
+                Err(ImageError::OverPixelBudget {
+                    format,
+                    dimensions: dimensions(10_000, 5_001),
+                    budget: PixelBudget::DEFAULT,
+                }),
+                "{format}"
+            );
+        }
+    }
+
     proptest! {
+        #[test]
+        fn optimise_image_refuses_every_header_that_inspect_refuses(
+            (_format, _w, _h, mut bytes) in any_header(),
+            damage in vec((any::<Index>(), any::<u8>()), 0..4),
+            cut in any::<Index>(),
+            max in 1..=u64::from(u32::MAX),
+        ) {
+            for (at, byte) in damage {
+                let at = at.index(bytes.len());
+                bytes[at] = byte;
+            }
+            bytes.truncate(cut.index(bytes.len() + 1));
+            let budget = PixelBudget::new(max).unwrap();
+            if let Err(error) = inspect(&bytes, budget) {
+                prop_assert_eq!(optimise_image(&bytes, budget, PngEffort::DEFAULT), Err(error));
+            }
+        }
+
+        #[test]
+        fn an_early_refusal_is_the_refusal_of_the_whole_upload(
+            (_format, _w, _h, header) in any_header(),
+            frames in vec((any::<u16>(), any::<u16>(), any::<u16>(), any::<u16>()), 0..3),
+            rest in vec(any::<u8>(), 0..64),
+            cut in any::<Index>(),
+            max in 1..=u64::from(u32::MAX),
+        ) {
+            // A well-formed header, GIF frames after a GIF's, then arbitrary
+            // bytes; the upload has arrived up to `cut`.
+            let mut upload = header;
+            if sniff(&upload) == Some(ImageFormat::Gif) {
+                for (left, top, width, height) in frames {
+                    upload.extend(samples::gif_frame(left, top, width, height));
+                }
+            }
+            upload.extend(rest);
+            let start = &upload[..cut.index(upload.len() + 1)];
+            let budget = PixelBudget::new(max).unwrap();
+            match inspect_start(start, budget) {
+                EarlyHeader::OverBudget(error) => {
+                    let over = matches!(error, ImageError::OverPixelBudget { .. });
+                    prop_assert!(over, "{:?}", error);
+                    prop_assert_eq!(inspect(start, budget), Err(error));
+                    // The whole upload is refused as well: for its pixels,
+                    // with at least as many, or for a header defect further on.
+                    match inspect(&upload, budget) {
+                        Err(ImageError::OverPixelBudget { dimensions, .. }) => {
+                            let ImageError::OverPixelBudget { dimensions: early, .. } = error else {
+                                unreachable!("matched above");
+                            };
+                            prop_assert!(dimensions.pixels() >= early.pixels());
+                        }
+                        Err(ImageError::Corrupt { .. }) => {}
+                        other => prop_assert!(false, "the whole upload passed: {:?}", other),
+                    }
+                }
+                EarlyHeader::Incomplete => {
+                    let truncated = matches!(inspect(start, budget), Err(ImageError::Truncated { .. }));
+                    prop_assert!(truncated, "{:?}", inspect(start, budget));
+                }
+                EarlyHeader::Undecided => {
+                    let decided = !matches!(
+                        inspect(start, budget),
+                        Err(ImageError::Truncated { .. } | ImageError::OverPixelBudget { .. })
+                    );
+                    prop_assert!(decided, "{:?}", inspect(start, budget));
+                }
+            }
+        }
+
+        #[test]
+        fn the_whole_header_decides_as_inspect_does((format, w, h, bytes) in any_header()) {
+            // Once every byte of the header is in, an upload above the
+            // budget is refused, and one at the budget is left to the rest.
+            let pixels = u64::from(w) * u64::from(h);
+            prop_assert_eq!(
+                inspect_start(&bytes, PixelBudget::new(pixels).unwrap()),
+                EarlyHeader::Undecided
+            );
+            if let Ok(budget) = PixelBudget::new(pixels - 1) {
+                prop_assert_eq!(
+                    inspect_start(&bytes, budget),
+                    EarlyHeader::OverBudget(ImageError::OverPixelBudget {
+                        format,
+                        dimensions: dimensions(w, h),
+                        budget,
+                    })
+                );
+            }
+        }
+
         #[test]
         fn a_well_formed_header_reads_back_its_dimensions((format, w, h, bytes) in any_header()) {
             prop_assert_eq!(

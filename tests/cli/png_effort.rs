@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use crate::support::{ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli};
+use crate::support::{
+    CLI_MEDIA_PUBLIC_BASE_URL, ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli,
+};
 
 #[test]
 fn a_png_threshold_of_zero_is_refused_before_connecting() {
@@ -18,15 +20,17 @@ fn a_png_threshold_of_zero_is_refused_before_connecting() {
             "postgres://loco:loco@127.0.0.1:{}/backend3_test",
             probe.port()
         );
-        // config/production.yaml also requires both keys, so that only the
-        // PNG threshold decides the outcome. Production refuses a committed
-        // key, so both are made when the test runs (ADR 0034 §3).
+        // config/production.yaml also requires both keys and the media base
+        // URL, so that only the PNG threshold decides the outcome. Production
+        // refuses a committed key, so both are made when the test runs
+        // (ADR 0034 §3).
         let jwt_secret = cli_jwt_secret();
         let totp_key = cli_totp_key();
         let mut env = vec![
             ("LOCO_ENV", "production"),
             ("DATABASE_URL", url.as_str()),
             ("HOST", "http://localhost"),
+            ("MEDIA_PUBLIC_BASE_URL", CLI_MEDIA_PUBLIC_BASE_URL),
             ("JWT_SECRET", jwt_secret.as_str()),
             ("TOTP_ENCRYPTION_KEY", totp_key.as_str()),
             // The probe never answers the PostgreSQL handshake.

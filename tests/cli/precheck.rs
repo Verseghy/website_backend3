@@ -9,19 +9,26 @@ use std::time::Duration;
 
 use loco_rs::environment::Environment;
 
-use crate::support::{ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli};
+use crate::support::{
+    CLI_MEDIA_PUBLIC_BASE_URL, ConnectionProbe, cli_jwt_secret, cli_totp_key, run_cli,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The environment of a production pod, with the database pointed at
-/// `probe`. `HOST`, `JWT_SECRET` and `TOTP_ENCRYPTION_KEY` are required by
-/// config/production.yaml; both keys are made when the test runs, because
-/// production refuses a committed one (ADR 0034 §3).
+/// `probe`. `HOST`, `MEDIA_PUBLIC_BASE_URL`, `JWT_SECRET` and
+/// `TOTP_ENCRYPTION_KEY` are required by config/production.yaml; both keys
+/// are made when the test runs, because production refuses a committed one
+/// (ADR 0034 §3).
 fn production_env(database_url: &str) -> Vec<(&'static str, String)> {
     vec![
         ("LOCO_ENV", "production".to_owned()),
         ("DATABASE_URL", database_url.to_owned()),
         ("HOST", "http://localhost".to_owned()),
+        (
+            "MEDIA_PUBLIC_BASE_URL",
+            CLI_MEDIA_PUBLIC_BASE_URL.to_owned(),
+        ),
         ("JWT_SECRET", cli_jwt_secret()),
         ("TOTP_ENCRYPTION_KEY", cli_totp_key()),
         // Keep the positive control fast: the probe never answers the

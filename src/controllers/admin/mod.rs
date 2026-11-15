@@ -8,9 +8,14 @@
 //! may keep them. Unknown `/api/admin` paths get the same header from the
 //! router fallback ([`crate::controllers::not_found`]).
 //!
-//! A new admin handler goes into [`routes`], above the layer: loco-rs 1.2.0's
-//! `Routes::layer` wraps only the handlers that the group already holds. The
-//! route table of ADR 0007 §4 later replaces this list.
+//! A new admin handler goes into [`routes`], above the last layer: loco-rs
+//! 1.2.0's `Routes::layer` wraps only the handlers that the group already
+//! holds. A handler that reads a JSON body goes above the JSON body-limit
+//! layer too, so its body may be at most [`JSON_BODY_LIMIT`] (4 MiB, ADR 0023
+//! §5); an upload handler goes between the two layers, so it keeps the
+//! 128 MiB of `server.middlewares.limit_payload` (ADR 0015 §6) and reads its
+//! file through [`media`]. The route table of ADR 0007 §4 later replaces
+//! this list.
 //!
 //! A handler that needs a signed-in account takes [`session::AdminSession`],
 //! which answers `401 unauthorized` itself when the session does not hold
@@ -25,7 +30,7 @@
 
 use axum::{
     Json,
-    extract::rejection::JsonRejection,
+    extract::{DefaultBodyLimit, rejection::JsonRejection},
     http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
 };
 use loco_rs::prelude::*;
@@ -37,7 +42,16 @@ use crate::{
 };
 
 pub mod auth;
+pub mod media;
 pub mod session;
+
+/// The largest JSON request body an admin endpoint reads: 4 MiB (4,194,304
+/// bytes), the per-route limit of ADR 0023 §5. The largest stored body is
+/// 892,455 bytes (research: SYNTHESIS §4.3.1), so a whole page or post fits
+/// with room to spare, while a JSON body never gets the 128 MiB that
+/// `server.middlewares.limit_payload` allows the uploads. A larger body is
+/// answered `413 body_too_large` ([`json_rejection_response`]).
+pub const JSON_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Every route of the admin API, each answering with `Cache-Control:
 /// no-store`.
@@ -49,6 +63,12 @@ pub fn routes() -> Routes {
         .add("/auth/me", get(auth::me))
         // POST only (ADR 0006 §2): axum answers every other method with 405.
         .add("/auth/logout", post(auth::logout))
+        // Every JSON handler is above this line. axum's `Json` extractor
+        // reads the limit from the request, and this route-level layer sets
+        // it after Loco's global `limit_payload` layer did, so it wins.
+        .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
+        // Upload handlers go here, below the JSON limit and above the next
+        // layer.
         // Last, so that it wraps every handler above. `overriding`: no
         // handler may make an admin response cacheable.
         .layer(SetResponseHeaderLayer::overriding(

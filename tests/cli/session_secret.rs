@@ -27,7 +27,8 @@ use loco_rs::environment::Environment;
 use sea_orm::prelude::Uuid;
 
 use crate::support::{
-    CliRun, ConnectionProbe, cli_jwt_secret, cli_totp_key, load_committed_config, run_cli,
+    CLI_MEDIA_PUBLIC_BASE_URL, CliRun, ConnectionProbe, cli_jwt_secret, cli_totp_key,
+    load_committed_config, run_cli,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -52,6 +53,7 @@ fn db_status_with(jwt_secret: Option<&str>, config_folder: Option<&Path>) -> (Cl
         ("LOCO_ENV", "production"),
         ("DATABASE_URL", url.as_str()),
         ("HOST", "http://localhost"),
+        ("MEDIA_PUBLIC_BASE_URL", CLI_MEDIA_PUBLIC_BASE_URL),
         ("TOTP_ENCRYPTION_KEY", totp_key.as_str()),
         // The probe never answers the PostgreSQL handshake; give up fast.
         ("DB_CONNECT_TIMEOUT", "300"),

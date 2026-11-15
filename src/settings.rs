@@ -37,7 +37,8 @@
 //! The PNG encoder effort (`settings.image_optimisation.png`, ADR 0033 §5)
 //! is checked here in full, through [`PngEffort::new`], so a value that would
 //! break the rule stops the boot with a message that names the key and says
-//! what to change, before any upload is optimised with it.
+//! what to change, before any upload is optimised with it. So is the pixel
+//! budget beside it.
 //!
 //! The legacy import's source (`settings.import.source_database_url`,
 //! data-migration.md §4.1) is the opposite case: only the `import_mysql`
@@ -45,6 +46,13 @@
 //! behind a type whose `Debug` never shows it, because it holds the source
 //! password. The task decides whether it is set and usable, so a bad value
 //! there never stops the server.
+//!
+//! The media settings (`settings.media`, ADR 0015 §3) are checked from their
+//! text only: the public base URL must be absolute and canonical without a
+//! trailing slash (public-api.md §2.3), and the three directories may not
+//! lie inside one another. Whether the directories exist is checked by every
+//! upload, not here, so production starts before its volume is mounted and
+//! tasks, which never upload, do not need it.
 
 use std::{net::IpAddr, path::PathBuf};
 
@@ -55,9 +63,11 @@ use loco_rs::{
 use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::domain::{
+    base_url::BaseUrl,
     configured_key::KeyError,
-    image_optimise::PngEffort,
+    image_optimise::{PixelBudget, PngEffort},
     import_mysql::source::{SOURCE_DATABASE_URL_ENV, SOURCE_DATABASE_URL_KEY, SourceDatabaseUrl},
+    media_rules::{MediaDirsError, check_media_dirs},
     session_jwt::{
         ExpirationError, JwtSecret, LocationsError, TokenLocation, check_expiration,
         check_locations,
@@ -82,6 +92,74 @@ pub struct Settings {
     pub image_optimisation: ImageOptimisationSettings,
     /// The legacy import (data-migration.md §3.3, §4.1).
     pub import: ImportSettings,
+    /// Where uploaded media live and how their public URLs start
+    /// (ADR 0015 §3, public-api.md §2.3).
+    pub media: MediaSettings,
+}
+
+/// The media volume and the base of the public media URLs (ADR 0015 §3).
+///
+/// The upload model (`src/models/media.rs`) takes this struct as an
+/// argument; nothing below it reads the configuration (ADR 0008 rule 2).
+/// Relative paths are resolved against the working directory of the
+/// process, as the admin UI's `dist_dir` is.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaSettings {
+    /// The served tree, `/data/app/public` in production: every file the
+    /// media server serves as `/storage/<path>`. Every write lands here
+    /// through an atomic rename. Uploads refuse to start while it does not
+    /// exist (the volume is not mounted).
+    pub root: PathBuf,
+    /// Upload staging, `/data/backend3/tmp` in production: on the same file
+    /// system as `root`, so the rename into place is atomic, and outside the
+    /// served tree, so nginx never sees a partial file. Created on the first
+    /// upload when it is missing.
+    pub tmp_dir: PathBuf,
+    /// Deleted files, `/data/backend3/trash` in production, outside the
+    /// served tree. The media library's trash uses it.
+    pub trash_dir: PathBuf,
+    /// The free space, in bytes, below which an upload is refused: 2 GiB
+    /// (2,147,483,648) in every committed configuration (ADR 0015 §3).
+    pub min_free_bytes: u64,
+    /// The base of the absolute media URLs of the public API:
+    /// `{public_base_url}/{disk}/{stored path}` (public-api.md §2.3).
+    /// Production reads it from `MEDIA_PUBLIC_BASE_URL`, which has no
+    /// default. Only `/api/v1` uses it; the admin API's media URLs are
+    /// root-relative (ADR 0015 §3).
+    #[serde(deserialize_with = "public_base_url")]
+    pub public_base_url: BaseUrl,
+    /// Whether backend3 serves `/storage` itself: the fallback of ADR 0015
+    /// §4, for when the media server cannot share the volume. `false` in
+    /// every committed configuration, since the separate media server is
+    /// the variant in use (research: DECISIONS R9, D43); production reads
+    /// `MEDIA_SERVE_STORAGE`, so the fallback can be switched on without a
+    /// new image. The fallback router reads it.
+    pub serve_storage: bool,
+}
+
+/// The full key of [`MediaSettings::public_base_url`], for error messages.
+pub const MEDIA_PUBLIC_BASE_URL_KEY: &str = "settings.media.public_base_url";
+
+/// The environment variable that `config/production.yaml` reads
+/// [`MediaSettings::public_base_url`] from, named in error messages.
+pub const MEDIA_PUBLIC_BASE_URL_ENV: &str = "MEDIA_PUBLIC_BASE_URL";
+
+/// The key prefix of the media settings, for error messages.
+pub const MEDIA_KEY: &str = "settings.media";
+
+/// Reads [`MediaSettings::public_base_url`] and checks it with
+/// [`BaseUrl::parse`]. The error goes back through serde, so
+/// [`Settings::from_section`] reports it at the key's full path.
+///
+/// - `deserializer`: the deserializer at that key.
+fn public_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BaseUrl, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    BaseUrl::parse(&text).map_err(|error| {
+        D::Error::custom(format!(
+            "the public media base URL ({MEDIA_PUBLIC_BASE_URL_ENV} in production) {error}"
+        ))
+    })
 }
 
 /// Settings of admin sign-in (ADR 0006).
@@ -244,6 +322,12 @@ pub const METRICS_PORT_KEY: &str = "settings.metrics.port";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageOptimisationSettings {
+    /// The largest pixel count that is decoded for one image (ADR 0015 §7:
+    /// "configurable, default 50 megapixels"); an image above it is refused
+    /// from its header. 50,000,000 in every committed configuration; 0 is
+    /// refused, because it would refuse every image.
+    #[serde(deserialize_with = "pixel_budget")]
+    pub pixel_budget: PixelBudget,
     /// The oxipng presets by image size (ADR 0033 §5): `threshold_pixels`,
     /// up to which preset 2 is used, and `large_preset`, the cheaper preset
     /// above it, checked by [`PngEffort::new`]. The production value comes
@@ -254,6 +338,18 @@ pub struct ImageOptimisationSettings {
 
 /// The full key of [`ImageOptimisationSettings::png`], for error messages.
 pub const IMAGE_OPTIMISATION_PNG_KEY: &str = "settings.image_optimisation.png";
+
+/// The full key of [`ImageOptimisationSettings::pixel_budget`], for error
+/// messages.
+pub const IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY: &str = "settings.image_optimisation.pixel_budget";
+
+/// Reads `settings.image_optimisation.pixel_budget` and checks it with
+/// [`PixelBudget::new`], whose message says what to set.
+///
+/// - `deserializer`: the deserializer at that key.
+fn pixel_budget<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PixelBudget, D::Error> {
+    PixelBudget::new(u64::deserialize(deserializer)?).map_err(D::Error::custom)
+}
 
 /// The keys of `settings.image_optimisation.png`, as written in the YAML.
 #[derive(Deserialize)]
@@ -327,8 +423,10 @@ pub enum SettingsError {
     #[error(
         "the configuration has no `settings:` section; backend3 needs at least \
          {ADMIN_UI_DIST_DIR_KEY}, {METRICS_BINDING_KEY}, {METRICS_PORT_KEY}, \
-         {TOTP_ENCRYPTION_KEY_KEY}, {IMAGE_OPTIMISATION_PNG_KEY} and \
-         {IMPORT_SOURCE_DATABASE_URL_KEY} (see config/test.yaml for an example)"
+         {TOTP_ENCRYPTION_KEY_KEY}, {IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY}, \
+         {IMAGE_OPTIMISATION_PNG_KEY}, {IMPORT_SOURCE_DATABASE_URL_KEY} and {MEDIA_KEY} \
+         (root, tmp_dir, trash_dir, min_free_bytes, public_base_url, serve_storage); see \
+         config/test.yaml for an example"
     )]
     Missing,
     /// A key is missing, unknown or has the wrong type.
@@ -422,8 +520,10 @@ impl Settings {
     /// is missing, has an unknown or missing key, a value of the wrong type
     /// (a metrics binding that is not an IP address and a metrics port above
     /// 65535 included), an empty `dist_dir`, metrics port 0, a TOTP
-    /// encryption key that is not base64 of at least 64 bytes, or a PNG
-    /// effort that [`PngEffort::new`] refuses.
+    /// encryption key that is not base64 of at least 64 bytes, a PNG
+    /// effort that [`PngEffort::new`] refuses, a pixel budget of 0, a public
+    /// media base URL that [`BaseUrl::parse`] refuses, or media directories
+    /// that [`check_media_dirs`] refuses.
     pub fn from_section(section: Option<&serde_json::Value>) -> Result<Self, SettingsError> {
         let section = section.ok_or(SettingsError::Missing)?;
         let settings: Self =
@@ -440,6 +540,9 @@ impl Settings {
         if settings.metrics.port == 0 {
             return Err(SettingsError::MetricsPortZero);
         }
+        let media = &settings.media;
+        check_media_dirs(&media.root, &media.tmp_dir, &media.trash_dir)
+            .map_err(media_dirs_error)?;
         Ok(settings)
     }
 
@@ -515,6 +618,24 @@ impl Settings {
     }
 }
 
+/// The settings error of a refusal of [`check_media_dirs`]: at the key of
+/// the one directory that is empty or has a `..` segment, or at
+/// `settings.media` for two that nest, since both keys are at fault then.
+///
+/// - `error`: the refusal.
+fn media_dirs_error(error: MediaDirsError) -> SettingsError {
+    let path = match error {
+        MediaDirsError::Empty(dir) | MediaDirsError::ParentSegment(dir) => {
+            format!("{MEDIA_KEY}.{dir}")
+        }
+        MediaDirsError::Nested { .. } => MEDIA_KEY.to_owned(),
+    };
+    SettingsError::Invalid {
+        path,
+        message: error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,7 +662,39 @@ mod tests {
 
     /// The `image_optimisation` value of the committed configuration files.
     fn image_optimisation() -> Value {
-        json!({ "png": png() })
+        json!({ "pixel_budget": 50_000_000, "png": png() })
+    }
+
+    /// A valid `media` value: three sibling directories, 2 GiB of reserve
+    /// and a local base URL.
+    fn media() -> Value {
+        json!({
+            "root": "target/media/test/public",
+            "tmp_dir": "target/media/test/tmp",
+            "trash_dir": "target/media/test/trash",
+            "min_free_bytes": 2_147_483_648_u64,
+            "public_base_url": "http://localhost/storage",
+            "serve_storage": false,
+        })
+    }
+
+    /// A complete section whose `media` value is `media`.
+    fn with_media(media: &Value) -> Value {
+        json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": metrics(),
+            "admin_auth": admin_auth(),
+            "image_optimisation": image_optimisation(),
+            "media": media,
+            "import": import(),
+        })
+    }
+
+    /// [`media`] with the key `key` set to `value`.
+    fn media_with(key: &str, value: &Value) -> Value {
+        let mut media = media();
+        media[key] = value.clone();
+        media
     }
 
     /// The PNG effort of the committed configuration files.
@@ -562,6 +715,7 @@ mod tests {
             "admin_auth": admin_auth(),
             "image_optimisation": image_optimisation(),
             "import": { "source_database_url": source },
+            "media": media(),
         })
     }
 
@@ -579,8 +733,9 @@ mod tests {
             "admin_ui": { "dist_dir": dist_dir },
             "metrics": metrics,
             "admin_auth": admin_auth(),
-            "image_optimisation": { "png": png },
+            "image_optimisation": { "pixel_budget": 50_000_000, "png": png },
             "import": import(),
+            "media": media(),
         })
     }
 
@@ -592,6 +747,7 @@ mod tests {
             "admin_auth": admin_auth(),
             "image_optimisation": image_optimisation(),
             "import": import(),
+            "media": media(),
         })
     }
 
@@ -603,6 +759,7 @@ mod tests {
             "admin_auth": { "totp_encryption_key": key },
             "image_optimisation": image_optimisation(),
             "import": import(),
+            "media": media(),
         })
     }
 
@@ -677,10 +834,19 @@ mod tests {
                         .expect("valid"),
                 },
                 image_optimisation: ImageOptimisationSettings {
+                    pixel_budget: PixelBudget::DEFAULT,
                     png: PngEffort::DEFAULT,
                 },
                 import: ImportSettings {
                     source_database_url: SourceDatabaseUrl::new(String::new()),
+                },
+                media: MediaSettings {
+                    root: PathBuf::from("target/media/test/public"),
+                    tmp_dir: PathBuf::from("target/media/test/tmp"),
+                    trash_dir: PathBuf::from("target/media/test/trash"),
+                    min_free_bytes: 2_147_483_648,
+                    public_base_url: BaseUrl::parse("http://localhost/storage").expect("valid"),
+                    serve_storage: false,
                 },
             }
         );
@@ -734,6 +900,7 @@ mod tests {
                 "admin_auth": admin_auth(),
                 "image_optimisation": image_optimisation(),
                 "import": {},
+                "media": media(),
             }))
             .0,
             "settings.import"
@@ -745,6 +912,7 @@ mod tests {
                 "admin_auth": admin_auth(),
                 "image_optimisation": image_optimisation(),
                 "import": { "source_database_url": "", "source_url": "" },
+                "media": media(),
             }))
             .0,
             "settings.import.source_url"
@@ -772,10 +940,160 @@ mod tests {
             METRICS_PORT_KEY,
             TOTP_ENCRYPTION_KEY_KEY,
             IMAGE_OPTIMISATION_PNG_KEY,
+            IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY,
             IMPORT_SOURCE_DATABASE_URL_KEY,
+            MEDIA_KEY,
+            "public_base_url",
         ] {
             assert!(message.contains(key), "{message}");
         }
+    }
+
+    #[test]
+    fn media_errors_name_the_full_key_path() {
+        let without_media = json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": metrics(),
+            "admin_auth": admin_auth(),
+            "image_optimisation": image_optimisation(),
+            "import": import(),
+        });
+        let mut unknown = media();
+        unknown["serve"] = json!(true);
+        let mut missing_url = media();
+        missing_url
+            .as_object_mut()
+            .expect("an object")
+            .remove("public_base_url");
+        let cases = [
+            (without_media, "settings"),
+            (with_media(&unknown), "settings.media.serve"),
+            (with_media(&missing_url), "settings.media"),
+            (
+                with_media(&media_with("min_free_bytes", &json!(-1))),
+                "settings.media.min_free_bytes",
+            ),
+            (
+                with_media(&media_with("min_free_bytes", &json!("2GiB"))),
+                "settings.media.min_free_bytes",
+            ),
+            (
+                with_media(&media_with("serve_storage", &json!("yes"))),
+                "settings.media.serve_storage",
+            ),
+            (
+                with_media(&media_with("root", &json!(5))),
+                "settings.media.root",
+            ),
+            (
+                with_media(&media_with("public_base_url", &json!(5))),
+                MEDIA_PUBLIC_BASE_URL_KEY,
+            ),
+        ];
+        for (section, expected_path) in cases {
+            let (path, message) = invalid(&section);
+            assert_eq!(path, expected_path, "{section}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_bad_public_base_url_names_the_key_the_variable_and_the_fix() {
+        for (url, fix) in [
+            ("", "is empty"),
+            ("/storage", "is not an absolute URL"),
+            ("ftp://example.org/storage", "only http and https"),
+            ("https://example.org/storage/", "remove the trailing `/`"),
+            (
+                "https://example.org/storage?v=1",
+                "has a query or a fragment",
+            ),
+            (
+                "https://Example.org/storage",
+                "write it as https://example.org/storage",
+            ),
+        ] {
+            let section = with_media(&media_with("public_base_url", &json!(url)));
+            let (path, message) = invalid(&section);
+            assert_eq!(path, MEDIA_PUBLIC_BASE_URL_KEY, "{url}");
+            assert!(
+                message.contains(MEDIA_PUBLIC_BASE_URL_ENV),
+                "{url}: {message}"
+            );
+            assert!(message.contains(fix), "{url}: {message}");
+        }
+    }
+
+    #[test]
+    fn nested_or_empty_media_directories_are_refused_at_their_key() {
+        for (key, value, expected_path, expected_message) in [
+            ("root", "", "settings.media.root", "root is empty"),
+            ("tmp_dir", "", "settings.media.tmp_dir", "tmp_dir is empty"),
+            (
+                "trash_dir",
+                "../trash",
+                "settings.media.trash_dir",
+                "trash_dir has a `..` segment",
+            ),
+            (
+                "tmp_dir",
+                "target/media/test/public/tmp",
+                "settings.media",
+                "tmp_dir lies inside root",
+            ),
+            (
+                "trash_dir",
+                "target/media/test/public/.trash",
+                "settings.media",
+                "trash_dir lies inside root",
+            ),
+            (
+                "trash_dir",
+                "target/media/test/tmp",
+                "settings.media",
+                "trash_dir lies inside tmp_dir",
+            ),
+        ] {
+            let section = with_media(&media_with(key, &json!(value)));
+            let (path, message) = invalid(&section);
+            assert_eq!(path, expected_path, "{key}={value}: {message}");
+            assert!(
+                message.starts_with(expected_message),
+                "{key}={value}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pixel_budget_is_checked_at_its_key() {
+        let budget = |value: Value| {
+            json!({
+                "admin_ui": { "dist_dir": "x" },
+                "metrics": metrics(),
+                "admin_auth": admin_auth(),
+                "image_optimisation": { "pixel_budget": value, "png": png() },
+                "media": media(),
+                "import": import(),
+            })
+        };
+        let (path, message) = invalid(&budget(json!(0)));
+        assert_eq!(path, IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY);
+        assert!(message.contains("at least 1 pixel"), "{message}");
+        let (path, _) = invalid(&budget(json!("50MP")));
+        assert_eq!(path, IMAGE_OPTIMISATION_PIXEL_BUDGET_KEY);
+        let (path, _) = invalid(&json!({
+            "admin_ui": { "dist_dir": "x" },
+            "metrics": metrics(),
+            "admin_auth": admin_auth(),
+            "image_optimisation": { "png": png() },
+            "media": media(),
+            "import": import(),
+        }));
+        assert_eq!(path, "settings.image_optimisation");
+        let settings = Settings::from_section(Some(&budget(json!(12_000_000)))).expect("valid");
+        assert_eq!(
+            settings.image_optimisation.pixel_budget,
+            PixelBudget::new(12_000_000).expect("valid")
+        );
     }
 
     #[test]
@@ -798,6 +1116,7 @@ mod tests {
                     "admin_auth": admin_auth(),
                     "image_optimisation": image_optimisation(),
                     "import": import(),
+                    "media": media(),
                     "admin_uii": {},
                 }),
                 "settings.admin_uii",
@@ -809,6 +1128,7 @@ mod tests {
                     "admin_auth": admin_auth(),
                     "image_optimisation": image_optimisation(),
                     "import": import(),
+                    "media": media(),
                 }),
                 "settings",
             ),
@@ -837,6 +1157,7 @@ mod tests {
                     "metrics": metrics(),
                     "image_optimisation": image_optimisation(),
                     "import": import(),
+                    "media": media(),
                 }),
                 "settings",
             ),
@@ -847,6 +1168,7 @@ mod tests {
                     "admin_auth": {},
                     "image_optimisation": image_optimisation(),
                     "import": import(),
+                    "media": media(),
                 }),
                 "settings.admin_auth",
             ),
@@ -857,6 +1179,7 @@ mod tests {
                     "admin_auth": { "totp_encryption_key": PUBLISHED_LOCAL_KEY, "extra": 1 },
                     "image_optimisation": image_optimisation(),
                     "import": import(),
+                    "media": media(),
                 }),
                 "settings.admin_auth.extra",
             ),
@@ -878,6 +1201,7 @@ mod tests {
                     "metrics": metrics(),
                     "admin_auth": admin_auth(),
                     "import": import(),
+                    "media": media(),
                 }),
                 "settings",
             ),
@@ -1241,6 +1565,7 @@ mod tests {
             "admin_auth": admin_auth(),
             "image_optimisation": image_optimisation(),
             "import": import(),
+            "media": media(),
             "admin_uii": {},
         });
         let message = Settings::from_section(Some(&section))
@@ -1381,6 +1706,35 @@ mod tests {
                     .refuse_published_keys(&Environment::Production, &secret)
                     .is_ok()
             );
+        }
+
+        #[test]
+        fn any_reserve_and_switch_round_trip(min_free in any::<u64>(), serve in any::<bool>()) {
+            let media = media_with("min_free_bytes", &json!(min_free));
+            let media = {
+                let mut media = media;
+                media["serve_storage"] = json!(serve);
+                media
+            };
+            let settings = Settings::from_section(Some(&with_media(&media))).expect("valid");
+            prop_assert_eq!(settings.media.min_free_bytes, min_free);
+            prop_assert_eq!(settings.media.serve_storage, serve);
+        }
+
+        #[test]
+        fn the_base_url_is_taken_exactly_when_base_url_parse_takes_it(url in "\\PC{0,40}") {
+            let section = with_media(&media_with("public_base_url", &json!(url)));
+            match BaseUrl::parse(&url) {
+                Ok(base) => prop_assert_eq!(
+                    Settings::from_section(Some(&section)).expect("valid").media.public_base_url,
+                    base
+                ),
+                Err(error) => {
+                    let (path, message) = invalid(&section);
+                    prop_assert_eq!(path, MEDIA_PUBLIC_BASE_URL_KEY);
+                    prop_assert!(message.contains(&error.to_string()), "{}", message);
+                }
+            }
         }
 
         #[test]

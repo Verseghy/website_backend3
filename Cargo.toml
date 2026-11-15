@@ -302,6 +302,27 @@ webpx = { version = "0.4.1", default-features = false, features = [
 # copy is stored (ADR 0015 §7). Pure Rust (image-rs); the default
 # `color_quant` feature serves only its encoder and is left out.
 gif = { version = "0.14.2", default-features = false, features = ["std"] }
+# The file-system calls of the upload model (src/models/media.rs, ADR 0015
+# §6) that std does not offer: `openat` with `O_NOFOLLOW`, so no symbolic
+# link under media.root is ever followed; `renameat2` with
+# `RENAME_NOREPLACE`, so the atomic rename into place never overwrites a
+# file; and `statvfs`, for the free-space refusal below media.min_free_bytes.
+# Safe wrappers over the system calls (the workspace forbids `unsafe`), pure
+# Rust on Linux. Already in the graph through tempfile and opendal with the
+# same `fs` feature, so it adds no crate. Licence: Apache-2.0 WITH
+# LLVM-exception OR Apache-2.0 OR MIT.
+rustix = { version = "1.1", features = ["fs"] }
+# The operating system's random source, for the 32-hex names of entity images
+# and of the upload staging files (ADR 0015 §6; the pure name rule takes the
+# bytes as an argument, ADR 0008). The 0.4 line that sqlx's rand 0.10 already
+# builds, so it adds no crate. No default features (it has none).
+getrandom = "0.4"
+# The `Stream` trait over which the upload model reads a request body chunk by
+# chunk (an axum multipart field in production, a plain stream in the model
+# tests), and `catch_unwind` on futures, so a test that panics still closes
+# its pools and drops its database (tests/support, tests/models/task_lock.rs).
+# Loco already builds it.
+futures-util = "0.3"
 
 # Test-only crates (backend3's [dev-dependencies]).
 proptest = "1"
@@ -311,9 +332,6 @@ png = "0.18"
 # The response type of Loco's test server, named in test helpers. Same major
 # as loco-rs 1.2.0 uses, so one copy is built.
 axum-test = "17"
-# `catch_unwind` on futures, so a test that panics still closes its pools and
-# drops its database (tests/support, tests/models/task_lock.rs).
-futures-util = "0.3"
 # The committed snapshots of the /api/v1 OpenAPI document (ADR 0005 §4): "a
 # snapshot change is an API change", of the schema that the migrations
 # create (tests/schema, ADR 0009) and of backend3's Budapest midnights
@@ -384,9 +402,13 @@ pedantic = { level = "warn", priority = -1 }
 loco-rs = { workspace = true }
 migration = { workspace = true }
 # `net` for the two listeners of `App::serve`, `sync` for the watch channel
-# that stops the /metrics listener together with the HTTP server, `time` for
+# that stops the /metrics listener together with the HTTP server and for the
+# one-at-a-time semaphore of image optimisation (ADR 0015 §7), `time` for
 # the timeout of the scrape's job-queue query (controllers::metrics::runtime),
-# `fs` for the files the rich_text_manifest task writes (tasks::rich_text_manifest).
+# `fs` for the files the rich_text_manifest task writes
+# (tasks::rich_text_manifest) and for the upload model's staging file, which
+# takes a request body chunk by chunk (src/models/media.rs). `spawn_blocking`,
+# where the optimisation runs, comes with the runtime itself.
 tokio = { workspace = true, features = ["fs", "net", "sync", "time"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -429,6 +451,9 @@ miniz_oxide = { workspace = true }
 crc32fast = { workspace = true }
 webpx = { workspace = true }
 gif = { workspace = true }
+rustix = { workspace = true }
+getrandom = { workspace = true }
+futures-util = { workspace = true }
 # The importer's MySQL driver, only with the `import-mysql` feature below.
 sqlx = { workspace = true, optional = true, features = ["mysql"] }
 
@@ -457,9 +482,13 @@ loco-rs = { workspace = true, features = ["testing"] }
 # (tests/requests/metrics.rs). `time` also for the media contract suite's
 # request timeouts and readiness polling (tests/media_contract/).
 tokio = { workspace = true, features = ["net", "sync", "io-util", "time"] }
+# `process` for `umask`: the upload model test that the stored file and the
+# new folders keep their modes in a process started with a strict umask
+# (tests/models/media.rs). A feature of the crate the application already
+# links, so it adds no crate.
+rustix = { workspace = true, features = ["process"] }
 proptest = { workspace = true }
 axum-test = { workspace = true }
-futures-util = { workspace = true }
 insta = { workspace = true }
 hyper-util = { workspace = true }
 jsonschema = { workspace = true }

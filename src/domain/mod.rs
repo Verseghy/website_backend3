@@ -23,6 +23,7 @@
 pub mod activity;
 pub mod admin_path;
 pub mod api_path;
+pub mod base_url;
 pub mod budapest;
 pub mod cli_guard;
 pub mod clock;
@@ -34,6 +35,7 @@ pub mod etag;
 pub mod http_metrics;
 pub mod image_optimise;
 pub mod import_mysql;
+pub mod media_rules;
 pub mod password_hash;
 pub mod proc_stat;
 pub mod revision;

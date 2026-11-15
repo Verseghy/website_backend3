@@ -19,7 +19,9 @@ use std::{fs, time::Duration};
 use loco_rs::app::AppContext;
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
-use crate::support::{CliRun, ScratchDir, cli_jwt_secret, cli_totp_key, run_cli, with_app};
+use crate::support::{
+    CLI_MEDIA_PUBLIC_BASE_URL, CliRun, ScratchDir, cli_jwt_secret, cli_totp_key, run_cli, with_app,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -110,6 +112,7 @@ impl Run {
             ("LOCO_ENV", environment),
             ("DATABASE_URL", database_url),
             ("HOST", "http://localhost"),
+            ("MEDIA_PUBLIC_BASE_URL", CLI_MEDIA_PUBLIC_BASE_URL),
             ("JWT_SECRET", jwt_secret.as_str()),
             ("TOTP_ENCRYPTION_KEY", totp_key.as_str()),
             // The child really connects to the test database, unlike the

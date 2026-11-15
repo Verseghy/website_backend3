@@ -2,7 +2,8 @@
 //! function, and render a DTO.
 //!
 //! - [`admin`]: the admin API under `/api/admin`, every response
-//!   `Cache-Control: no-store` (ADR 0023 §6).
+//!   `Cache-Control: no-store` (ADR 0023 §6), JSON bodies limited to 4 MiB,
+//!   and in `admin::media` what every upload endpoint shares.
 //! - [`admin_ui`]: the `/admin` static router (ADR 0004 §3).
 //! - [`metrics`]: `/metrics` on its own port, and the HTTP request metrics
 //!   (ADR 0023 §9).

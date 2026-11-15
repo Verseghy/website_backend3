@@ -21,6 +21,17 @@
 //! that answer them: each finding is a [`super::content::ContentError`],
 //! `{code, index, detail}`, and the codes needed their Hungarian messages
 //! first.
+//!
+//! The upload model adds the image refusals of ADR 0015 §6 and §7 and the
+//! four CPU limits of ADR 0033 §4 (`image_*`), and the free-space refusal
+//! (`insufficient_storage`, 507 Insufficient Storage: the maintainer's
+//! answer of 2026-11-01, research: DECISIONS R24 (D121)).
+//! `controllers::admin::media` maps every upload error to them, for every
+//! upload endpoint alike. They belong to no single resource (an author's
+//! photo and a post's gallery image are refused by the same rules), so they
+//! are `snake_case`, not `<resource>.<reason>` (ADR 0021 §4). Their messages
+//! ask the editor for what fixes the file: a file saved again, a smaller
+//! one, or one of the four formats.
 
 use std::collections::BTreeMap;
 
@@ -46,10 +57,11 @@ pub enum ErrorCode {
     /// password, an unknown e-mail address, a deactivated or trashed
     /// account), so the answer does not reveal which accounts exist.
     InvalidCredentials,
-    /// `422`: the request body is not the JSON the endpoint takes: not JSON,
-    /// not sent as `application/json`, or with a field that is missing,
-    /// unknown or of the wrong type. An error on the whole request, so
-    /// `field` is `null`.
+    /// `422`: the request body is not what the endpoint takes. For a JSON
+    /// endpoint: not JSON, not sent as `application/json`, or with a field
+    /// that is missing, unknown or of the wrong type. For an upload: not one
+    /// `multipart/form-data` part named `file`, and the description says
+    /// why. An error on the whole request, so `field` is `null`.
     InvalidBody,
     /// `413`: the request body is larger than the request body limit.
     BodyTooLarge,
@@ -77,6 +89,32 @@ pub enum ErrorCode {
     /// deactivated, a token that an account event revoked, or a session
     /// scope that the route does not accept.
     Unauthorized,
+    /// `422`: the upload is not a JPEG, PNG, GIF or WebP image. Its file
+    /// name has another extension or none, or its content is not an image
+    /// at all (an SVG or HTML file renamed to `.png`, for example). `field`
+    /// is the file part.
+    ImageNotAllowed,
+    /// `422`: the upload's content is an image of another format than its
+    /// extension says. `params`: `extension` (the file name's, without the
+    /// dot) and `format` (what the content is, such as `JPEG`).
+    ImageTypeMismatch,
+    /// `422`: the image is corrupt: its header or data does not decode as
+    /// its format, or the file is cut short. `params`: `format`.
+    ImageCorrupt,
+    /// `422`: the image has more pixels than the pixel budget allows; it is
+    /// refused from its header, before any decode. `params`: `width`,
+    /// `height` and `max_megapixels`.
+    ImageTooManyPixels,
+    /// `422`: the animation has more frames, or more pixels in all its
+    /// frames, than the optimiser takes. `params`: `max_frames` and
+    /// `max_megapixels`.
+    ImageAnimationTooLarge,
+    /// `422`: the JPEG has more progressive scans than the optimiser takes.
+    /// `params`: `max_scans`.
+    ImageTooManyScans,
+    /// `507`: storing the upload would leave less free space on the media
+    /// volume than the configured reserve. An operator has to make room.
+    InsufficientStorage,
 }
 
 impl ErrorCode {
@@ -95,7 +133,8 @@ impl ErrorCode {
             // (research: DECISIONS R15 (D74)). The size and depth limits of
             // a rich-text body are content rules, checked after the request
             // body limit let the request in, so they are 422 like the other
-            // findings of a body (editor.md §7.6), not 413.
+            // findings of a body (editor.md §7.6), not 413. So is an
+            // uploaded file that the image rules refuse.
             Self::InvalidBody
             | Self::ImageAltMissing
             | Self::ImageSrcRejected
@@ -103,7 +142,19 @@ impl ErrorCode {
             | Self::IframeContent
             | Self::ContentTooLarge
             | Self::ContentTooDeep
-            | Self::ContentNotNormalisable => 422,
+            | Self::ContentNotNormalisable
+            | Self::ImageNotAllowed
+            | Self::ImageTypeMismatch
+            | Self::ImageCorrupt
+            | Self::ImageTooManyPixels
+            | Self::ImageAnimationTooLarge
+            | Self::ImageTooManyScans => 422,
+            // ADR 0021 §4 has no row for it, and ADR 0015 §6 asks only for
+            // a clear message. 507 Insufficient Storage (RFC 4918 §11.5):
+            // the server cannot store what the request needs, and nothing
+            // in the request is wrong. Kept as built by the maintainer
+            // (research: DECISIONS R24 (D121)).
+            Self::InsufficientStorage => 507,
         }
     }
 
@@ -129,6 +180,13 @@ impl ErrorCode {
             // Not Loco's "You do not have permission to access this
             // resource": that reads as a 403, and a 401 means "sign in".
             Self::Unauthorized => "There is no valid admin session; sign in again",
+            Self::ImageNotAllowed => "Only JPEG, PNG, GIF and WebP images are accepted",
+            Self::ImageTypeMismatch => "The file content does not match its extension",
+            Self::ImageCorrupt => "The image is corrupt",
+            Self::ImageTooManyPixels => "The image has more pixels than the pixel budget",
+            Self::ImageAnimationTooLarge => "The animation has too many frames or pixels",
+            Self::ImageTooManyScans => "The JPEG image has too many scans",
+            Self::InsufficientStorage => "There is not enough free space to store the upload",
         }
     }
 }
@@ -230,9 +288,21 @@ mod tests {
                 "content_not_normalisable",
             ),
             (ErrorCode::Unauthorized, 401, "unauthorized"),
+            (ErrorCode::ImageNotAllowed, 422, "image_not_allowed"),
+            (ErrorCode::ImageTypeMismatch, 422, "image_type_mismatch"),
+            (ErrorCode::ImageCorrupt, 422, "image_corrupt"),
+            (ErrorCode::ImageTooManyPixels, 422, "image_too_many_pixels"),
+            (
+                ErrorCode::ImageAnimationTooLarge,
+                422,
+                "image_animation_too_large",
+            ),
+            (ErrorCode::ImageTooManyScans, 422, "image_too_many_scans"),
+            (ErrorCode::InsufficientStorage, 507, "insufficient_storage"),
         ] {
             assert_eq!(code.status(), status, "{code:?}");
             assert_eq!(serde_json::to_value(code).expect("serializes"), json!(wire));
+            assert!(!code.default_description().is_empty(), "{code:?}");
         }
     }
 
@@ -271,7 +341,7 @@ mod tests {
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");

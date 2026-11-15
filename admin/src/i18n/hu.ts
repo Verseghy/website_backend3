@@ -434,6 +434,21 @@ export const hu = {
     // A request without a valid admin session (ADR 0006 §1), one message for
     // every reason: sign in again.
     unauthorized: "A munkamenet lejárt vagy érvénytelen. Jelentkezz be újra!",
+    // Upload refusals (ADR 0015 §6 and §7, ADR 0033 §4): each says what
+    // makes the file acceptable.
+    image_not_allowed: "Csak JPEG, PNG, GIF vagy WebP kép tölthető fel.",
+    image_type_mismatch:
+      "A fájl kiterjesztése (.%{extension}) nem egyezik a tartalmával, amely %{format} kép. Mentsd el a képet a tartalmához illő kiterjesztéssel, majd töltsd fel újra!",
+    image_corrupt:
+      "A %{format} kép sérült, ezért nem tölthető fel. Nyisd meg egy képszerkesztőben, mentsd el újra, majd töltsd fel ismét!",
+    image_too_many_pixels:
+      "A kép felbontása túl nagy (%{width} × %{height} képpont). Legfeljebb %{max_megapixels} megapixeles képet tölthetsz fel: kicsinyítsd le, majd töltsd fel újra!",
+    image_animation_too_large:
+      "Az animáció túl hosszú vagy túl nagy: legfeljebb %{max_frames} képkockából és összesen %{max_megapixels} megapixelből állhat. Rövidítsd vagy kicsinyítsd le, majd töltsd fel újra!",
+    image_too_many_scans:
+      "A JPEG kép szokatlan módon, több mint %{max_scans} részletben tárolja a képet. Nyisd meg egy képszerkesztőben, mentsd el újra, majd töltsd fel ismét!",
+    insufficient_storage:
+      "A szerveren nincs elég szabad hely, ezért a feltöltés nem sikerült. Szólj a rendszergazdának!",
   } satisfies Record<ErrorCode, string>,
 } as const satisfies MessageTree
 

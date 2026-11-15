@@ -30,6 +30,12 @@
 #                 refuses to start when it is unset, not base64 or shorter,
 #                 or the public throwaway key of the local configuration
 #                 files (ADR 0034 §3; D75, research: DECISIONS R15).
+#   MEDIA_PUBLIC_BASE_URL
+#                 https://backend.microshift.verseghy-gimnazium.net/storage,
+#                 the base of the public API's media URLs, which backend2
+#                 uses today (public-api.md §2.3, ADR 0015 §3): absolute, in
+#                 canonical form, with no trailing slash. Every command
+#                 refuses to start when it is unset or not such a URL.
 #
 # `backend3-cli doctor --config` prints the whole rendered configuration,
 # these secrets included, so backend3-cli refuses it here (ADR 0039); plain
@@ -40,7 +46,8 @@
 # migration, so backend3 also boots against a read-only database, ADR 0003),
 # DB_MAX_CONNECTIONS, DB_CONNECT_TIMEOUT, DB_IDLE_TIMEOUT,
 # PNG_PRESET_THRESHOLD_PIXELS (below; set by the Deployment from the
-# measurement on the production node, ADR 0033 §5), and
+# measurement on the production node, ADR 0033 §5), MEDIA_SERVE_STORAGE
+# (default false; true only for the /storage fallback of ADR 0015 §4), and
 # IMPORT_SOURCE_DATABASE_URL, the legacy MySQL source of the import_mysql
 # task (below; unset, empty or `disabled` outside the cut-over window and
 # the rehearsals, data-migration.md §4.1).
@@ -71,6 +78,13 @@ server:
       enable: false
     fallback:
       enable: false
+    # ADR 0015 §6, ADR 0023 §5: request bodies up to 128 MiB (134,217,728
+    # bytes), for media uploads; Loco's default is 2,000,000 bytes. The
+    # admin API's JSON routes take at most 4 MiB, a limit of their own in
+    # controllers::admin::routes. A body above either limit is answered 413
+    # with the admin error envelope.
+    limit_payload:
+      body_limit: 128mib
     compression:
       enable: true
     # public-api.md §9: a request whose If-None-Match equals the ETag of a
@@ -182,7 +196,10 @@ settings:
   # measurement on the production node; until then the default derived in
   # src/domain/image_optimise/png/effort.rs. Checked at boot: a value that
   # breaks the rule stops the server with the key and what to change.
+  # `pixel_budget`: the largest pixel count decoded for one image, 50
+  # megapixels (ADR 0015 §7).
   image_optimisation:
+    pixel_budget: 50000000
     png:
       threshold_pixels: <%= get_env(name="PNG_PRESET_THRESHOLD_PIXELS", default="6000000") %>
       large_preset: 0
@@ -197,3 +214,25 @@ settings:
   # totp_encryption_key above, so any value reaches the task's own check.
   import:
     source_database_url: "<%= get_env(name='IMPORT_SOURCE_DATABASE_URL', default='') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>"
+  # The media volume, `backend-pv-claim` mounted read-write at /data
+  # (ADR 0015 §3). The server starts before the mount exists; each upload
+  # checks the directories and refuses while `root` is missing. `tmp_dir`
+  # is on the same file system as `root`, so the rename into place is
+  # atomic, and outside the served tree, like `trash_dir`. Uploads are
+  # refused below 2 GiB free.
+  media:
+    root: /data/app/public
+    tmp_dir: /data/backend3/tmp
+    trash_dir: /data/backend3/trash
+    min_free_bytes: 2147483648
+    # The base of the public API's absolute media URLs (public-api.md §2.3).
+    # An address takes no default: unset, every command stops with an error
+    # naming the variable; a value that is not an absolute http(s) URL in
+    # canonical form without a trailing slash stops it with the key. The
+    # filters escape the value for the double-quoted string, as for
+    # totp_encryption_key above, so any text reaches the typed check.
+    public_base_url: "<%= get_env(name='MEDIA_PUBLIC_BASE_URL') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>"
+    # The fallback of ADR 0015 §4: backend3 serves /storage itself. Off,
+    # since the separate media server is in use; the Deployment can turn it
+    # on with MEDIA_SERVE_STORAGE=true without a new image.
+    serve_storage: <%= get_env(name="MEDIA_SERVE_STORAGE", default="false") %>
