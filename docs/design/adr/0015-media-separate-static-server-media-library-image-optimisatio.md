@@ -308,7 +308,7 @@ They sit outside `app/public/`, so neither the media server nor the fallback rou
 ### Follow-up work
 
 1. The operator archives the 2020-21 archives offline and then deletes them (section 8).
-2. Run the co-mount test (section 3) and record the result.
+2. Run the co-mount test (section 3) and record the result. Done: the test ran on 2026-11-01, and the maintainer accepted its result on 2026-11-15 (research: DECISIONS R33). The result selects the separate media server of sections 1-3, not the backend3 fallback of section 4 (research: DECISIONS R9, D43).
 3. A website_k8s PR, for human review, adds the `media` Application, Deployment, Service, ConfigMap and the `media-storage-admin` Route, plus backend3's volume mount.
 4. A separate website_k8s PR moves the two public `/storage` Routes, with the runbook step that removes `backend-storage`. A held PR removes backend1's write access at the freeze ([cutover.md](../cutover.md)).
 5. Before May 2027, a PR moves to nginx 1.26. Done: the media server starts on `ubi9/nginx-126` (research: DECISIONS R9), pinned in `deploy/media/image.txt` since Verseghy/website_backend3#214.
