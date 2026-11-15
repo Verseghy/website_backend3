@@ -29,10 +29,19 @@
  * ask nothing. A resource page that the map refuses goes to the Hungarian
  * access-denied page, and one whose question could not be answered to the
  * authentication-error page (`src/auth/AccessPages.tsx`).
+ *
+ * The resources are registered here, each with its screens from
+ * `src/resources/<resource>/`; their data-provider handlers come from
+ * `src/resources/handlers.ts`. So far the labels' list („Címkék”).
  */
 import type { QueryClient } from "@tanstack/react-query"
 import { useCallback, useMemo, type ReactNode } from "react"
-import { CustomRoutes, type DataProvider, type I18nProvider } from "ra-core"
+import {
+  CustomRoutes,
+  Resource,
+  type DataProvider,
+  type I18nProvider,
+} from "ra-core"
 import { Route } from "react-router-dom"
 
 import { AboutPage } from "@/about/AboutPage"
@@ -45,6 +54,8 @@ import { Admin } from "@/components/admin"
 import { Dashboard } from "@/dashboard/Dashboard"
 import { ABOUT_PATH } from "@/layout/AppFooter"
 import { createAppLayout } from "@/layout/AppLayout"
+import { LABELS_RESOURCE } from "@/resources/labels/label-handlers"
+import { LabelList } from "@/resources/labels/LabelList"
 import { ADMIN_BASENAME } from "@/router"
 
 /** Props of {@link AdminApp}. */
@@ -155,6 +166,15 @@ export function AdminApp({
       // host name and violate the admin CSP's `img-src 'self'` (ADR 0023 §6).
       disableTelemetry
     >
+      {/* The resources: each one's handlers are registered in
+          src/resources/handlers.ts, which main.tsx passes to the data
+          provider. The sidebar lists one when canAccess lets the account
+          list it. */}
+      <Resource
+        name={LABELS_RESOURCE}
+        list={LabelList}
+        recordRepresentation="name"
+      />
       <CustomRoutes>
         <Route
           path={ABOUT_PATH}

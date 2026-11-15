@@ -1,6 +1,6 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, a queue worker, an admin API route with its requirement, or an admin list endpoint (paging, sorting, filtering). Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, a queue worker, an admin API route with its requirement, or an admin list endpoint and its list screen (paging, sorting, filtering). Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
@@ -217,7 +217,10 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    `ra-data-simple-rest`), every string from `admin/src/i18n/hu.ts` with the
    ADR 0021 section 6 terms, and the trash and history patterns of ADR 0011
    section 8, built clean-room: never an `@react-admin/` package
-   (`npm run clean-room` fails on one). Every screen sits behind the sign-in
+   (`npm run clean-room` fails on one). A resource's screens live in
+   `admin/src/resources/<resource>/`, its reads are the generic list
+   handlers and its list a `ResourceList` (recipe 11 step 7). Every
+   screen sits behind the sign-in
    (`requireAuth`, ADR 0006); a refused request shows its envelope's message
    through `envelopeMessage` of `admin/src/api/error-envelope.ts` (ADR 0021
    section 4), and the auth provider signs out on `401` only. Each handler
@@ -251,7 +254,11 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
     `expectedHttpErrors` (`admin/CLAUDE.md`, "The admin gate"). A fixture the
     E2E flow needs in the database is created by `Hooks::seed` through the
     models (`AGENTS.md`, "The seed account"), which refuses every environment
-    but development, test and e2e. Tests that a generator writes use
+    but development, test and e2e; the values the E2E suite expects are
+    mirrored in a file of `admin/e2e/` that `tests/seed/mod.rs` holds to the
+    seed's constants (`seed-account.ts`, `seed-labels.ts`), and a
+    test that writes such rows must leave the seeded ones as the other
+    tests, which run in parallel, expect them. Tests that a generator writes use
     `boot_test` and `serial_test`, which backend3 does not depend on: rewrite
     them to `tests/support::with_app` or `with_server`, which give each test
     its own database and always drop it. A test of a time-dependent rule
@@ -1252,7 +1259,7 @@ outside the table; its documentation lists what a text check cannot see.
 
 ---
 
-## 11. Add an admin list endpoint (the list contract)
+## 11. Add an admin list endpoint and its screen (the list contract)
 
 Every admin resource is listed through one contract, which the labels
 settled first (parity SHR-02, SHR-03; ADR 0005, ADR 0020 §4): ra-core's list
@@ -1326,3 +1333,38 @@ answer. The record of a resource is `GET /api/admin/<resource>/{id}`.
    record's `404`s, and that trashed rows never show
    (`tests/requests/admin_labels.rs`). A resource whose default order is by a
    name or title also runs ADR 0020's ten-word order test.
+7. **The admin** (`admin/src/`): the reads need no request code of their
+   own. Register `createListHandlers({ path, parseRow })` of
+   `data-provider/list-handlers.ts` under the resource's name in
+   `resources/handlers.ts`; its handlers send through the provider's
+   `request` with ra-core's `params.signal`, so a `401 unauthorized` waits
+   for the in-place sign-in and an unmounted screen's query ends (recipe 1
+   step 9). `parseRow` is a reader of one row of the
+   resource's binding that copies only the binding's fields and returns
+   `undefined` for anything else (`resources/labels/label-handlers.ts`'s
+   `parseLabel`): `getList` sends ra-core's paging, sort and filters as the
+   query (`data-provider/list-contract.ts`, whose constants
+   `tests/domain/list_contract.rs` holds to `domain::list_query`; add the
+   resource's spec to its `LIST_SPECS`), `getOne` reads the record route,
+   and `getMany` reads the list's `id` filter, 100 ids to a request. A
+   refused answer rejects with `refusalError`, so a `403` shows
+   `errors.forbidden`, never an empty list. The list screen is a
+   `resources/ResourceList.tsx` (25 rows to a page, 10, 25, 50 and 100 on
+   offer, no export: the kit's `List` would ask for 10 rows, offer 5 and
+   export 1,000, which the contract refuses, and `ResourceList.test.tsx`
+   fails on a screen in `src/resources/` that imports it) with the
+   resource's default order as its `sort`, and the kit's `DataTable`, one
+   `DataTable.Col` per field with its `resources.<name>.fields.<field>`
+   label in `hu.ts`. Until the resource has a show or edit page and a
+   bulk action, the table takes `rowClick={false}` and
+   `bulkActionButtons={false}`. Register it with `<Resource>` in
+   `src/App.tsx` (`LabelList` is the first), with its
+   `resources.<name>.name` (`"<one> |||| <other>"`) in `hu.ts`, which
+   `resources/resource-coverage.test.tsx` checks for every `<Resource>`
+   together with its handlers. Test the row reader, the
+   screen through `AdminApp` over a `fetch` stub
+   (`resources/labels/LabelList.test.tsx`), and in Playwright paging,
+   header sorts with the tie-break and, for a name order, the Hungarian
+   alphabet against the server (`e2e/labels.spec.ts`); the rows it lists
+   come from the seed (`SEED_LABELS` in `src/domain/seed.rs`, mirrored in
+   `admin/e2e/seed-labels.ts`, which `tests/seed/mod.rs` checks).

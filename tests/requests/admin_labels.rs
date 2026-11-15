@@ -327,6 +327,72 @@ async fn the_list_pages_sorts_and_filters_as_the_contract_says() {
     .await;
 }
 
+/// The queries that the admin's generic handlers write
+/// (`admin/src/data-provider/list-handlers.ts`), byte for byte as
+/// `URLSearchParams` writes them: the label list's first page, a page of
+/// another size, a header sort, and the `getMany` of the post form's
+/// picker, 100 to a page with the ids repeated and no sort.
+#[tokio::test]
+async fn the_queries_the_admin_writes_are_answered_as_the_screen_expects() {
+    with_server(|server, ctx| async move {
+        for id in 1..=30 {
+            label(
+                &ctx,
+                id,
+                &format!("Címke {id:02}"),
+                if id % 3 == 0 { "#AAAAAA" } else { "#BBBBBB" },
+            )
+            .await;
+        }
+        let user = writer(&ctx).await;
+        let all: Vec<i64> = (1..=30).collect();
+        let list = |query: &str| {
+            let path = format!("{LIST}?{query}");
+            let server = &server;
+            let ctx = &ctx;
+            let user = &user;
+            async move { get(server, ctx, &path, Some(user)).await }
+        };
+        assert_page(
+            &list("page=1&perPage=25&sort=name&order=ASC").await,
+            &all[..25],
+            30,
+            "the screen's first page",
+        );
+        assert_page(
+            &list("page=2&perPage=10&sort=name&order=ASC").await,
+            &all[10..20],
+            30,
+            "page 2 of 10",
+        );
+        // Ties on the colour go to the higher id, in both directions.
+        let threes_desc: Vec<i64> = (1..=30).rev().filter(|id| id % 3 == 0).collect();
+        let others_desc: Vec<i64> = (1..=30).rev().filter(|id| id % 3 != 0).collect();
+        let ascending: Vec<i64> = threes_desc.iter().chain(&others_desc).copied().collect();
+        let descending: Vec<i64> = others_desc.iter().chain(&threes_desc).copied().collect();
+        assert_page(
+            &list("page=1&perPage=100&sort=color&order=ASC").await,
+            &ascending,
+            30,
+            "colour ascending",
+        );
+        assert_page(
+            &list("page=1&perPage=100&sort=color&order=DESC").await,
+            &descending,
+            30,
+            "colour descending",
+        );
+        // getMany: the named labels, each once, in the list's default order.
+        assert_page(
+            &list("perPage=100&id=12&id=3&id=29").await,
+            &[3, 12, 29],
+            3,
+            "getMany",
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn every_refused_list_query_is_a_422_that_names_its_parameter() {
     with_server(|server, ctx| async move {

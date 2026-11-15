@@ -456,7 +456,9 @@ website_backend3/
 │   ├── CLAUDE.md            overrides: Loco data provider, Hungarian i18n
 │   └── src/
 │       ├── bindings/        ts-rs output, generated and committed
-│       └── components/      shadcn-admin-kit and shadcn/ui code, with its MIT licence
+│       ├── components/      shadcn-admin-kit and shadcn/ui code, with its MIT licence
+│       ├── data-provider/   the hand-written data provider and the generic reads of the admin list contract
+│       └── resources/       one directory of screens per resource, and ResourceList, the list page of every resource
 ├── config/                  development.yaml, test.yaml, production.yaml
 ├── data/                    versioned data the tasks read, shipped in the image as /app/data/
 │   └── import/              resolutions.toml, the defect resolution list (data-migration.md §8.2)

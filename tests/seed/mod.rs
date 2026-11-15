@@ -8,9 +8,13 @@
 //! (ADR 0040). `tests/cli/precheck.rs` covers the CLI
 //! refusal in production, which stops `db seed` before it connects.
 //!
-//! The E2E suite types the account into the sign-in screen, so its file
-//! `admin/e2e/seed-account.ts` must hold the same values; the last test here
-//! checks that.
+//! The seed also creates the invented labels of `SEED_LABELS` once, which the
+//! E2E suite lists, and leaves a live label with one of their names alone.
+//!
+//! The E2E suite types the account into the sign-in screen and checks the
+//! label list against the seed's labels, so its files
+//! `admin/e2e/seed-account.ts` and `admin/e2e/seed-labels.ts` must hold the
+//! same values; the two `the_e2e_suite_holds_*` tests check that.
 
 use std::path::Path;
 
@@ -20,16 +24,19 @@ use backend3::{
     domain::{
         authz::{AccessAction, AccountGrants, Permission, RESOURCE_ACCESS, Role},
         password_hash::{self, PasswordHashKind},
-        seed::SEED_ACCOUNT,
+        seed::{SEED_ACCOUNT, SEED_LABELS},
         session_cookie::SESSION_COOKIE_NAME,
     },
-    models::users::{self, Entity, Model},
+    models::{
+        labels,
+        users::{self, Entity, Model},
+    },
 };
 use loco_rs::{
     app::{AppContext, Hooks},
     environment::Environment,
 };
-use sea_orm::{EntityTrait, PaginatorTrait};
+use sea_orm::{ConnectionTrait, EntityTrait, PaginatorTrait};
 use serde_json::{Map, Value, json};
 
 use crate::support::{repository_root, with_app, with_server};
@@ -53,6 +60,27 @@ fn in_environment(ctx: &AppContext, environment: Environment) -> AppContext {
 /// How many accounts the database holds.
 async fn account_count(ctx: &AppContext) -> u64 {
     Entity::find().count(&ctx.db).await.expect("count users")
+}
+
+/// How many labels the database holds, live or trashed.
+async fn label_count(ctx: &AppContext) -> u64 {
+    labels::Entity::find()
+        .count(&ctx.db)
+        .await
+        .expect("count labels")
+}
+
+/// The live labels as `(id, name, color)`, by id.
+async fn live_labels(ctx: &AppContext) -> Vec<(i64, String, String)> {
+    let mut rows: Vec<_> = labels::Model::find_live()
+        .all(&ctx.db)
+        .await
+        .expect("live labels")
+        .into_iter()
+        .map(|label| (label.id, label.name, label.color))
+        .collect();
+    rows.sort();
+    rows
 }
 
 /// The seeded account, found as sign-in finds it.
@@ -116,6 +144,86 @@ async fn seeding_twice_leaves_the_one_account_unchanged() {
 }
 
 #[tokio::test]
+async fn the_seed_creates_the_invented_labels_in_order_and_only_once() {
+    with_app(|_router, ctx| async move {
+        seed(&ctx).await.expect("first seed");
+
+        let first = live_labels(&ctx).await;
+        // In the order of SEED_LABELS, so their ids grow down the list.
+        assert_eq!(
+            first
+                .iter()
+                .map(|(_, name, color)| (name.as_str(), color.as_str()))
+                .collect::<Vec<_>>(),
+            SEED_LABELS
+                .iter()
+                .map(|label| (label.name, label.color))
+                .collect::<Vec<_>>()
+        );
+        let all = labels::Entity::find().all(&ctx.db).await.expect("labels");
+        for label in &all {
+            // Made by the system, at PostgreSQL's clock (D90), and live.
+            assert_eq!(label.created_by, None, "{}", label.name);
+            assert_eq!(label.updated_by, None, "{}", label.name);
+            assert!(label.deleted_at.is_none(), "{}", label.name);
+        }
+
+        seed(&ctx).await.expect("second seed");
+
+        // Not one more row, and the rows are the first run's.
+        assert_eq!(label_count(&ctx).await, SEED_LABELS.len() as u64);
+        assert_eq!(live_labels(&ctx).await, first);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_seed_leaves_a_live_label_of_the_same_name_alone() {
+    with_app(|_router, ctx| async move {
+        // A live label that one seed label names but for case, and a
+        // trashed one with another seed label's name, written in SQL as
+        // the importer and the trash will write them. Invented names.
+        let taken = SEED_LABELS[0];
+        let trashed = SEED_LABELS[1];
+        for statement in [
+            format!(
+                "INSERT INTO labels (id, name, color) VALUES (900, '{}', '#000000')",
+                taken.name.to_uppercase()
+            ),
+            format!(
+                "INSERT INTO labels (id, name, color, deleted_at) VALUES \
+                 (901, '{}', '#000000', TIMESTAMPTZ '2026-11-15 08:00:00+00')",
+                trashed.name
+            ),
+        ] {
+            ctx.db
+                .execute_unprepared(&statement)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+
+        seed(&ctx).await.expect("seed");
+
+        let live = live_labels(&ctx).await;
+        // The live label stays as it was, and the seed did not add its name.
+        assert!(live.contains(&(900, taken.name.to_uppercase(), "#000000".to_owned())));
+        assert!(
+            !live.iter().any(|(_, name, _)| name.as_str() == taken.name),
+            "{live:?}"
+        );
+        // The trashed label does not hold its name: the seed adds it.
+        assert!(
+            live.iter()
+                .any(|(_, name, _)| name.as_str() == trashed.name),
+            "{live:?}"
+        );
+        assert_eq!(live.len(), SEED_LABELS.len());
+        assert_eq!(label_count(&ctx).await, SEED_LABELS.len() as u64 + 1);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn the_seed_runs_in_development_test_and_e2e() {
     with_app(|_router, ctx| async move {
         for environment in [
@@ -129,6 +237,7 @@ async fn the_seed_runs_in_development_test_and_e2e() {
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
         }
         assert_eq!(account_count(&ctx).await, 1);
+        assert_eq!(label_count(&ctx).await, SEED_LABELS.len() as u64);
     })
     .await;
 }
@@ -160,6 +269,7 @@ async fn the_seed_refuses_every_other_environment_before_writing() {
             );
             assert!(error.contains("cut-over import"), "{name}: {error}");
             assert_eq!(account_count(&ctx).await, 0, "{name} wrote an account");
+            assert_eq!(label_count(&ctx).await, 0, "{name} wrote a label");
         }
     })
     .await;
@@ -235,6 +345,31 @@ fn the_e2e_suite_holds_the_seed_account() {
             path.display()
         );
     }
+}
+
+/// `admin/e2e/seed-labels.ts` holds the labels the E2E suite expects the
+/// label list to show. They must be the seed's, or the list tests would
+/// fail on a page size or an order instead of naming the cause.
+#[test]
+fn the_e2e_suite_holds_the_seed_labels() {
+    let path = repository_root().join("admin/e2e/seed-labels.ts");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let lines: Vec<&str> = source
+        .lines()
+        .filter(|line| line.starts_with("  { name: "))
+        .collect();
+    let expected: Vec<String> = SEED_LABELS
+        .iter()
+        .map(|label| format!("  {{ name: {:?}, color: {:?} }},", label.name, label.color))
+        .collect();
+    assert_eq!(
+        lines,
+        expected,
+        "{} must list the labels of SEED_LABELS in src/domain/seed.rs, one line each, in \
+         the same order",
+        path.display()
+    );
 }
 
 /// Every action of every row of the access table, as `/auth/me` sends it to

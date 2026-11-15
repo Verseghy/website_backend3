@@ -8,7 +8,11 @@
  *
  * Shape: the provider is a dispatch table. Each vertical slice registers
  * `ResourceHandlers` for its resource, typed against the ts-rs bindings in
- * `src/bindings/`. Until a slice registers a method, calling it rejects with
+ * `src/bindings/`, in `src/resources/handlers.ts`. Every resource reads
+ * through the shared admin list contract, so its `getList`, `getOne` and
+ * `getMany` come from `createListHandlers` (`./list-handlers.ts`), and a
+ * slice writes only the reader of one row of its binding. Until a slice
+ * registers a method, calling it rejects with
  * {@link DataProviderNotImplementedError}, whose message is a key of `hu.ts`,
  * so ra-core's error notification shows Hungarian text.
  *
@@ -122,7 +126,10 @@ export interface DataProviderOptions {
    * or `/\host` (WHATWG URL parsing treats `\` like `/`).
    */
   readonly apiBaseUrl: string
-  /** Handlers per ra-core resource name. Empty until the first slice. */
+  /**
+   * Handlers per ra-core resource name: `createResourceHandlers` of
+   * `src/resources/handlers.ts` in `main.tsx`, stubs in tests.
+   */
   readonly resources: Readonly<Record<string, ResourceHandlers>>
   /**
    * The `fetch` that {@link DataProviderContext.request} calls. `main.tsx`

@@ -14,3 +14,4 @@ mod import_not_migrated;
 mod import_resolutions;
 mod import_source_tables;
 mod import_target_tables;
+mod list_contract;

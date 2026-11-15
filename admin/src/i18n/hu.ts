@@ -351,6 +351,19 @@ export const hu = {
       system: "Rendszerbeállítás szerint",
     },
   },
+  // The resources' names and field labels (ADR 0021 §2): ra-core reads
+  // `resources.<name>.name` for the sidebar, the page title and the
+  // breadcrumb, with `smart_count` (one, other), and
+  // `resources.<name>.fields.<field>` for a column header or an input.
+  resources: {
+    labels: {
+      name: "Címke |||| Címkék",
+      fields: {
+        name: "Név",
+        color: "Szín",
+      },
+    },
+  },
   dashboard: {
     welcome: "Üdv a Verseghy-adminban!",
     placeholder:
