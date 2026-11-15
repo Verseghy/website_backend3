@@ -12,17 +12,18 @@ Each fixture is a pair:
 
 The name starts with the step it shows: `n0-` (the parse: character
 references, tag case, line ends), `n3-` (`<center>`), `n5-` (legacy
-presentational markup: so far `p[align]`, `table[align]`, `h5` and `h6`,
-the italic `h2` and `p[lang]`), `n6-` (the dead host's links), `n8-`
-(the serialisation: only five character references left, double-quoted
-attributes, void tags without a slash), `n9-` (a content-v1 body, which
-comes out unchanged), or `alt-` (images without alt text, which are
-reported, never changed).
+presentational markup: the block rules (`p[align]`, `table[align]`, `h5` and
+`h6`, the italic `h2`, `p[lang]`) and the inline marks), `n6-` (the dead
+host's links), `n8-` (the serialisation: only five character references
+left, double-quoted attributes, void tags without a slash), `n9-` (a
+content-v1 body, which comes out unchanged), or `alt-` (images without alt
+text, which are reported, never changed).
 
 For every pair the runner checks that the output equals `<name>.out.html`,
 that normalising `<name>.out.html` again returns it with no rule hit (P4),
-that the step of the name fired, and that `<name>.out.html` is the
-sanitiser's fixed point too (N9). An output that still holds markup for a
+that the step of the name fired, that the text a reader reads is the same in
+both files (V5(c), compared as search text), and that `<name>.out.html` is
+the sanitiser's fixed point too (N9). An output that still holds markup for a
 later step is listed in the runner's `NOT_YET_CONTENT_V1` with that step;
 for those the sanitiser check must fail.
 
@@ -41,8 +42,11 @@ runner fails if one of those loses its `\r\n`.
 
 ## Adding a fixture
 
-- Every rule a later slice adds (N1, N2, N4, N5, N5b, N7) gets at least one
-  pair here, with its step as the prefix.
+- Every rule a later slice adds (N1, N2, N4, N5b, N7) gets at least one
+  pair here, with its step as the prefix. The runner pins the exact hits of
+  each `n5-` pair of the inline marks, fails when another `n5-` pair hits an
+  inline-mark rule without being listed there, and fails when an inline-mark
+  rule has no pair.
 - Write the input by hand in the legacy form: CKEditor 4's named character
   references, upper-case tags typed in source mode, `\r\n` line ends.
   Fixtures are invented markup, never copied from production content
@@ -61,6 +65,8 @@ them to:
   (no table width, the locked `border-collapse`, `max-width` and `tbody`
   declarations), and N7 drops their `border`, `cellpadding` and
   `cellspacing` (`NOT_YET_CONTENT_V1`);
+- N5b gives the table of `n5-marks-in-a-table` its content-v1 shape, and N7
+  drops the table's `border` and `cellpadding` (`NOT_YET_CONTENT_V1`);
 - N7 drops the `text-align: inherit` that `n3-center-unclear-alignment`
   keeps after N3's `text-align: center` (`NOT_YET_CONTENT_V1`);
 - N5b's whitespace rule removes the line feeds left between the blocks of

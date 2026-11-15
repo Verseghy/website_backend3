@@ -22,14 +22,14 @@
 use std::collections::BTreeMap;
 
 /// A step of data-migration.md §7.1 that records rule hits. The steps that
-/// later slices add (N1, N2, N4, N5b and N7, and N5's inline rules) join
-/// this list with their rules.
+/// later slices add (N1, N2, N4, N5b and N7) join this list with their
+/// rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Step {
     /// N3: `<center>` unwrapped into `text-align: center`.
     N3,
-    /// N5: legacy presentational markup mapped onto content-v1; so far its
-    /// block rules.
+    /// N5: legacy presentational markup mapped onto content-v1: its block
+    /// rules, then its inline rules, the legacy marks.
     N5,
     /// N6: links to the dead host rewritten to root-relative.
     N6,
@@ -99,6 +99,34 @@ pub enum Rule {
     ItalicHeadingToEm,
     /// N5: a paragraph's `lang` attribute was removed.
     ParagraphLangStripped,
+    /// N5: a `b` was renamed to `strong`; counted once per element.
+    BToStrong,
+    /// N5: an `i` was renamed to `em`.
+    IToEm,
+    /// N5: an `ins` was renamed to `u`.
+    InsToU,
+    /// N5: a `strike` was renamed to `s`.
+    StrikeToS,
+    /// N5: a `del` was renamed to `s`.
+    DelToS,
+    /// N5: a `big` was removed and its content kept in its place.
+    BigUnwrapped,
+    /// N5: a `span` with the class `marker` lost that class and got
+    /// `background-color: #ffff00` in front of its `style`.
+    MarkerHighlighted,
+    /// N5: a `span` with a `dir` attribute and no `style`, or a blank one
+    /// (only ASCII white space and `;`), was removed and its content kept in
+    /// its place (editor.md §9).
+    SpanDirUnwrapped,
+    /// N5: a `span` with a `dir` attribute and a `style` that is not blank
+    /// was removed and its content kept in its place, as editor.md §9 says,
+    /// and its `style` went with it. The style may have shown a colour, a
+    /// highlight or a size that content-v1 keeps on a span, so the report
+    /// lists the body for review.
+    SpanDirStyleDropped,
+    /// N5: a marker `span` (see [`Self::MarkerHighlighted`]) with a `dir`
+    /// attribute lost the `dir` and stayed, with its new highlight.
+    SpanDirRemoved,
     /// N6: a `src` or `href` on the dead host's `/storage/` was rewritten to
     /// the root-relative `/storage/` path.
     DeadHostLinkRewritten,
@@ -106,7 +134,7 @@ pub enum Rule {
 
 impl Rule {
     /// Every rule, in the order of [`Ord`].
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 23] = [
         Self::CenterUnwrapped,
         Self::CenterBlockAligned,
         Self::CenterRunWrapped,
@@ -119,6 +147,16 @@ impl Rule {
         Self::HeadingToH4,
         Self::ItalicHeadingToEm,
         Self::ParagraphLangStripped,
+        Self::BToStrong,
+        Self::IToEm,
+        Self::InsToU,
+        Self::StrikeToS,
+        Self::DelToS,
+        Self::BigUnwrapped,
+        Self::MarkerHighlighted,
+        Self::SpanDirUnwrapped,
+        Self::SpanDirStyleDropped,
+        Self::SpanDirRemoved,
         Self::DeadHostLinkRewritten,
     ];
 
@@ -137,7 +175,17 @@ impl Rule {
             | Self::TableAlignDropped
             | Self::HeadingToH4
             | Self::ItalicHeadingToEm
-            | Self::ParagraphLangStripped => Step::N5,
+            | Self::ParagraphLangStripped
+            | Self::BToStrong
+            | Self::IToEm
+            | Self::InsToU
+            | Self::StrikeToS
+            | Self::DelToS
+            | Self::BigUnwrapped
+            | Self::MarkerHighlighted
+            | Self::SpanDirUnwrapped
+            | Self::SpanDirStyleDropped
+            | Self::SpanDirRemoved => Step::N5,
             Self::DeadHostLinkRewritten => Step::N6,
         }
     }
@@ -158,6 +206,16 @@ impl Rule {
             Self::HeadingToH4 => "heading_to_h4",
             Self::ItalicHeadingToEm => "italic_heading_to_em",
             Self::ParagraphLangStripped => "paragraph_lang_stripped",
+            Self::BToStrong => "b_to_strong",
+            Self::IToEm => "i_to_em",
+            Self::InsToU => "ins_to_u",
+            Self::StrikeToS => "strike_to_s",
+            Self::DelToS => "del_to_s",
+            Self::BigUnwrapped => "big_unwrapped",
+            Self::MarkerHighlighted => "marker_highlighted",
+            Self::SpanDirUnwrapped => "span_dir_unwrapped",
+            Self::SpanDirStyleDropped => "span_dir_style_dropped",
+            Self::SpanDirRemoved => "span_dir_removed",
             Self::DeadHostLinkRewritten => "dead_host_link_rewritten",
         }
     }
@@ -335,12 +393,24 @@ mod tests {
                 ("heading_to_h4", "N5"),
                 ("italic_heading_to_em", "N5"),
                 ("paragraph_lang_stripped", "N5"),
+                ("b_to_strong", "N5"),
+                ("i_to_em", "N5"),
+                ("ins_to_u", "N5"),
+                ("strike_to_s", "N5"),
+                ("del_to_s", "N5"),
+                ("big_unwrapped", "N5"),
+                ("marker_highlighted", "N5"),
+                ("span_dir_unwrapped", "N5"),
+                ("span_dir_style_dropped", "N5"),
+                ("span_dir_removed", "N5"),
                 ("dead_host_link_rewritten", "N6"),
             ]
         );
         assert_eq!(Step::N3.as_str(), "N3");
         assert_eq!(Step::N5.as_str(), "N5");
         assert_eq!(Step::N6.as_str(), "N6");
+        // The steps are ordered as data-migration.md §7.1 runs them.
+        assert!(Step::N3 < Step::N5 && Step::N5 < Step::N6);
     }
 
     #[test]

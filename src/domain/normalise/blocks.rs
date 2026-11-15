@@ -9,7 +9,8 @@
 //! (data-migration.md §7.1, N7). So N5 maps that markup first onto what a
 //! reader saw, in the form content-v1 has for it. These are the block rules
 //! of N5, as editor.md §9 lists them; its inline rules (`b`, `i`, `span`
-//! and the rest) are another slice's and join the same step.
+//! and the rest) are in `marks.rs`, which runs right after these in the
+//! same step.
 //!
 //! - **`p[align]` becomes `text-align`.** A browser maps `align` on a
 //!   paragraph to `text-align` when its value is `left`, `right`, `center`

@@ -1,7 +1,8 @@
 //! The normaliser's running time on the shapes that once made N3 quadratic
-//! (`src/domain/normalise/center.rs`, "Cost"), and on the nested italic
-//! headings that N5 plans in one walk (`src/domain/normalise/blocks.rs`,
-//! "Cost").
+//! (`src/domain/normalise/center.rs`, "Cost"), on the nested italic headings
+//! that N5 plans in one walk (`src/domain/normalise/blocks.rs`, "Cost"), and
+//! on deep legacy marks, which N5 maps in one walk
+//! (`src/domain/normalise/marks.rs`, "Cost").
 //!
 //! The normaliser has no size or depth limit of its own, because its inputs
 //! are the fixed legacy dump and backend3's own, already bounded, bodies
@@ -82,5 +83,29 @@ fn nested_italic_headings_do_not_rescan_their_content() {
         )
     );
     assert_eq!(out.report.count(Rule::ItalicHeadingToEm), depth);
+    assert!(elapsed < BOUND, "{elapsed:?}");
+}
+
+#[test]
+fn deep_legacy_marks_are_mapped_in_one_walk() {
+    // N5 looks at each element once, and an unwrap moves only the element's
+    // children, so a deep chain of unwrapped `big` and `span[dir]` elements
+    // costs no more than its parse (`src/domain/normalise/marks.rs`, "Cost").
+    let depth = 2_000;
+    let body = format!(
+        "{}x{}",
+        r#"<big><span dir="ltr"><b>"#.repeat(depth),
+        "</b></span></big>".repeat(depth)
+    );
+    let started = Instant::now();
+    let out = normalise(&body).expect("the body settles");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        out.html,
+        format!("{}x{}", "<strong>".repeat(depth), "</strong>".repeat(depth))
+    );
+    assert_eq!(out.report.count(Rule::BigUnwrapped), depth);
+    assert_eq!(out.report.count(Rule::SpanDirUnwrapped), depth);
+    assert_eq!(out.report.count(Rule::BToStrong), depth);
     assert!(elapsed < BOUND, "{elapsed:?}");
 }

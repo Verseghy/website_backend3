@@ -17,6 +17,12 @@
 //!   occurrence, an `alt-` fixture an image without alt text, and an
 //!   `n0-`, `n8-` or `n9-` fixture no hit at all, because parsing and
 //!   writing are not rule hits;
+//! - the text a reader reads is unchanged, `text(source) == text(target)`
+//!   (data-migration.md §10, V5(c)): the input and the expected file have
+//!   the same search text (ADR 0020 §2), which keeps every text node in
+//!   document order, separates blocks and collapses white space, so the
+//!   whitespace rule of N5b keeps it too. N1, which inserts the text of the
+//!   links it makes, adds the first exception;
 //! - N9 holds: the expected file is also the sanitiser's fixed point, except
 //!   for the fixtures in [`NOT_YET_CONTENT_V1`], whose output still holds
 //!   markup that a later step changes; for those the sanitiser check must
@@ -37,7 +43,7 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use backend3::domain::normalise::{FixedPointError, Rule, Step, check_fixed_point, normalise};
-use backend3::domain::rich_text::{SanitizePolicy, Sanitizer};
+use backend3::domain::rich_text::{SanitizePolicy, Sanitizer, html_to_search_text};
 
 use crate::support::repository_root;
 
@@ -51,6 +57,10 @@ const NOT_YET_CONTENT_V1: &[(&str, &str)] = &[
     (
         "n3-center-unclear-alignment",
         "N7 drops the text-align declaration that content-v1 does not keep",
+    ),
+    (
+        "n5-marks-in-a-table",
+        "N5b gives the table its content-v1 shape, and N7 drops its border and cellpadding",
     ),
     (
         "n5-table-align",
@@ -197,6 +207,12 @@ fn every_fixture_comes_out_as_expected_and_stays_there() {
             _ => panic!("{name}: the name starts with no step"),
         }
 
+        assert_eq!(
+            html_to_search_text(expected),
+            html_to_search_text(input),
+            "{name}: the text a reader reads changed (V5(c))"
+        );
+
         let checked = check_fixed_point(expected, &sanitizer);
         match NOT_YET_CONTENT_V1.iter().find(|(listed, _)| listed == name) {
             None => assert_eq!(checked, Ok(()), "{name}: N9 fails"),
@@ -214,6 +230,74 @@ fn every_fixture_comes_out_as_expected_and_stays_there() {
                  with the step that will"
             );
         }
+    }
+}
+
+#[test]
+fn each_inline_mark_fixture_counts_its_elements_under_its_rule() {
+    // One hit per legacy element, under its own rule, and nothing else:
+    // the run report's N5 counts are the element counts of data-migration.md
+    // §7.1 ("1 `span.marker`, 1 `big`, 1 `ins`, 23 `span[dir]`").
+    let fixtures = fixtures();
+    let expected: &[(&str, &[(Rule, usize)])] = &[
+        ("n5-b-to-strong", &[(Rule::BToStrong, 2)]),
+        ("n5-i-to-em", &[(Rule::IToEm, 1)]),
+        ("n5-ins-to-u", &[(Rule::InsToU, 1)]),
+        ("n5-strike-to-s", &[(Rule::StrikeToS, 1)]),
+        ("n5-del-to-s", &[(Rule::DelToS, 1)]),
+        ("n5-big-unwrapped", &[(Rule::BigUnwrapped, 1)]),
+        ("n5-span-marker", &[(Rule::MarkerHighlighted, 1)]),
+        ("n5-span-dir-unwrapped", &[(Rule::SpanDirUnwrapped, 2)]),
+        (
+            "n5-span-dir-style-dropped",
+            &[(Rule::SpanDirStyleDropped, 1)],
+        ),
+        (
+            "n5-span-marker-with-dir",
+            &[(Rule::MarkerHighlighted, 1), (Rule::SpanDirRemoved, 1)],
+        ),
+        (
+            "n5-marks-in-a-table",
+            &[(Rule::BigUnwrapped, 1), (Rule::MarkerHighlighted, 1)],
+        ),
+    ];
+    for (name, hits) in expected {
+        let (input, _) = &fixtures[*name];
+        let report = normalise(input).expect("a fixture settles").report;
+        assert_eq!(report.hits().collect::<Vec<_>>(), *hits, "{name}");
+    }
+    // Every other `n5-` fixture shows N5's block rules, and no inline one.
+    let inline = [
+        Rule::BToStrong,
+        Rule::IToEm,
+        Rule::InsToU,
+        Rule::StrikeToS,
+        Rule::DelToS,
+        Rule::BigUnwrapped,
+        Rule::MarkerHighlighted,
+        Rule::SpanDirUnwrapped,
+        Rule::SpanDirStyleDropped,
+        Rule::SpanDirRemoved,
+    ];
+    let listed: Vec<_> = expected.iter().map(|(name, _)| *name).collect();
+    for (name, (input, _)) in &fixtures {
+        if !name.starts_with("n5-") || listed.contains(&name.as_str()) {
+            continue;
+        }
+        let report = normalise(input).expect("a fixture settles").report;
+        assert!(
+            report.hits().all(|(rule, _)| !inline.contains(&rule)),
+            "{name}: an inline-mark fixture; list its hits in this test"
+        );
+    }
+    // And every inline rule has a fixture that shows it.
+    for rule in inline {
+        assert!(
+            expected
+                .iter()
+                .any(|(_, hits)| hits.iter().any(|(hit, _)| *hit == rule)),
+            "{rule:?} has no fixture"
+        );
     }
 }
 
