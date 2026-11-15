@@ -753,6 +753,10 @@ interface is `Clock` in `src/domain/clock.rs`.
    and activity entries are set by the database, never from the app clock:
    the `CURRENT_TIMESTAMP` column defaults on insert, and
    `Expr::current_timestamp()` in an UPDATE (research: DECISIONS R15, D90).
+   An account's `last_login_at` follows the same rule, a reading that
+   extends D90 to that column so that it equals the `occurred_at` of the
+   account's newest `login` entry (`users::ActiveModel::record_sign_in`
+   writes `GREATEST(last_login_at, CURRENT_TIMESTAMP)` and says why).
    Both give the start of the transaction, so every row that one save
    writes carries the same instant, and model write methods take no "now"
    for them (ADR 0011 section 7's `update(txn, actor, changes)`). The app
@@ -799,16 +803,36 @@ are in `src/domain/activity.rs` (`Actor`, `Action`, `check_entry`,
      the counts;
    - `request_id`: the controller takes it from Loco's `LocoRequestId`
      request extension, so the entries of one request group together;
-     `None` in tasks, jobs and the importer. Loco keeps an incoming
-     `x-request-id` header as that id (loco-rs 1.2.0
-     `src/controller/middleware/request_id.rs`: characters outside letters,
-     digits, `_`, `-` and `@` removed, at most 255 kept), so the text is the
-     caller's own and stays in the log for good. An entry written for a
-     caller who has not signed in (a failed sign-in) must decide whether to
-     record that text: the slice that adds the first such entry settles it
-     and updates this step;
+     `None` in tasks, jobs and the importer. It is always a UUID v4 that
+     Loco made: Loco would keep a client's `x-request-id` header as the id
+     (loco-rs 1.2.0 `src/controller/middleware/request_id.rs`), so
+     `App::after_routes` drops that header from every request before Loco's
+     middlewares run (`src/controllers/request_id.rs`; research: DECISIONS
+     R23 (D119)), and no entry holds text a caller chose, signed in or not.
+     The same id is in the request's log lines and the response's
+     `x-request-id` header. Do not read the header yourself;
    - `ip`: only for sign-in and account events, the address that Loco's
-     `remote_ip` middleware resolved.
+     `remote_ip` middleware resolved (ADR 0023 §2), canonical (an IPv4
+     address in its IPv6 form becomes the IPv4 address); `None` where the
+     configuration leaves the middleware off.
+
+   An admin handler gets the request id and the address from the extractor
+   `controllers::admin::client_context::ClientContext`, whose inner
+   `activity_log::RequestContext` it passes down to the model method that
+   writes the entry, as `users::ActiveModel::record_sign_in`, `log_out` and
+   `users::record_failed_sign_in` do. A sign-in or account entry is about
+   the account: `entity` is `EntityRef::record("users", id)`. Its actor is
+   the account that acted (`Actor::User(id)`), which is how the
+   anonymisation finds the entries whose `ip` it clears (`actor_id = <id>`,
+   ADR 0011 section 6). The one exception so far is `login_failed`: its
+   caller has not signed in, so it is written by `Actor::System`, and
+   section 6 names it separately ("`login_failed` entries for the
+   account"), so a failed attempt is never put on the account's owner.
+   Every other account entry, including one written before a full sign-in
+   (`password_changed` by a reset link, `recovery_code_used` at the
+   two-factor step), takes the account as its actor unless its own slice
+   decides otherwise and amends section 6 to match; `account_locked` is
+   settled by the ADR that adds it (login-throttle-address).
 2. **Record it on the change's transaction**:
    `activity_log::record(&txn, actor, entry)`, with the actor passed down
    from the controller (`Actor::User(session.user.id)`, the account of the
@@ -816,7 +840,14 @@ are in `src/domain/activity.rs` (`Actor`, `Action`, `check_entry`,
    and queue jobs and `Actor::Import` in the importer (ADR 0011 section 2). A
    failed insert then rolls the change back, and a rolled-back change leaves
    no entry. Only an entry that records no data change (a failed sign-in)
-   goes on a connection of its own, so it survives the request's rollback.
+   goes on a connection of its own, so it survives the request's rollback:
+   its model function takes the pool, `&DatabaseConnection`, never a
+   transaction (`users::record_failed_sign_in(&ctx.db, ...)`), so it cannot
+   be put on the request's transaction by mistake. A refused entry of a
+   failed sign-in never changes its answer: the handler logs it and answers
+   the same `401` as for an unknown address, so a database that refuses
+   writes cannot tell which addresses belong to an account (ADR 0006
+   section 4, ADR 0023 section 3; `controllers::admin::auth`).
    `record` refuses an entry that breaks a rule of `check_entry` before it
    writes anything. Leave `occurred_at` alone: it comes from PostgreSQL's
    clock (recipe 7 step 6).

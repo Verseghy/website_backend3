@@ -93,6 +93,7 @@ async fn the_seed_creates_the_invented_account_with_a_hash_made_at_seed_time() {
             users::Model::authenticate(&ctx.db, SEED_ACCOUNT.email, SEED_ACCOUNT.password)
                 .await
                 .expect("authenticate")
+                .accepted()
                 .is_some()
         );
     })

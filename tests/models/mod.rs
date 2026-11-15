@@ -7,5 +7,6 @@ mod media;
 mod revisions;
 mod roles;
 mod safety_net;
+mod sign_in_entries;
 mod task_lock;
 mod users;

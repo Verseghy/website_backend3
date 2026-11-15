@@ -22,7 +22,7 @@ use backend3::{
 };
 use loco_rs::{
     config::{CacheConfig, Config, QueueConfig, WorkerMode},
-    controller::middleware::limit_payload::DefaultBodyLimitKind,
+    controller::middleware::{limit_payload::DefaultBodyLimitKind, remote_ip::ClientIpSource},
     environment::Environment,
 };
 
@@ -128,6 +128,20 @@ fn test_config_is_safe_and_deterministic() {
         settings.admin_ui.dist_dir.to_str(),
         Some("tests/fixtures/admin-dist")
     );
+}
+
+#[test]
+fn the_tests_resolve_the_client_address_from_the_router_hop() {
+    // The request tests of the sign-in and account entries check the
+    // address that ADR 0023 §2's source gives: the rightmost
+    // X-Forwarded-For value, or the socket address without the header.
+    let remote_ip = load(&Environment::Test)
+        .server
+        .middlewares
+        .remote_ip
+        .expect("remote_ip configured");
+    assert!(remote_ip.enable);
+    assert_eq!(remote_ip.source, ClientIpSource::RightmostXForwardedFor);
 }
 
 #[test]

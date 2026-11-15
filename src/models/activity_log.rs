@@ -25,7 +25,13 @@
 //!   `Expr::current_timestamp()`.
 //! - **The request id is passed in**, in [`Entry::request_id`]: the controller
 //!   takes it from Loco's `LocoRequestId` request extension, so the entries
-//!   of one request (a week-editor save, a bulk action) can be grouped.
+//!   of one request (a week-editor save, a bulk action) can be grouped. It is
+//!   always an id the server made: backend3 drops any `x-request-id` header
+//!   a client sends before Loco reads it (`crate::controllers::request_id`;
+//!   research: DECISIONS R23 (D119)).
+//! - **A request's two parts travel together**, as a [`RequestContext`]: the
+//!   request id and the client address, which an account entry records and
+//!   a model method cannot read for itself (ADR 0008 rule 3).
 //!
 //! It holds the client address as `ipnetwork::IpNetwork`, the type Sea-ORM's
 //! `with-ipnetwork` feature maps `inet` to; callers pass a plain
@@ -138,11 +144,13 @@ pub struct Entry {
     pub details: Option<Map<String, Value>>,
     /// The request id that groups the entries of one request: Loco's
     /// `LocoRequestId`, 1 to 255 characters. `None` outside a request (tasks,
-    /// queue jobs, the importer). Loco keeps an incoming `x-request-id`
-    /// header as the id (without the characters outside letters, digits,
-    /// `_`, `-` and `@`), so the text is the caller's own; recipe 8 of the
-    /// project skill says what that means for an entry written before the
-    /// caller has signed in.
+    /// queue jobs, the importer). It is always a UUID v4 that Loco made for
+    /// the request: Loco would keep a client's `x-request-id` header as the
+    /// id, so backend3 drops that header from every request before Loco's
+    /// middlewares run (`crate::controllers::request_id`; research:
+    /// DECISIONS R23 (D119)), and no entry ever holds text that a caller
+    /// chose, whether the caller has signed in or not. The same id is in the
+    /// request's log lines and the response's `x-request-id` header.
     pub request_id: Option<String>,
     /// The client address, only for sign-in and account events (ADR 0011
     /// §5): the address Loco's `remote_ip` middleware resolved.
@@ -178,6 +186,26 @@ impl Entry {
             has_client_address: self.ip.is_some(),
         }
     }
+}
+
+/// The parts of an entry that come from the request it is written for: the
+/// request id and the client address (ADR 0011 §5).
+///
+/// The admin controllers build it with the extractor
+/// `crate::controllers::admin::client_context::ClientContext` and pass it
+/// down to the model method that records the event, which cannot read the
+/// request itself (ADR 0008 rule 3). [`RequestContext::default`] has
+/// neither, as for work outside a request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestContext {
+    /// The request id, for [`Entry::request_id`]: the id that Loco made for
+    /// the request, or `None` when there is none.
+    pub request_id: Option<String>,
+    /// The client address, for [`Entry::ip`]: the address that Loco's
+    /// `remote_ip` middleware resolved (ADR 0023 §2), or `None` when it
+    /// resolved none. Only sign-in and account entries may hold it, so a
+    /// content entry leaves it out.
+    pub ip: Option<IpAddr>,
 }
 
 /// Appends one entry to the activity log and returns the stored row.

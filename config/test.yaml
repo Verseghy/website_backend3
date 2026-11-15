@@ -53,6 +53,14 @@ server:
       overrides:
         Content-Security-Policy: "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
         Referrer-Policy: "strict-origin-when-cross-origin"
+    # ADR 0023 §2's client address: the rightmost X-Forwarded-For value, or
+    # the socket address without that header. The sign-in and account
+    # entries of the activity log record it (ADR 0011 §5), and the request
+    # tests check it against this, the source ADR 0023 §2 gives production.
+    # Loco leaves the middleware off when the key is absent.
+    remote_ip:
+      enable: true
+      source: RightmostXForwardedFor
 
 # Jobs run inline and deterministically in tests (ADR 0016 §3), so no queue
 # connection is configured.

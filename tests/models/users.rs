@@ -375,7 +375,7 @@ async fn seed_account_creates_an_active_account_that_signs_in() {
         let signed_in = Model::authenticate(&ctx.db, "mag.proba@EXAMPLE.test", SEED.password)
             .await
             .expect("authenticate");
-        assert_eq!(signed_in.map(|user| user.id), Some(created.id));
+        assert_eq!(signed_in.accepted().map(|user| user.id), Some(created.id));
         // Its roles, and no extra grant.
         assert_eq!(
             created.grants(&ctx.db).await.expect("grants"),
@@ -539,7 +539,7 @@ async fn every_failed_sign_in_costs_what_a_wrong_password_costs() {
             async move {
                 let start = Instant::now();
                 let outcome = Model::authenticate(&db, email, "wrong password").await;
-                assert_eq!(outcome.expect("query"), None);
+                assert_eq!(outcome.expect("query").accepted(), None);
                 start.elapsed()
             }
         };
