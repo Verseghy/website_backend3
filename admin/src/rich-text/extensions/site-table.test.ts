@@ -21,12 +21,7 @@ import {
 import type { Json } from "@/test/rich-text-policy"
 import { policyWith } from "@/test/rich-text-policy"
 import { storedHtmlHarness } from "@/test/stored-html"
-import {
-  parseHtml,
-  renderHtml,
-  siteSchema,
-  TestMedia,
-} from "@/test/site-schema"
+import { parseHtml, renderHtml, siteSchema } from "@/test/site-schema"
 
 /**
  * The table nodes of the site schema (editor.md §4.3 rows 5-7): the cell
@@ -478,20 +473,23 @@ describe("the table nodes", () => {
   })
 
   it("keep media out of cells", () => {
-    const withMedia = siteSchema({ media: [TestMedia] })
+    const withMedia = siteSchema()
     const doc = parseHtml(
       withMedia,
-      '<table><tr><td><p>a</p><p data-test-media=""></p></td></tr></table>'
+      '<table><tr><td><p>a</p><p><img src="/storage/uploads/a.jpg" alt="a"></p></td></tr></table>'
     )
     expect(withMedia.nodes.tableCell.spec.content).toBe("block+")
     let inCell = false
     doc.descendants((node, _position, parent) => {
-      if (node.type.name === "testMedia" && parent?.type.name !== "doc") {
+      if (node.type.name === "siteImage" && parent?.type.name !== "doc") {
         inCell = true
       }
       return true
     })
     expect(inCell).toBe(false)
+    const topLevel: string[] = []
+    doc.forEach((node) => topLevel.push(node.type.name))
+    expect(topLevel).toContain("siteImage")
   })
 
   it("refuse a policy without the forced table style", () => {

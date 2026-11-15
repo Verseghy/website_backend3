@@ -350,6 +350,8 @@ fn urls(policy: &SanitizePolicy) -> Urls<'_> {
                 .map(|provider| Provider {
                     hosts: &provider.hosts,
                     path_prefix: &provider.path_prefix,
+                    id_length: provider.id_length,
+                    list_only_id: provider.list_only_id.as_deref(),
                     query: provider
                         .query
                         .parameters()
@@ -669,10 +671,16 @@ struct Embed<'a> {
     providers: Vec<Provider<'a>>,
 }
 
+/// One embed provider. `id_length` and `list_only_id` carry the id rules
+/// of [`super::policy::EmbedProvider`], so the editor's `YouTube` node reads
+/// the 11-character rule and the `videoseries` rule from the file instead of
+/// a copy of its own (ADR 0043 §3, items D129 and D132).
 #[derive(Serialize)]
 struct Provider<'a> {
     hosts: &'a [String],
     path_prefix: &'a str,
+    id_length: Option<usize>,
+    list_only_id: Option<&'a str>,
     query: Vec<QueryParameter>,
 }
 
@@ -751,7 +759,7 @@ mod tests {
         );
         let policy = content_v1();
         assert_eq!(policy["$comment"], POLICY_COMMENT);
-        assert_eq!(policy["policy_version"], "content-v1");
+        assert_eq!(policy["policy_version"], "content-v2");
     }
 
     #[test]
@@ -909,7 +917,15 @@ mod tests {
         );
         let iframe = style("iframe");
         assert_eq!(
-            iframe[2]["grammar"],
+            iframe[2],
+            json!({
+                "property": "min-height",
+                "grammar": {"kind": "locked", "value": "200px"},
+                "role": "stored", "presence": "optional", "provisional": null,
+            })
+        );
+        assert_eq!(
+            iframe[3]["grammar"],
             json!({"kind": "auto_or_px", "min": 100, "max": 2000})
         );
         assert_eq!(style("img")[1]["presence"], "always");
@@ -971,9 +987,11 @@ mod tests {
                         {
                             "hosts": ["www.youtube.com", "www.youtube-nocookie.com"],
                             "path_prefix": "/embed/",
+                            "id_length": 11,
+                            "list_only_id": "videoseries",
                             "query": [{"name": "start", "value": "digits"}, {"name": "list", "value": "id"}],
                         },
-                        {"hosts": ["padlet.com"], "path_prefix": "/embed/", "query": []},
+                        {"hosts": ["padlet.com"], "path_prefix": "/embed/", "id_length": null, "list_only_id": null, "query": []},
                     ],
                 },
             })
@@ -1190,24 +1208,44 @@ mod tests {
         assert_eq!(forbidden_tags_in(&names, FORBIDDEN_TAGS), [""; 0]);
     }
 
-    /// The manifest describes the embed query rule as data; this keeps that
+    /// The manifest describes the embed rules as data; this keeps that
     /// description equal to what [`embed_src`] does for both providers.
     #[test]
     fn the_embed_query_description_matches_the_url_rule() {
         let policy = SanitizePolicy::content_v1();
         let accepted = |url: &str| embed_src(&policy, url).is_some();
         for (url, expected) in [
-            ("https://www.youtube.com/embed/abc", true),
-            ("https://www.youtube.com/embed/abc?start=30", true),
-            ("https://www.youtube.com/embed/abc?list=PL_x-1", true),
-            ("https://www.youtube.com/embed/abc?start=30&list=PL", true),
-            ("https://www.youtube.com/embed/abc?list=PL&start=30", false),
-            ("https://www.youtube.com/embed/abc?start=", false),
-            ("https://www.youtube.com/embed/abc?start=3a", false),
-            ("https://www.youtube.com/embed/abc?list=a.b", false),
-            ("https://www.youtube.com/embed/abc?si=x", false),
-            ("https://www.youtube.com/embed/abc?", false),
+            ("https://www.youtube.com/embed/AbCdEfGhIjK", true),
+            ("https://www.youtube.com/embed/AbCdEfGhIjK?start=30", true),
+            (
+                "https://www.youtube.com/embed/AbCdEfGhIjK?list=PL_x-1",
+                true,
+            ),
+            (
+                "https://www.youtube.com/embed/AbCdEfGhIjK?start=30&list=PL",
+                true,
+            ),
+            (
+                "https://www.youtube.com/embed/AbCdEfGhIjK?list=PL&start=30",
+                false,
+            ),
+            ("https://www.youtube.com/embed/AbCdEfGhIjK?start=", false),
+            ("https://www.youtube.com/embed/AbCdEfGhIjK?start=3a", false),
+            ("https://www.youtube.com/embed/AbCdEfGhIjK?list=a.b", false),
+            ("https://www.youtube.com/embed/AbCdEfGhIjK?si=x", false),
+            ("https://www.youtube.com/embed/AbCdEfGhIjK?", false),
+            // `id_length`: 11, and `list_only_id`: `videoseries` with `list`.
+            ("https://www.youtube.com/embed/abc", false),
+            ("https://www.youtube.com/embed/AbCdEfGhIjKl", false),
+            ("https://www.youtube.com/embed/videoseries?list=PL", true),
+            (
+                "https://www.youtube.com/embed/videoseries?start=1&list=PL",
+                true,
+            ),
+            ("https://www.youtube.com/embed/videoseries?start=1", false),
+            ("https://www.youtube.com/embed/videoseries", false),
             ("https://padlet.com/embed/key", true),
+            ("https://padlet.com/embed/k", true),
             ("https://padlet.com/embed/key?start=1", false),
             ("http://padlet.com/embed/key", false),
             ("https://padlet.com/embed/a b", false),
@@ -1218,10 +1256,12 @@ mod tests {
         let manifest = content_v1();
         let youtube = &manifest["urls"]["embed"]["providers"][0];
         assert_eq!(youtube["query"][0]["name"], "start");
-        assert_eq!(
-            manifest["urls"]["embed"]["providers"][1]["query"],
-            json!([])
-        );
+        assert_eq!(youtube["id_length"], 11);
+        assert_eq!(youtube["list_only_id"], "videoseries");
+        let padlet = &manifest["urls"]["embed"]["providers"][1];
+        assert_eq!(padlet["query"], json!([]));
+        assert_eq!(padlet["id_length"], Value::Null);
+        assert_eq!(padlet["list_only_id"], Value::Null);
     }
 
     proptest! {
@@ -1258,12 +1298,12 @@ mod tests {
             let mut policy = SanitizePolicy::content_v1();
             policy.own_hosts.clone_from(&hosts);
             policy.image_path_prefix.clone_from(&image_path_prefix);
-            policy.embed_providers[1] = EmbedProvider { hosts: padlet_hosts.clone(), path_prefix: "/e/".into(), query: EmbedQuery::None };
+            policy.embed_providers[1] = EmbedProvider { hosts: padlet_hosts.clone(), path_prefix: "/e/".into(), id_length: Some(16), list_only_id: None, query: EmbedQuery::None };
             let json = policy_json(&PolicyTables::CONTENT_V1, &policy).unwrap();
             let parsed: Value = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(&parsed["urls"]["own_hosts"], &json!(hosts));
             prop_assert_eq!(&parsed["urls"]["image"]["path_prefix"], &json!(image_path_prefix));
-            prop_assert_eq!(&parsed["urls"]["embed"]["providers"][1], &json!({"hosts": padlet_hosts, "path_prefix": "/e/", "query": []}));
+            prop_assert_eq!(&parsed["urls"]["embed"]["providers"][1], &json!({"hosts": padlet_hosts, "path_prefix": "/e/", "id_length": 16, "list_only_id": null, "query": []}));
             // Nothing outside the URL section depends on the policy.
             for key in ["tags", "elements", "removed_with_content", "removed_by_namespace_check", "forbidden_tags", "css"] {
                 prop_assert_eq!(&parsed[key], &CONTENT_V1[key]);

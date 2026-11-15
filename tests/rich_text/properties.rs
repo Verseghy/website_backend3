@@ -77,13 +77,18 @@ const URLS: &[&str] = &[
     "javascript&colon;alert(1)", "data:image/png;base64,AA", "data:text/html,<script>x</script>",
     "vbscript:x", "blob:https://verseghy-gimnazium.net/1", "file:///etc/passwd",
     "//evil.example/x", "/\\evil.example", "/%2F/evil", "\\\\evil.example",
-    "https://user@www.youtube.com/embed/x", "https://www.youtube.com:8443/embed/x",
-    "https://www.youtube.com/embed/x/extra", "https://www.youtube.com.evil.example/embed/x",
-    "https://www.youtube-nocookie.com/embed/VIDEOID?start=30", "https://padlet.com/embed/KEY",
+    "https://user@www.youtube.com/embed/AbCdEfGhIjK", "https://www.youtube.com:8443/embed/AbCdEfGhIjK",
+    "https://www.youtube.com/embed/AbCdEfGhIjK/extra", "https://www.youtube.com.evil.example/embed/x",
+    "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30", "https://padlet.com/embed/KEY",
     // Queries the embed rule refuses: an unknown parameter, the wrong order,
     // an empty value (editor.md §3.6).
-    "https://www.youtube.com/embed/x?si=x", "https://www.youtube.com/embed/x?list=a&start=1",
-    "https://www.youtube.com/embed/x?start=",
+    "https://www.youtube.com/embed/AbCdEfGhIjK?si=x", "https://www.youtube.com/embed/AbCdEfGhIjK?list=a&start=1",
+    "https://www.youtube.com/embed/AbCdEfGhIjK?start=",
+    // The YouTube id rules (ADR 0043): ids of the wrong length, `videoseries`
+    // with and without `list`, and the `listType` form only the editor maps.
+    "https://www.youtube.com/embed/x", "https://www.youtube.com/embed/AbCdEfGhIjKl",
+    "https://www.youtube.com/embed/videoseries", "https://www.youtube.com/embed/videoseries?list=PL1",
+    "https://www.youtube.com/embed?listType=playlist&list=PL1",
     // Links into /storage/ that name a directory, which the link rule keeps.
     "/storage/x.svg/", "/storage/x.svg%2F",
     "/storage/uploads/../../x.jpg", "/storage/uploads/a.jpg", "/storage/uploads/a%2F..%2Fb.jpg",

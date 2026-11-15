@@ -15,6 +15,7 @@ import {
   goldenChanges,
   goldenFiles,
 } from "@/test/golden-e1"
+import { MEDIA_BODIES } from "@/test/editor-fixtures"
 import { storedHtmlHarness } from "@/test/stored-html"
 
 /**
@@ -42,6 +43,8 @@ describe("the golden files of tests/fixtures/e1", () => {
     expect([...groups].sort()).toEqual([
       "canonical",
       "command",
+      "embed",
+      "media",
       "regression",
       "table",
     ])
@@ -58,6 +61,26 @@ describe("the golden files of tests/fixtures/e1", () => {
 
   it("start the command fixtures from a body with a paragraph", () => {
     expect(harness.J(COMMAND_START)).toBe(COMMAND_START)
+  })
+
+  it.each(Object.entries(MEDIA_BODIES))(
+    "store the canonical media body %s unchanged",
+    (_name, body) => {
+      expect(harness.J(body)).toBe(body)
+    }
+  )
+
+  it("turn every YouTube fixture into one embed (ADR 0043)", () => {
+    const embeds = [...FILES].filter(([file]) => file.startsWith("embed-"))
+    expect(embeds).toHaveLength(28)
+    for (const [file, html] of embeds) {
+      expect(
+        html.match(
+          /<p data-youtube-video=""><iframe src="https:\/\/www\.youtube-nocookie\.com\/embed\//g
+        ),
+        file
+      ).toHaveLength(1)
+    }
   })
 
   it("are written to the directory", () => {

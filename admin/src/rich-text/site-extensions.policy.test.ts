@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 
 import { canonicalStyle } from "./css/canonical-style"
 import { isAllowedHref } from "./link-href"
+import { embedSrc, imageSrc } from "./media-src"
 import type { AttributeValueRule } from "./policy"
 import { CONTENT_V1_POLICY } from "./policy"
 import {
@@ -16,36 +17,11 @@ import { siteSchema, specElements } from "@/test/site-schema"
 /**
  * The schema's elements and attributes against the committed `policy.json`
  * (editor.md §3.2, §3.3): what the render rules can write is exactly what
- * content-v1 stores, minus what later nodes add, and never a value the
- * server would change or drop.
+ * content-v1 stores, every element and attribute of it, and never a value
+ * the server would change or drop.
  */
 const POLICY = CONTENT_V1_POLICY
 const schema = siteSchema()
-
-/**
- * What the schema does not render yet, and the editor.md §4.3 rows that add
- * it. When one of them lands, its entry goes, and this test then demands
- * that the schema renders exactly the policy's rules for it.
- */
-const PENDING: Readonly<
-  Record<
-    string,
-    {
-      readonly tags: readonly string[]
-      readonly attributes: Readonly<Record<string, readonly string[]>>
-    }
-  >
-> = {
-  "SiteImage, YoutubeEmbed and PadletEmbed (rows 8-10)": {
-    tags: ["img", "iframe"],
-    attributes: { p: ["data-youtube-video", "data-padlet-embed"] },
-  },
-}
-const pendingTags = new Set(Object.values(PENDING).flatMap(({ tags }) => tags))
-const pendingAttribute = (tag: string, name: string) =>
-  Object.values(PENDING).some(({ attributes }) =>
-    attributes[tag]?.includes(name)
-  )
 
 const alignments = ["left", "center", "right", "justify"]
 
@@ -91,10 +67,14 @@ const CELL_SAMPLES: Readonly<Record<string, readonly unknown[]>> = {
 /**
  * The types whose attributes are sampled one at a time rather than in every
  * combination: a cell has thirteen attributes, and their product would be
- * millions of samples. Each value is rendered alone, and once with every
+ * millions of samples; an image has six, which would still be thousands. Each value is rendered alone, and once with every
  * attribute at its first stored value.
  */
-const ONE_AT_A_TIME: ReadonlySet<string> = new Set(["tableCell", "tableHeader"])
+const ONE_AT_A_TIME: ReadonlySet<string> = new Set([
+  "tableCell",
+  "tableHeader",
+  "siteImage",
+])
 
 /**
  * Values for every attribute of every node and mark type: each value the
@@ -166,6 +146,32 @@ const SAMPLES: Readonly<
   tableRow: {},
   tableCell: CELL_SAMPLES,
   tableHeader: CELL_SAMPLES,
+  siteImage: {
+    src: [
+      null,
+      "/storage/uploads/posts/1/a.jpg",
+      "https://verseghy-gimnazium.net/storage/uploads/b.PNG",
+      "/storage/uploads/a.svg",
+      "javascript:alert(1)",
+      "blob:x",
+    ],
+    alt: [null, "", "  ", "kép"],
+    displayWidth: [null, 175, 350.5, 700, 2000, 2001, 0, -1, "350"],
+    ratio: [null, 1.4142857142857144, 0.5, 1e6, Number.NaN],
+    uploadState: [null, "pending", "failed"],
+    localKey: [null, "k1"],
+  },
+  youtubeEmbed: {
+    videoId: [null, "dQw4w9WgXcQ", "videoseries", "abc", "AbCdEfGhIjKl"],
+    start: [null, 0, 90, -1, 1.5],
+    list: [null, "PLMOZDTW7ZvXM", "a.b"],
+    title: [null, "Videó", "YouTube video player"],
+  },
+  padletEmbed: {
+    key: [null, "KEY", "a b"],
+    height: [608, 100, 2000, 99, 2001, "608", null],
+    title: [null, "Padlet"],
+  },
 }
 
 /** The node and mark types that render elements. */
@@ -299,8 +305,26 @@ function valueProblem(
       return isAllowedHref(value, POLICY.urls)
         ? null
         : "is a link the server refuses"
-    default:
-      return `has the rule ${rule.kind}, which this test does not check yet`
+    case "image_src":
+      return imageSrc(value, POLICY.urls) === value
+        ? null
+        : "is an image path the server refuses or rewrites"
+    case "embed_src":
+      return embedSrc(value, POLICY.urls) === value
+        ? null
+        : "is an embed address the server refuses or rewrites"
+    case "integer_or_full": {
+      const number = Number(value)
+      return value === rule.full ||
+        (/^[0-9]+$/.test(value) && number >= rule.min && number <= rule.max)
+        ? null
+        : "is neither a stored integer nor the full width"
+    }
+    default: {
+      // Every kind is checked; a new one fails `npm run typecheck` here.
+      const unchecked: never = rule
+      return `has the rule ${JSON.stringify(unchecked)}, which this test does not check yet`
+    }
   }
 }
 
@@ -322,25 +346,12 @@ describe("the site schema against policy.json", () => {
     expect(missing, "add sample values for these to SAMPLES").toEqual([])
   })
 
-  it("renders exactly the policy's elements, apart from the pending ones", () => {
+  it("renders exactly the policy's elements", () => {
     const tags = new Set(rendered.map(({ tag }) => tag))
-    expect([...tags].sort()).toEqual(
-      POLICY.tags.filter((tag) => !pendingTags.has(tag)).sort()
-    )
+    expect([...tags].sort()).toEqual([...POLICY.tags].sort())
   })
 
-  it("lists as pending only elements the schema lacks", () => {
-    const tags = new Set(rendered.map(({ tag }) => tag))
-    for (const tag of pendingTags) {
-      expect(POLICY.tags, tag).toContain(tag)
-      expect(
-        tags.has(tag),
-        `${tag} is rendered now; remove it from PENDING`
-      ).toBe(false)
-    }
-  })
-
-  it.each(POLICY.tags.filter((tag) => !pendingTags.has(tag)))(
+  it.each(POLICY.tags)(
     "renders exactly the policy's attributes on %s",
     (tag) => {
       const names = new Set(
@@ -348,14 +359,12 @@ describe("the site schema against policy.json", () => {
           .filter((element) => element.tag === tag)
           .flatMap(({ attributes }) => Object.keys(attributes))
       )
-      const expected = POLICY.elements[tag].attributes
-        .map(({ name }) => name)
-        .filter((name) => !pendingAttribute(tag, name))
+      const expected = POLICY.elements[tag].attributes.map(({ name }) => name)
       expect([...names].sort()).toEqual([...expected].sort())
     }
   )
 
-  it.each(POLICY.tags.filter((tag) => !pendingTags.has(tag)))(
+  it.each(POLICY.tags)(
     "can store every CSS property the policy stores on %s",
     (tag) => {
       const declared = new Set(

@@ -9,9 +9,8 @@
 //! CSS grammar of editor.md §3.3 is the same kind of data and lives beside
 //! its parser, in [`super::css::grammar`]. Any change here or there is a
 //! policy change: it bumps [`POLICY_VERSION`] and ships with a
-//! `content_normalize` run (editor.md §3). The R11 hardening, made before
-//! any body was stored, is the one change that did not, and
-//! [`POLICY_VERSION`] records why.
+//! `content_normalize` run (editor.md §3). Two changes made before any body
+//! was stored went in without a bump; [`POLICY_VERSION`] records them.
 //!
 //! [`SanitizePolicy`] holds what differs between deployments: the embed
 //! providers, the image path prefix, backend3's own hosts, and the bounds on
@@ -29,9 +28,20 @@ use url::{Host, Url};
 /// The hardening of research: DECISIONS R11 (the stricter `img[src]` rule
 /// and the §3.5 wording) changed content-v1 in place, without a bump, because
 /// no body was stored yet; the maintainer confirmed that on 2026-10-25
-/// ("Confirm all four as built", item D87, research: DECISIONS R15). Every
-/// later change bumps this version (editor.md §3).
-pub const POLICY_VERSION: &str = "content-v1";
+/// ("Confirm all four as built", item D87, research: DECISIONS R15). The
+/// nested-link rule of the structural pass was added in place too (item
+/// D112, research: DECISIONS R21; ADR 0037).
+///
+/// `content-v2` is the first bump, and the name the second register gave the
+/// next version (D87). It carries the `YouTube` rules of ADR 0043: a video id
+/// of exactly 11 characters, `videoseries` only together with `list`, and
+/// the locked `min-height: 200px` on the player (items D129, D132 and D133,
+/// research: DECISIONS R28; ADR 0043 §7). The empty first paragraph that
+/// editor.md §3.7 keeps in front of a list item's nested lists shares it
+/// (item D148, research: DECISIONS R31). No body was stored under
+/// `content-v1`, so `content_normalize` has nothing to rewrite (editor.md
+/// §3). Every later change bumps this version again.
+pub const POLICY_VERSION: &str = "content-v2";
 
 /// How the value of one allowed attribute is checked (editor.md §3.2, §7.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +329,17 @@ pub const EMBED_SCHEME: &str = "https";
 pub const EMBED_ID_ALPHABET: &str =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 
+/// The length of a `YouTube` video id: exactly 11 characters of
+/// [`EMBED_ID_ALPHABET`], the only length `YouTube` documents (its `IFrame`
+/// API refuses any other with error 2). Every video id of the legacy content
+/// has it (ADR 0043 §3, item D132, research: DECISIONS R28).
+pub const YOUTUBE_VIDEO_ID_LENGTH: usize = 11;
+
+/// The literal `YouTube` path id that embeds a whole playlist, the one that
+/// `list` names. It is a path only together with `list` (ADR 0043 §3, item
+/// D129, research: DECISIONS R28).
+pub const YOUTUBE_LIST_ONLY_ID: &str = "videoseries";
+
 /// The one non-integer value of `iframe[width]` ([`ValueRule::IntegerOrFull`]).
 pub const IFRAME_FULL_WIDTH: &str = "100%";
 
@@ -421,6 +442,14 @@ pub struct EmbedProvider {
     pub hosts: Vec<String>,
     /// The path prefix before the video or board id, such as `/embed/`.
     pub path_prefix: String,
+    /// The exact length of an id, or `None` for any length of at least one
+    /// character. [`Self::list_only_id`] is exempt.
+    pub id_length: Option<usize>,
+    /// A literal id that is accepted only when the query carries `list`,
+    /// whatever [`Self::id_length`] says: `YouTube`'s `videoseries`, which
+    /// embeds the playlist that `list` names. `None` when the provider has
+    /// none.
+    pub list_only_id: Option<String>,
     /// The query parameters the provider's URLs may carry.
     pub query: EmbedQuery,
 }
@@ -465,14 +494,20 @@ impl SanitizePolicy {
         let provider = |hosts: &[&str], query| EmbedProvider {
             hosts: hosts.iter().map(|&host| host.to_owned()).collect(),
             path_prefix: EMBED_PATH_PREFIX.to_owned(),
+            id_length: None,
+            list_only_id: None,
             query,
         };
         Self {
             embed_providers: vec![
-                provider(
-                    &["www.youtube.com", "www.youtube-nocookie.com"],
-                    EmbedQuery::StartAndList,
-                ),
+                EmbedProvider {
+                    id_length: Some(YOUTUBE_VIDEO_ID_LENGTH),
+                    list_only_id: Some(YOUTUBE_LIST_ONLY_ID.to_owned()),
+                    ..provider(
+                        &["www.youtube.com", "www.youtube-nocookie.com"],
+                        EmbedQuery::StartAndList,
+                    )
+                },
                 provider(&["padlet.com"], EmbedQuery::None),
             ],
             image_path_prefix: IMAGE_PATH_PREFIX.to_owned(),
@@ -514,6 +549,7 @@ impl SanitizePolicy {
             for (host_index, host) in provider.hosts.iter().enumerate() {
                 check_host(&format!("{key}.hosts[{host_index}]"), host)?;
             }
+            check_ids(&key, provider)?;
         }
         if !MAX_INPUT_BYTES_RANGE.contains(&self.max_input_bytes) {
             return Err(error(
@@ -577,6 +613,38 @@ fn check_prefix(key: &str, prefix: &str) -> Result<(), PolicyError> {
             ),
         ))
     }
+}
+
+/// The id rules of one provider: an id length of at least 1, and a list-only
+/// id written in [`EMBED_ID_ALPHABET`] on a provider whose query takes
+/// `list`, since without one it could never be accepted.
+fn check_ids(key: &str, provider: &EmbedProvider) -> Result<(), PolicyError> {
+    if provider.id_length == Some(0) {
+        return Err(error(
+            &format!("{key}.id_length"),
+            "must be at least 1, or none for any length",
+        ));
+    }
+    if let Some(id) = &provider.list_only_id {
+        let in_alphabet = !id.is_empty()
+            && id
+                .bytes()
+                .all(|b| EMBED_ID_ALPHABET.as_bytes().contains(&b));
+        let takes_list = provider
+            .query
+            .parameters()
+            .iter()
+            .any(|parameter| parameter.value == EmbedQueryValue::Id);
+        if !in_alphabet || !takes_list {
+            return Err(error(
+                &format!("{key}.list_only_id"),
+                &format!(
+                    "must be one or more characters of [A-Za-z0-9_-], on a provider whose query takes `list`, got `{id}`"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_host(key: &str, host: &str) -> Result<(), PolicyError> {
@@ -747,6 +815,69 @@ mod tests {
     }
 
     #[test]
+    fn the_youtube_id_rules_are_the_adr_0043_values() {
+        // ADR 0043 §3: exactly 11 characters (D132), and `videoseries` only
+        // with `list` (D129); Padlet keys keep any length.
+        assert_eq!(YOUTUBE_VIDEO_ID_LENGTH, 11);
+        assert_eq!(YOUTUBE_LIST_ONLY_ID, "videoseries");
+        let policy = SanitizePolicy::content_v1();
+        let [youtube, padlet] = &policy.embed_providers[..] else {
+            panic!("two providers");
+        };
+        assert_eq!(
+            youtube.hosts,
+            ["www.youtube.com", "www.youtube-nocookie.com"]
+        );
+        assert_eq!(youtube.id_length, Some(11));
+        assert_eq!(youtube.list_only_id.as_deref(), Some("videoseries"));
+        assert_eq!(youtube.query, EmbedQuery::StartAndList);
+        assert_eq!(padlet.hosts, ["padlet.com"]);
+        assert_eq!(padlet.id_length, None);
+        assert_eq!(padlet.list_only_id, None);
+        assert_eq!(padlet.query, EmbedQuery::None);
+    }
+
+    #[test]
+    fn validate_refuses_id_rules_that_could_never_match() {
+        let check = |change: fn(&mut SanitizePolicy)| {
+            let mut policy = SanitizePolicy::content_v1();
+            change(&mut policy);
+            policy.validate().map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            check(|p| p.embed_providers[0].id_length = Some(0)),
+            Err(
+                "rich-text policy `embed_providers[0].id_length`: must be at least 1, or none \
+                 for any length"
+                    .to_owned()
+            )
+        );
+        assert_eq!(check(|p| p.embed_providers[0].id_length = None), Ok(()));
+        assert_eq!(check(|p| p.embed_providers[1].id_length = Some(16)), Ok(()));
+        for (change, id) in [
+            (
+                (|p: &mut SanitizePolicy| p.embed_providers[0].list_only_id = Some(String::new()))
+                    as fn(&mut SanitizePolicy),
+                "",
+            ),
+            (
+                |p| p.embed_providers[0].list_only_id = Some("video series".into()),
+                "video series",
+            ),
+            (
+                // Padlet's query takes no `list`.
+                |p| p.embed_providers[1].list_only_id = Some("videoseries".into()),
+                "videoseries",
+            ),
+        ] {
+            let error = check(change).unwrap_err();
+            assert!(error.contains("`embed_providers["), "{error}");
+            assert!(error.contains(".list_only_id`"), "{error}");
+            assert!(error.ends_with(&format!("got `{id}`")), "{error}");
+        }
+    }
+
+    #[test]
     fn content_v1_is_valid() {
         assert_eq!(SanitizePolicy::content_v1().validate(), Ok(()));
     }
@@ -907,6 +1038,24 @@ mod tests {
             if !valid {
                 prop_assert_eq!(policy.validate().unwrap_err().key, "max_output_bytes");
             }
+        }
+
+        #[test]
+        fn an_id_length_is_valid_exactly_when_it_is_positive(length in proptest::option::of(0usize..64)) {
+            let mut policy = SanitizePolicy::content_v1();
+            policy.embed_providers[0].id_length = length;
+            prop_assert_eq!(policy.validate().is_ok(), length != Some(0));
+        }
+
+        #[test]
+        fn a_list_only_id_is_valid_exactly_in_the_id_alphabet(id in "[ -~]{0,12}") {
+            let mut youtube = SanitizePolicy::content_v1();
+            youtube.embed_providers[0].list_only_id = Some(id.clone());
+            let in_alphabet = !id.is_empty() && id.bytes().all(|b| EMBED_ID_ALPHABET.as_bytes().contains(&b));
+            prop_assert_eq!(youtube.validate().is_ok(), in_alphabet);
+            let mut padlet = SanitizePolicy::content_v1();
+            padlet.embed_providers[1].list_only_id = Some(id);
+            prop_assert!(padlet.validate().is_err(), "Padlet's query takes no list");
         }
 
         #[test]

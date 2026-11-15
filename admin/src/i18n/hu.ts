@@ -401,6 +401,53 @@ export const hu = {
     saved:
       "Letöltve: %{file}. Típusok: %{types}. Kitakart mappanevek: %{scrubbed}.",
   },
+  // The rich-text editor (ADR 0013, editor.md §4.3 rows 8-10): the image's
+  // controls in the editor, and the YouTube and Padlet insert dialogs.
+  editor: {
+    image: {
+      // editor.md §4.3 row 8 names the badge's text.
+      alt_missing: "Alt szöveg hiányzik",
+      alt_edit: "Alternatív szöveg",
+      alt_title: "A kép alternatív szövege",
+      alt_description:
+        "Írd le röviden, mi látható a képen. A képernyőolvasók ezt olvassák fel, és ez jelenik meg, ha a kép nem töltődik be.",
+      alt_label: "Alternatív szöveg",
+      sizes: "Képméret",
+      size_preset: "%{width} px",
+      uploading: "Feltöltés folyamatban…",
+      upload_failed: "A kép feltöltése nem sikerült.",
+    },
+    youtube: {
+      title: "YouTube-videó beillesztése",
+      description:
+        "Másold be a videó vagy a lejátszási lista címét, vagy a YouTube „Beágyazás” kódját.",
+      input_label: "YouTube-cím vagy beágyazási kód",
+      title_label: "A videó címe",
+      title_hint:
+        "A képernyőolvasók ezt olvassák fel. Ha üresen hagyod, „Videó” lesz.",
+      // ADR 0043 §4 (D134) gives this notice verbatim.
+      options_dropped:
+        "A YouTube-videó néhány beállítása (például a vezérlők elrejtése vagy az automatikus lejátszás) nem marad meg, a videó a szokásos lejátszóval jelenik meg.",
+      not_youtube:
+        "Ez nem egy YouTube-videó vagy lejátszási lista címe, és nem is YouTube-beágyazási kód.",
+      video_id:
+        "Ebben a YouTube-címben nincs érvényes videó- vagy listaazonosító. Másold ki újra a címet a YouTube-ról!",
+      list_type:
+        "Ezt a YouTube-listát nem lehet beágyazni: csak egy videó vagy egy lejátszási lista illeszthető be.",
+      not_top_level:
+        "Videót csak önálló bekezdésbe lehet beágyazni, listába, táblázatba, idézetbe vagy címsorba nem, ezért a YouTube-cím szövegként maradt.",
+      insert: "Beillesztés",
+    },
+    padlet: {
+      title: "Padlet beillesztése",
+      description:
+        "Másold be a Padlet beágyazási címét, amely így kezdődik: https://padlet.com/embed/",
+      input_label: "Padlet-cím",
+      not_padlet:
+        "Ez nem Padlet beágyazási cím. A címnek így kell kezdődnie: https://padlet.com/embed/",
+      insert: "Beillesztés",
+    },
+  },
   errors: {
     not_found: "A keresett elem nem található.",
     invalid_credentials: "Hibás e-mail-cím vagy jelszó.",

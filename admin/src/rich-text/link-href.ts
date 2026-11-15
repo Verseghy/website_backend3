@@ -30,7 +30,7 @@ import type { UrlPolicy } from "./policy"
  * (RFC 2606), so it stands for "the page's own origin" and can never be a
  * real host; the server uses the same base.
  */
-const SAME_ORIGIN_BASE = "https://same-origin.invalid/"
+export const SAME_ORIGIN_BASE = "https://same-origin.invalid/"
 
 /** The origin of {@link SAME_ORIGIN_BASE}. */
 const SAME_ORIGIN = new URL(SAME_ORIGIN_BASE).origin
@@ -62,9 +62,12 @@ function parse(href: string): Parsed {
  * How many of the first two characters of a relative URL are `/` or `\`
  * (which WHATWG parsing treats as `/`), after the parser's own clean-up:
  * leading and trailing C0 controls and spaces trimmed, tabs and newlines
- * removed. One means path-absolute; two means scheme-relative.
+ * removed. One means path-absolute; two means scheme-relative. The image
+ * rule (`media-src.ts`) shares it.
+ *
+ * @param href - a URL attribute value that has no scheme.
  */
-function leadingSlashes(href: string): number {
+export function leadingSlashes(href: string): number {
   let start = 0
   let end = href.length
   while (start < end && href.charCodeAt(start) <= 0x20) {
@@ -128,8 +131,14 @@ function servedPath(path: string): string {
   return `/${segments.join("/")}`
 }
 
-/** Whether the last segment of `path` ends in `.` plus one of `extensions`. */
-function endsWithExtension(
+/**
+ * Whether the last segment of `path` ends in `.` plus one of `extensions`,
+ * ignoring case. The image rule (`media-src.ts`) shares it.
+ *
+ * @param path - a URL path.
+ * @param extensions - the extensions, lower case, without the dot.
+ */
+export function endsWithExtension(
   path: string,
   extensions: readonly string[]
 ): boolean {
@@ -137,8 +146,14 @@ function endsWithExtension(
   return extensions.some((extension) => name.endsWith(`.${extension}`))
 }
 
-/** Whether a URL's host is one of the own hosts; a trailing dot is ignored. */
-function isOwnHost(url: URL, urls: UrlPolicy): boolean {
+/**
+ * Whether a URL's host is one of the own hosts; a trailing dot is ignored.
+ * The image rule (`media-src.ts`) shares it.
+ *
+ * @param url - a parsed absolute URL.
+ * @param urls - the policy's URL rules, for `own_hosts`.
+ */
+export function isOwnHost(url: URL, urls: UrlPolicy): boolean {
   const host = url.hostname.endsWith(".")
     ? url.hostname.slice(0, -1)
     : url.hostname

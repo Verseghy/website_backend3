@@ -77,7 +77,7 @@ fn the_committed_tag_list_holds_no_forbidden_tag() {
         sorted, element_names,
         "every tag has its rules, and only tags do"
     );
-    assert_eq!(policy["policy_version"], "content-v1");
+    assert_eq!(policy["policy_version"], "content-v2");
 }
 
 /// One JSON object per line, with the three members in order.

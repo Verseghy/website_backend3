@@ -1,10 +1,7 @@
-import { Editor, Node } from "@tiptap/core"
+import { Editor } from "@tiptap/core"
 import { afterEach, describe, expect, it } from "vitest"
 
-import {
-  DOCUMENT_CONTENT,
-  DOCUMENT_CONTENT_WITHOUT_MEDIA,
-} from "./extensions/site-document"
+import { DOCUMENT_CONTENT, MEDIA_GROUP } from "./extensions/site-document"
 import { LIST_TYPE_ATTRIBUTE } from "./extensions/site-lists"
 import { loadDocument } from "./load-document"
 import type { RichTextPolicy } from "./policy"
@@ -18,7 +15,6 @@ import {
   renderedElements,
   renderHtml,
   siteSchema,
-  TestMedia,
 } from "@/test/site-schema"
 
 type JsonObject = { [key: string]: Json }
@@ -53,12 +49,15 @@ describe("the site schema", () => {
         "horizontalRule",
         "listItem",
         "orderedList",
+        "padletEmbed",
         "paragraph",
+        "siteImage",
         "table",
         "tableCell",
         "tableHeader",
         "tableRow",
         "text",
+        "youtubeEmbed",
       ].sort()
     )
     expect(Object.keys(schema.marks).sort()).toEqual(
@@ -110,53 +109,62 @@ describe("the site schema", () => {
       "<h1>a</h1><h4>b</h4><p>c</p><p>d</p>"
     )
   })
-
-  it("holds blocks only while it has no media node", () => {
-    expect(schema.topNodeType.spec.content).toBe(DOCUMENT_CONTENT_WITHOUT_MEDIA)
-  })
 })
 
 describe("the media group", () => {
-  const schema = siteSchema({ media: [TestMedia] })
-  const media = schema.nodes.testMedia
+  const schema = siteSchema()
+  const MEDIA = ["siteImage", "youtubeEmbed", "padletEmbed"]
+  const image =
+    '<p><img src="/storage/uploads/a.jpg" alt="kép" style="display: block; height: auto; margin: 0 auto; max-width: 100%"></p>'
 
-  it("makes the document (block | media)+ once a media node exists", () => {
+  it("makes the document (block | media)+", () => {
     expect(schema.topNodeType.spec.content).toBe(DOCUMENT_CONTENT)
     expect(DOCUMENT_CONTENT).toBe("(block | media)+")
-    expect(schema.topNodeType.contentMatch.matchType(media)).not.toBeNull()
   })
 
-  it("is legal at the top level only", () => {
+  it.each(MEDIA)("holds %s as an atom of the media group only", (name) => {
+    const type = schema.nodes[name]
+    expect(type.spec.group).toBe(MEDIA_GROUP)
+    expect(type.isAtom).toBe(true)
+    expect(schema.topNodeType.contentMatch.matchType(type)).not.toBeNull()
+  })
+
+  it.each(MEDIA)("keeps %s at the top level only", (name) => {
+    const media = schema.nodes[name]
     for (const container of [
       "blockquote",
       "listItem",
       "heading",
       "paragraph",
+      "tableCell",
+      "tableHeader",
     ]) {
       const type = schema.nodes[container]
       const after = type.contentMatch.matchType(
-        container === "listItem" ? schema.nodes.paragraph : media
+        ["listItem", "tableCell", "tableHeader"].includes(container)
+          ? schema.nodes.paragraph
+          : media
       )
       expect(type.contentMatch.matchType(media), container).toBeNull()
       expect(after?.matchType(media) ?? null, container).toBeNull()
     }
   })
 
-  it("moves a media node out of a quote or list when it parses", () => {
+  it("moves an image out of a quote or list when it parses", () => {
     const doc = parseHtml(
       schema,
-      '<blockquote><p>a</p><p data-test-media=""></p></blockquote><ul><li><p data-test-media=""></p></li></ul>'
+      `<blockquote><p>a</p>${image}</blockquote><ul><li>${image}</li></ul>`
     )
     const topLevel: string[] = []
     doc.forEach((node) => topLevel.push(node.type.name))
     let nested = 0
     doc.forEach((node) =>
       node.descendants((child) => {
-        nested += child.type === media ? 1 : 0
+        nested += MEDIA.includes(child.type.name) ? 1 : 0
       })
     )
     expect(nested).toBe(0)
-    expect(topLevel.filter((name) => name === "testMedia")).toHaveLength(2)
+    expect(topLevel.filter((name) => name === "siteImage")).toHaveLength(2)
   })
 })
 
@@ -173,43 +181,43 @@ describe("siteExtensions options", () => {
       "siteExtensions: options.policy is required",
     ],
     [
-      "a media entry that is no node",
+      "a notify that is a string",
       () =>
         siteExtensions({
           policy: CONTENT_V1_POLICY,
-          media: [{} as unknown as Node],
-        }),
-      "siteExtensions: options.media[0] must be a TipTap Node",
+          notify: "editor.youtube.video_id",
+        } as unknown as { policy: RichTextPolicy }),
+      "siteExtensions: options.notify must be a function that takes an editor.* message key, or left out; got string.",
     ],
     [
-      "a media node that is also a block",
+      "a notify that is null",
       () =>
         siteExtensions({
           policy: CONTENT_V1_POLICY,
-          media: [TestMedia.extend({ group: "block media" })],
-        }),
-      'siteExtensions: media node "testMedia" has the group "block media"; it must be exactly "media"',
-    ],
-    [
-      "a media node without a group",
-      () =>
-        siteExtensions({
-          policy: CONTENT_V1_POLICY,
-          media: [Node.create({ name: "loose" })],
-        }),
-      'media node "loose" has the group null',
+          notify: null,
+        } as unknown as { policy: RichTextPolicy }),
+      "options.notify must be a function that takes an editor.* message key, or left out; got null.",
     ],
   ])("refuses %s", (_name, call, message) => {
     expect(call).toThrow(TypeError)
     expect(call).toThrow(message)
   })
 
-  it("accepts a media group given as a function", () => {
-    const extensions = siteExtensions({
-      policy: CONTENT_V1_POLICY,
-      media: [TestMedia.extend({ group: () => "media" })],
+  it("passes the notice callback to the YouTube paste rule", () => {
+    const notices: string[] = []
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: siteExtensions({
+        policy: CONTENT_V1_POLICY,
+        notify: (notice) => notices.push(notice),
+      }),
     })
-    expect(extensions.map(({ name }) => name)).toContain("testMedia")
+    editor.view.pasteText(
+      "https://www.youtube.com/embed/dQw4w9WgXcQ?controls=0",
+      pasteEvent({})
+    )
+    editor.destroy()
+    expect(notices).toEqual(["editor.youtube.options_dropped"])
   })
 
   it.each<[string, (json: JsonObject) => void, string]>([

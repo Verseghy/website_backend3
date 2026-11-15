@@ -12,10 +12,8 @@
  *   verbatim, through the stored-HTML serialiser's `verbatimDocument`
  *   (editor.md §6 step 1), without its post-pass, so tests see what the
  *   schema itself renders; the stored HTML proper is `toStoredHtml`.
- * - {@link TestMedia} stands in for the image and embed nodes, to test the
- *   media group before they exist.
  */
-import { getSchema, Node as TiptapNode } from "@tiptap/core"
+import { getSchema } from "@tiptap/core"
 import type {
   DOMOutputSpec,
   Mark,
@@ -33,7 +31,7 @@ import { verbatimDocument } from "@/rich-text/serialize/to-stored-html"
  * The ProseMirror schema of the site extensions.
  *
  * @param options - overrides of the default options (the committed policy,
- *   no media nodes).
+ *   no notices).
  */
 export function siteSchema(
   options: Partial<SiteExtensionsOptions> = {}
@@ -150,18 +148,6 @@ export function renderHtml(schema: Schema, doc: ProseMirrorNode): HTMLElement {
   )
   return container
 }
-
-/**
- * A stand-in media node: an atom in the `media` group that renders and
- * parses `<p data-test-media="">`. Only tests use it.
- */
-export const TestMedia = TiptapNode.create({
-  name: "testMedia",
-  group: "media",
-  atom: true,
-  parseHTML: () => [{ tag: "p[data-test-media]", priority: 60 }],
-  renderHTML: () => ["p", { "data-test-media": "" }],
-})
 
 /**
  * A `paste` event with clipboard data, for `view.pasteText` and

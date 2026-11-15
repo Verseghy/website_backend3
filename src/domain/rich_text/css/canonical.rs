@@ -425,6 +425,7 @@ mod tests {
         ("img", "width: 350px; max-width: 100%; margin: 0 auto; height: auto; display: block", Some("display: block; height: auto; margin: 0 auto; max-width: 100%; width: 350px")),
         ("img", "width: 262.5pt", Some("display: block; height: auto; margin: 0 auto; max-width: 100%; width: 350px")),
         ("iframe", "width: 100%; max-width: 640px; height: auto; aspect-ratio: 16/9", Some("aspect-ratio: 16 / 9; height: auto; max-width: 640px; width: 100%")),
+        ("iframe", "width: 100%; min-height: 150pt; max-width: 640px; height: auto; aspect-ratio: 16/9", Some("aspect-ratio: 16 / 9; height: auto; max-width: 640px; min-height: 200px; width: 100%")),
         ("table", "max-width: fit-content; border-collapse: collapse", Some("border-collapse: collapse; max-width: fit-content")),
         // Rule 5: the last occurrence wins, `!important` is stripped, and
         // nothing left is no attribute.

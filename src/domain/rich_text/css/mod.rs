@@ -173,7 +173,7 @@ mod tests {
             ),
             (
                 "iframe",
-                "aspect-ratio: 16 / 9; height: auto; max-width: 640px; width: 100%",
+                "aspect-ratio: 16 / 9; height: auto; max-width: 640px; min-height: 200px; width: 100%",
             ),
             ("iframe", "height: 608px; width: 100%"),
         ] {

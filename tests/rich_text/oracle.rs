@@ -264,6 +264,8 @@ struct Embed {
 struct Provider {
     hosts: Vec<String>,
     path_prefix: String,
+    id_length: Option<usize>,
+    list_only_id: Option<String>,
     query: Vec<QueryParameter>,
 }
 
@@ -828,7 +830,24 @@ fn check_embed_src(embed: &Embed, value: &str) -> Result<(), String> {
         .ok_or("outside the embed path")?;
     let is_id =
         |text: &str| !text.is_empty() && text.chars().all(|c| embed.id_alphabet.contains(c));
-    expect(is_id(id), "not an embed id")?;
+    let has_list = url.query().is_some_and(|query| {
+        query
+            .split('&')
+            .any(|parameter| parameter.starts_with("list="))
+    });
+    // The list-only id (`videoseries`) is a path only together with `list`;
+    // every other id has the provider's length, when it sets one (ADR 0043).
+    if provider.list_only_id.as_deref() == Some(id) {
+        expect(has_list, "a list-only id without `list`")?;
+    } else {
+        expect(is_id(id), "not an embed id")?;
+        expect(
+            provider
+                .id_length
+                .is_none_or(|length| id.chars().count() == length),
+            "an embed id of the wrong length",
+        )?;
+    }
     let Some(query) = url.query() else {
         return Ok(());
     };
@@ -1019,7 +1038,7 @@ fn every_regression_output_passes_the_oracle() {
 #[test]
 fn the_oracle_reads_the_whole_policy() {
     let policy = &*POLICY;
-    assert_eq!(policy.version, "content-v1");
+    assert_eq!(policy.version, "content-v2");
     assert_eq!(policy.tags.len(), policy.elements.len());
     assert!(
         policy
@@ -1192,18 +1211,21 @@ fn broken_markup() -> Vec<(String, &'static str)> {
         (format!("<p><img alt=\"a\" src=\"/storage/uploads/a.jpg\" {img_style}></p>"), "not in canonical order"),
         (format!("<p><iframe src=\"https://evil.example/embed/x\" {iframe_attrs}></iframe></p>"), "not an embed host"),
         (format!("<p><iframe src=\"https://padlet.com/embed/x?start=1\" {iframe_attrs}></iframe></p>"), "not allowed here, or out of order"),
-        (format!("<p><iframe src=\"https://www.youtube.com/embed/x?list=a&amp;start=1\" {iframe_attrs}></iframe></p>"), "out of order"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjK?list=a&amp;start=1\" {iframe_attrs}></iframe></p>"), "out of order"),
         (format!("<p><iframe src=\"https://www.youtube.com/embed/a.b\" {iframe_attrs}></iframe></p>"), "not an embed id"),
-        (format!("<p><iframe src=\"http://www.youtube.com/embed/x\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
-        (format!("<p><iframe src=\"https://u@www.youtube.com/embed/x\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
-        (format!("<p><iframe src=\"https://www.youtube.com:8443/embed/x\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
-        (format!("<p><iframe src=\"https://www.youtube.com/embed/x#t\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/abc\" {iframe_attrs}></iframe></p>"), "an embed id of the wrong length"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjKl?start=1\" {iframe_attrs}></iframe></p>"), "an embed id of the wrong length"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/videoseries?start=1\" {iframe_attrs}></iframe></p>"), "a list-only id without `list`"),
+        (format!("<p><iframe src=\"http://www.youtube.com/embed/AbCdEfGhIjK\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
+        (format!("<p><iframe src=\"https://u@www.youtube.com/embed/AbCdEfGhIjK\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
+        (format!("<p><iframe src=\"https://www.youtube.com:8443/embed/AbCdEfGhIjK\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjK#t\" {iframe_attrs}></iframe></p>"), "not a plain https URL"),
         (format!("<p><iframe src=\"https://www.youtube.com/watch/x\" {iframe_attrs}></iframe></p>"), "outside the embed path"),
-        (format!("<p><iframe src=\"https://www.youtube.com/embed/x?start\" {iframe_attrs}></iframe></p>"), "a query parameter without a value"),
-        (format!("<p><iframe src=\"https://www.youtube.com/embed/x?start=abc\" {iframe_attrs}></iframe></p>"), "`start=abc` is not a valid value"),
-        (format!("<p><iframe src=\"https://www.youtube.com/embed/x?list=a.b\" {iframe_attrs}></iframe></p>"), "`list=a.b` is not a valid value"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjK?start\" {iframe_attrs}></iframe></p>"), "a query parameter without a value"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjK?start=abc\" {iframe_attrs}></iframe></p>"), "`start=abc` is not a valid value"),
+        (format!("<p><iframe src=\"https://www.youtube.com/embed/AbCdEfGhIjK?list=a.b\" {iframe_attrs}></iframe></p>"), "`list=a.b` is not a valid value"),
         (format!("<p><iframe src=\"https://exa mple/embed/x\" {iframe_attrs}></iframe></p>"), "does not parse"),
-        (format!("<p><iframe src=\"https://WWW.youtube.com/embed/x\" {iframe_attrs}></iframe></p>"), "not written as the URL parser writes it"),
+        (format!("<p><iframe src=\"https://WWW.youtube.com/embed/AbCdEfGhIjK\" {iframe_attrs}></iframe></p>"), "not written as the URL parser writes it"),
         ("<p><iframe src=\"https://padlet.com/embed/x\" allow=\"autoplay\" allowfullscreen=\"\" referrerpolicy=\"strict-origin-when-cross-origin\"></iframe></p>".into(), "must be exactly"),
         ("<p><span style=\"color: red\">a</span></p>".into(), "not a canonical value"),
         ("<p><span style=\"color: #c0000080\">a</span></p>".into(), "not a canonical value"),

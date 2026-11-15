@@ -26,10 +26,14 @@ The files are named after their group and fixture:
 | `canonical-` | a canonical body of `admin/src/test/editor-fixtures.ts` |
 | `table-` | a canonical table shape of that module |
 | `table-input-` | table HTML that the editor rewrites on its first load |
-| `command-` | a document built with the editor's commands, the ones the toolbar's buttons call |
+| `media-` | a canonical image, YouTube or Padlet body of `admin/src/test/editor-fixtures.ts` |
+| `media-input-` | image and embed HTML that the editor rewrites on its first load |
+| `embed-` | a YouTube input fixture of `admin/test/fixtures/youtube/` (ADR 0043): embed code loaded and saved, or a link pasted on its own into an empty body |
+| `command-` | a document built with the editor's commands, the ones the toolbar's buttons call, the media commands included |
 
-All of it is invented markup, never production content (`CLAUDE.md`,
-public-safety rules). A file holds the stored HTML as is, with no trailing
+All of it is invented markup or, for `embed-`, what the editor stores for
+YouTube's own code and links (`THIRD_PARTY.md`), never production content
+(`CLAUDE.md`, public-safety rules). A file holds the stored HTML as is, with no trailing
 newline.
 
 After a change to the editor (`admin/src/rich-text/`), to its fixtures or to

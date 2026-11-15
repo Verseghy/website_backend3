@@ -365,6 +365,11 @@ pub const ELEMENT_STYLES: &[ElementStyle] = &[
         &[
             locked("width", "100%"),
             rule("max-width", px(200, 1280)),
+            // YouTube's minimum player size of 200 × 200 px: with the locked
+            // width and aspect ratio a player in a column narrower than about
+            // 356 px would be less than 200 px tall (ADR 0043 §3, D133).
+            // Optional, so the Padlet shape stays as it is.
+            locked("min-height", "200px"),
             rule(
                 "height",
                 Grammar::AutoOrPx {
@@ -788,6 +793,14 @@ mod tests {
         ("iframe", "max-width", "199px", None),
         ("iframe", "max-width", "1281px", None),
         ("iframe", "max-width", "100%", None),
+        ("iframe", "min-height", "200px", Some("200px")),
+        ("iframe", "min-height", "150pt", Some("200px")),
+        ("iframe", "min-height", "200.00PX", Some("200px")),
+        ("iframe", "min-height", "199px", None),
+        ("iframe", "min-height", "201px", None),
+        ("iframe", "min-height", "0", None),
+        ("iframe", "min-height", "auto", None),
+        ("iframe", "min-height", "50%", None),
         ("iframe", "height", "auto", Some("auto")),
         ("iframe", "height", "608px", Some("608px")),
         ("iframe", "height", "100px", Some("100px")),

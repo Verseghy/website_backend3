@@ -12,9 +12,16 @@
  * - {@link TABLE_INPUTS}: table HTML that the editor rewrites on its first
  *   load (ragged rows, legacy attributes, CSSOM spellings, Office cells);
  *   `J` reaches its fixed point after one load.
+ * - {@link MEDIA_BODIES}: canonical images and embeds (§3.7), each a fixed
+ *   point of `J`.
+ * - {@link MEDIA_INPUTS}: image and embed HTML that the editor rewrites on
+ *   its first load (legacy and other editors' shapes, media inside cells,
+ *   lists, quotes, links and text).
  * - {@link COMMAND_FIXTURES}: documents built with the editor's commands,
  *   the ones the toolbar's buttons call (§4.5 "Toolbar"), so that what a
  *   button writes is checked against the server too.
+ * - {@link MEDIA_COMMAND_FIXTURES}: documents built with the media
+ *   commands (insert a video, a Padlet board, an image at a width preset).
  *
  * Every body is invented markup (CLAUDE.md, public-safety rules). Names are
  * lower-case words joined by `-`; the golden file of a fixture is named
@@ -208,6 +215,91 @@ export const TABLE_INPUTS: Readonly<Record<string, string>> = {
   // count as named colours give no fill; a named colour does.
   "bgcolor-keywords":
     '<table><tr><td bgcolor="currentcolor">a</td><td bgcolor="windowtext">b</td><td bgcolor="Canvas">c</td><td bgcolor="Khaki">d</td></tr></table>',
+}
+
+/** The locked declarations of every stored image (editor.md §3.3). */
+const IMAGE_STYLE =
+  "display: block; height: auto; margin: 0 auto; max-width: 100%"
+
+/** The forced attributes of every stored iframe (editor.md §3.2). */
+const FRAME =
+  'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen="" referrerpolicy="strict-origin-when-cross-origin"'
+
+/** A stored YouTube embed of `src` (editor.md §3.7 "YouTube"). */
+const youtube = (src: string, title = "Videó") =>
+  `<p data-youtube-video=""><iframe src="${src}" width="640" height="360" title="${title}" style="aspect-ratio: 16 / 9; height: auto; max-width: 640px; min-height: 200px; width: 100%" ${FRAME}></iframe></p>`
+
+/** A stored image (editor.md §3.7 "Image"). */
+const image = (src: string, alt: string, width: number, height: number) =>
+  `<p><img src="${src}" alt="${alt}" width="${width}" height="${height}" style="${IMAGE_STYLE}; width: ${width}px"></p>`
+
+/**
+ * Canonical images and embeds (editor.md §3.7 "Image", "YouTube",
+ * "Padlet"; §4.3 rows 8-10), each a fixed point of `J`.
+ */
+export const MEDIA_BODIES: Readonly<Record<string, string>> = {
+  image: image(
+    "/storage/uploads/posts/7/udvar.jpg",
+    "Az iskola udvara",
+    525,
+    394
+  ),
+  "image-without-size": `<p><img src="/storage/uploads/posts/7/logo.png" alt="Logó" style="${IMAGE_STYLE}"></p>`,
+  // Legacy widths up to the style's 2000 px are kept (53 are wider than
+  // 700 px [500]).
+  "image-wide-legacy": image(
+    "/storage/uploads/posts/7/tabla.png",
+    "Tabló",
+    1200,
+    800
+  ),
+  "youtube-video": youtube(
+    "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30"
+  ),
+  "youtube-playlist": youtube(
+    "https://www.youtube-nocookie.com/embed/videoseries?list=PLMOZDTW7ZvXM"
+  ),
+  "youtube-video-in-playlist": youtube(
+    "https://www.youtube-nocookie.com/embed/71ya_JC_IbM?start=8&amp;list=PLMOZDTW7ZvXM"
+  ),
+  // A stored title is kept as it is (D135).
+  "youtube-own-title": youtube(
+    "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+    "A ballagás"
+  ),
+  padlet: `<p data-padlet-embed=""><iframe src="https://padlet.com/embed/KEY" width="100%" height="608" title="Padlet" style="height: 608px; width: 100%" ${FRAME}></iframe></p>`,
+  "padlet-tall": `<p data-padlet-embed=""><iframe src="https://padlet.com/embed/KEY" width="100%" height="900" title="Padlet" style="height: 900px; width: 100%" ${FRAME}></iframe></p>`,
+  "media-between-paragraphs": `<p>Előtte</p>${image("/storage/uploads/posts/7/a.jpg", "a", 175, 175)}${youtube("https://www.youtube-nocookie.com/embed/B5T4ZCfxp1Y")}<p>Utána</p>`,
+}
+
+/**
+ * Image and embed HTML that the editor rewrites on its first load: legacy
+ * and other editors' shapes, and media in places content-v1 does not keep
+ * them (editor.md §4.2, §4.3 rows 8-10); `J` reaches its fixed point after
+ * one load.
+ */
+export const MEDIA_INPUTS: Readonly<Record<string, string>> = {
+  "image-in-link":
+    '<p><a href="https://example.org/"><img src="/storage/uploads/a.jpg" alt="a" width="350" height="350"></a></p>',
+  "image-in-text":
+    '<p>Előtte <img src="/storage/uploads/a.jpg" alt="a"> utána</p>',
+  "image-in-cell": `<table><tr><td>a<img src="/storage/uploads/a.jpg" alt="a"></td></tr></table>`,
+  "image-in-list-item":
+    '<ul><li>pont<img src="/storage/uploads/a.jpg" alt="a"></li></ul>',
+  "image-own-host":
+    '<p><img src="https://verseghy-gimnazium.net/storage/uploads/a.jpg" alt="a" width="800" height="600" style="height: 600px; width: 600pt"></p>',
+  "youtube-tiptap-wrapper":
+    '<div data-youtube-video=""><iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ?si=x&amp;rel=0" width="560" height="315"></iframe></div>',
+  "youtube-legacy-paragraph":
+    '<p><iframe width="560" height="315" src="https://www.youtube.com/embed/dQw4w9WgXcQ" frameborder="0" allowfullscreen></iframe></p>',
+  "youtube-http":
+    '<iframe src="http://www.youtube.com/embed/UkWd0azv3fQ?start=90" width="420" height="315"></iframe>',
+  "youtube-list-type-playlist":
+    '<iframe src="https://www.youtube.com/embed?listType=playlist&amp;list=PLC77007E23FF423C6"></iframe>',
+  "youtube-in-quote":
+    '<blockquote><p>idézet</p><p data-youtube-video=""><iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"></iframe></p></blockquote>',
+  "padlet-legacy":
+    '<p><iframe allowfullscreen="" src="https://padlet.com/embed/KEY" style="border: 0; width: 100%; height: 608px;" tabindex="-1"></iframe></p>',
 }
 
 /** The positions of every table cell, in document order. */
@@ -414,5 +506,52 @@ export const COMMAND_FIXTURES: Readonly<
     selectText(editor, "idézet").commands.toggleBlockquote()
     editor.commands.focus("end")
     editor.commands.setHorizontalRule()
+  },
+}
+
+/**
+ * Documents built with the media commands that the toolbar's image, video
+ * and Padlet buttons and the image's width presets call (editor.md §4.3
+ * rows 8-10, §4.5). Each script starts like {@link COMMAND_FIXTURES}.
+ */
+export const MEDIA_COMMAND_FIXTURES: Readonly<
+  Record<string, (editor: Editor) => void>
+> = {
+  "insert-youtube": (editor) => {
+    editor.commands.focus("end")
+    editor.commands.insertYoutubeEmbed({
+      videoId: "dQw4w9WgXcQ",
+      start: "90",
+      list: null,
+      title: "Videó",
+    })
+  },
+  "insert-padlet": (editor) => {
+    editor.commands.focus("end")
+    editor.commands.insertPadletEmbed({
+      key: "KEY",
+      height: 608,
+      title: "Padlet",
+    })
+  },
+  "insert-image-at-a-preset": (editor) => {
+    editor.commands.focus("end")
+    editor.commands.insertSiteImage({
+      src: "/storage/uploads/posts/7/kep.jpg",
+      alt: "Kép",
+      width: 1600,
+      height: 1200,
+    })
+    // A width preset, as the image's view sets it.
+    let position = -1
+    editor.state.doc.forEach((node, offset) => {
+      if (node.type.name === "siteImage") {
+        position = offset
+      }
+    })
+    editor.commands.command(({ tr }) => {
+      tr.setNodeAttribute(position, "displayWidth", 350)
+      return true
+    })
   },
 }
