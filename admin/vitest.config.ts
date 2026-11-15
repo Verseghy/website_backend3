@@ -16,6 +16,18 @@ export default defineConfig({
       "@": resolve(import.meta.dirname, "./src"),
     },
   },
+  server: {
+    fs: {
+      // The stored-HTML serialiser's tests read the server's sanitiser
+      // regression fixtures (editor.md §13.4, "Over every committed
+      // fixture"; src/test/stored-html.ts). Vite serves nothing outside
+      // admin/ unless it is listed, so that one directory is added here.
+      allow: [
+        import.meta.dirname,
+        resolve(import.meta.dirname, "../tests/fixtures/regressions"),
+      ],
+    },
+  },
   test: {
     environment: "jsdom",
     include: [

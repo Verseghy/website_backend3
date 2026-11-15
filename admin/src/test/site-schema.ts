@@ -9,10 +9,9 @@
  *   rule: every element with its attributes as written, read from the DOM
  *   output specs, so no DOM implementation re-spells a style on the way.
  * - {@link renderHtml} renders a document to DOM with `style` written
- *   verbatim, the trick of editor.md §6 step 1: prosemirror-model assigns
- *   `style` through the CSSOM unless the element has no `style` property.
- *   Tests use it to parse the output again; the stored-HTML serialiser
- *   proper is `toStoredHtml`.
+ *   verbatim, through the stored-HTML serialiser's `verbatimDocument`
+ *   (editor.md §6 step 1), without its post-pass, so tests see what the
+ *   schema itself renders; the stored HTML proper is `toStoredHtml`.
  * - {@link TestMedia} stands in for the image and embed nodes, to test the
  *   media group before they exist.
  */
@@ -28,6 +27,7 @@ import { DOMParser, DOMSerializer } from "@tiptap/pm/model"
 import type { SiteExtensionsOptions } from "@/rich-text/site-extensions"
 import { siteExtensions } from "@/rich-text/site-extensions"
 import { CONTENT_V1_POLICY } from "@/rich-text/policy"
+import { verbatimDocument } from "@/rich-text/serialize/to-stored-html"
 
 /**
  * The ProseMirror schema of the site extensions.
@@ -136,24 +136,6 @@ export function renderedElements(doc: ProseMirrorNode): RenderedElement[] {
 }
 
 /**
- * A document whose elements have no `style` property, so prosemirror-model
- * writes `style` with `setAttribute`, verbatim (editor.md §6 step 1).
- */
-function verbatimDocument(): Document {
-  const created = (element: HTMLElement): HTMLElement => {
-    Object.defineProperty(element, "style", { value: undefined })
-    return element
-  }
-  return {
-    createElement: (tag: string) => created(document.createElement(tag)),
-    createElementNS: (namespace: string, tag: string) =>
-      created(document.createElementNS(namespace, tag) as HTMLElement),
-    createTextNode: (text: string) => document.createTextNode(text),
-    createDocumentFragment: () => document.createDocumentFragment(),
-  } as unknown as Document
-}
-
-/**
  * Renders a document's content into a `div`, with styles verbatim.
  *
  * @param schema - the document's schema.
@@ -163,7 +145,7 @@ export function renderHtml(schema: Schema, doc: ProseMirrorNode): HTMLElement {
   const container = document.createElement("div")
   container.appendChild(
     DOMSerializer.fromSchema(schema).serializeFragment(doc.content, {
-      document: verbatimDocument(),
+      document: verbatimDocument(document),
     })
   )
   return container

@@ -90,7 +90,11 @@ describe("parse rules", () => {
           '<p style="text-align: start">a</p>',
           "<p>a</p>",
         ],
-        ["another spelling", '<p style="TEXT-ALIGN: CENTER">a</p>', "<p>a</p>"],
+        [
+          "another spelling, as the server writes it",
+          '<p style="TEXT-ALIGN: CENTER">a</p>',
+          '<p style="text-align: center">a</p>',
+        ],
         ["the align attribute", '<p align="center">a</p>', "<p>a</p>"],
         [
           "only the alignment of a styled heading",
@@ -346,9 +350,9 @@ describe("parse rules", () => {
           '<p><span style="color: #0000ff">a</span></p>',
         ],
         [
-          "an inner style that sets a colour the server would rewrite, as no colour",
+          "an inner colour in another spelling, as the server writes it",
           '<p><span style="color: #c00000; font-size: 2em"><span style="color: red; font-size: 1.5em">a</span></span></p>',
-          '<p><span style="font-size: 1.5em">a</span></p>',
+          '<p><span style="color: #ff0000; font-size: 1.5em">a</span></p>',
         ],
         [
           "an unstyled span between two styled ones",
@@ -356,9 +360,9 @@ describe("parse rules", () => {
           '<p><span style="color: #c00000">a</span><span style="color: #c00000; font-size: 2em">b</span></p>',
         ],
         [
-          "no highlight when a later background shorthand sets it",
+          "the highlight that a later background shorthand sets",
           '<p><span style="background-color: #00ff00; background: #ff0000">a</span></p>',
-          "<p>a</p>",
+          '<p><span style="background-color: #ff0000">a</span></p>',
         ],
         [
           "the highlight that a later background-color sets",

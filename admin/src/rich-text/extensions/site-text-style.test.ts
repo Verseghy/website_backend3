@@ -72,14 +72,33 @@ describe("readSpanDeclarations", () => {
       ],
     ],
     [
-      "no outer value for an inner declaration the server would rewrite",
+      "an inner declaration in another spelling, as the server writes it",
       nested(["color: #c00000; font-size: 2em", "color: red"]),
-      [["font-size", "2em"]],
+      [
+        ["color", "#ff0000"],
+        ["font-size", "2em"],
+      ],
     ],
     [
-      "no outer value for an inner background shorthand",
+      "the colour an inner background shorthand sets",
       nested(["background-color: #ffff00", "background: #00ff00"]),
-      [],
+      [["background-color", "#00ff00"]],
+    ],
+    [
+      "the outer value where the server drops the inner declaration",
+      nested(["color: #c00000", "color: transparent; font-size: 2em"]),
+      [
+        ["color", "#c00000"],
+        ["font-size", "2em"],
+      ],
+    ],
+    [
+      "outer declarations in other spellings",
+      nested(["COLOR: RGB(192, 0, 0) !important", "font-size: 1.50EM"]),
+      [
+        ["color", "#c00000"],
+        ["font-size", "1.5em"],
+      ],
     ],
     [
       "the outer values through an inner style outside the alphabet",
@@ -105,9 +124,10 @@ describe("readSpanDeclarations", () => {
       ),
       "color: #00ff00; background-color: #00ff00; font-size: 0.5em",
     ]
+    // In canonicalStyle's order, which sorts by property.
     expect(read(nested(triples))).toEqual([
-      ["color", "#00ff00"],
       ["background-color", "#00ff00"],
+      ["color", "#00ff00"],
       ["font-size", "0.5em"],
     ])
   })

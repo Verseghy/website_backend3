@@ -1,34 +1,34 @@
 /**
- * The raw style reader of the schema's parse rules (editor.md §2 stage 3,
- * `readStyleDecls`).
+ * The style reader of the schema's parse rules (editor.md §2 stage 3,
+ * `readStyleDecls`), and the checks of content-v1's one spelling that the
+ * render rules use.
  *
  * Parse rules read the `style` attribute as written, never through
  * `element.style`: the CSSOM re-spells values (`rgb()` for hex, grouped
  * borders) and differs between jsdom and the browsers, so a parse through it
  * would not be the same everywhere (editor.md §6).
  *
- * This reader accepts content-v1's own spelling only, the output of the
- * server's grammar (editor.md §3.1). Every body the editor loads is
- * sanitised content-v1 (`serve_content`, editor.md §8.2), and the paste
- * filter writes content-v1 before the parse (§5.2 step 8), so that is the
- * whole input of stage 3. Restricting the reader to the canonical alphabet
- * of §3.1 rule 6 is also what makes a plain split exact: without quotes,
- * parentheses, `*`, `!` or `\`, a style string holds no CSS string, comment,
- * function, escape or `!important`, so `;` always ends a declaration and its
- * first `:` always ends the name. Values are then checked against the
- * policy's grammar in its one spelling ({@link isCanonicalValue}), so a
- * declaration the server would rewrite or drop never becomes a schema
- * attribute. Reading other spellings is `canonicalStyle`'s job (editor.md
- * §3.1, §6), which turns them into this one before a parse rule sees them.
+ * The raw attribute goes through `canonicalStyle` (editor.md §3.1, §4.3 row
+ * 4) before a parse rule sees it, so a parse rule reads exactly the
+ * declarations the server stores for the element, in the server's
+ * spelling: another spelling (`color: red`, `TEXT-ALIGN: CENTER`) is read
+ * as the server writes it, a later `background` sets `background-color`
+ * as the server's cascade does, and a declaration the server drops is not
+ * there. Every body the editor loads is already content-v1 (`serve_content`,
+ * editor.md §8.2), so for a stored body this changes nothing; for the
+ * editor's own clipboard and any other HTML it keeps what the server would
+ * keep.
  *
- * The declarations are resolved in source order, as the server's cascade
- * resolves them: an input-only shorthand sets the stored property it
- * expands into (`background` sets `background-color`, §3.1 rule 1), so a
- * later shorthand overrides an earlier stored declaration. This reader does
- * not read shorthands, so it then keeps nothing of that property.
+ * `canonicalStyle`'s output uses only the canonical alphabet of §3.1 rule 6,
+ * with no quotes, parentheses, `*`, `!` or `\`, so a plain split of it is
+ * exact ({@link readCanonicalDecls}): `;` always ends a declaration and its
+ * first `:` always ends the name.
  */
 import type { RichTextPolicy, StyleGrammar } from "./policy"
-import { styleRuleOf } from "./policy"
+import { canonicalStyle } from "./css/canonical-style"
+import { MAX_DECLARATIONS } from "./css/declarations"
+
+export { MAX_DECLARATIONS } from "./css/declarations"
 
 /** The style grammars whose values this module checks. */
 export type ScalarGrammar = Exclude<
@@ -38,13 +38,6 @@ export type ScalarGrammar = Exclude<
       "border_side" | "border_widths" | "border_styles" | "border_colours"
   }
 >
-
-/**
- * The most declarations one `style` attribute may hold; later ones are not
- * read (editor.md §7.3, "Limits"). Like the server's other reader limits it
- * is not in `policy.json`; `css-vectors.jsonl` pins it.
- */
-export const MAX_DECLARATIONS = 32
 
 /**
  * Splits a style string in the canonical alphabet into its declarations, in
@@ -110,24 +103,6 @@ export function readCanonicalDecls(
 ): Map<string, string> | null {
   const pairs = splitCanonicalStyle(style, alphabet)
   return pairs === null ? null : new Map(pairs)
-}
-
-/**
- * Reads an element's raw `style` attribute ({@link readCanonicalDecls}).
- *
- * @param element - the element a parse rule matched.
- * @param alphabet - the canonical alphabet (`policy.css.alphabet`).
- * @returns the declarations; empty when the element has no `style` or one
- *   outside the alphabet.
- */
-export function readStyleDecls(
-  element: Element,
-  alphabet: string
-): Map<string, string> {
-  return (
-    readCanonicalDecls(element.getAttribute("style") ?? "", alphabet) ??
-    new Map()
-  )
 }
 
 /**
@@ -236,135 +211,78 @@ export function isCanonicalValue(
 }
 
 /**
- * The stored property that each input-only shorthand with a scalar grammar
- * sets (editor.md §3.1 rule 1: "A single-colour `background` becomes
- * `background-color`"). `policy.json` lists a shorthand's grammar but not
- * its target, so the mapping is written here, as the server's
- * `stored_name` (`src/domain/rich_text/css/canonical.rs`) writes it. The
- * border shorthands are not listed: they set the cell border sides, which
- * this reader never returns ({@link resolveStoredDeclarations}).
+ * The most style strings whose declarations {@link readStoredDeclarations}
+ * keeps per policy. A parse reads each `span` style once for every span it
+ * is nested in, and a body repeats few distinct styles, so a small memo
+ * keeps deep nesting linear; when it is full it starts over.
  */
-export const SHORTHAND_TARGETS: Readonly<Record<string, string>> = {
-  background: "background-color",
-}
+const MEMO_SIZE = 1024
+
+/** The memo of {@link readStoredDeclarations}, per policy object. */
+const memo = new WeakMap<
+  RichTextPolicy,
+  Map<string, ReadonlyMap<string, string>>
+>()
 
 /**
- * Resolves the declarations of a style string for one element in source
- * order, as the server's cascade does, and says for each stored property
- * whether its winning declaration is one this reader keeps.
- *
- * For every stored property the style sets, the last declaration that sets
- * it decides:
- *
- * - the property itself with a canonical value: that value;
- * - the property with a value outside its grammar or in another spelling,
- *   or an input-only shorthand that sets it (`background`): `null`. The
- *   server may keep an earlier declaration, rewrite this one or expand the
- *   shorthand, so this reader keeps nothing rather than something else.
- *   Keeping the last valid occurrence instead would keep `#c00000` of
- *   `color: #c00000; color: red`, which the server stores as `#ff0000`, and
- *   `#00ff00` of `background-color: #00ff00; background: #ff0000`, which it
- *   stores as `#ff0000`.
- *
- * Properties the element does not store, and the cell border shorthands
- * (whose sides this reader never returns), set nothing here.
+ * The declarations that the server stores for one element's style: the
+ * output of `canonicalStyle`, by property, in its sorted order. Each value
+ * is in content-v1's one spelling; a cell's border sides are full triples
+ * or `none`/`hidden` (editor.md §3.1 rule 2).
  *
  * @param policy - the content-v1 policy.
  * @param tag - the element's tag name, lower case.
  * @param style - the `style` attribute's value, or `null` when there is none.
- * @returns the stored properties the style sets, in first-setting order,
- *   each with its kept value or `null`. Empty when there is no style or it
- *   is outside the canonical alphabet.
- * @throws {Error} when the element stores a property whose grammar this
- *   module does not check (a cell border side), or the style holds an
- *   input-only shorthand with a scalar grammar that {@link SHORTHAND_TARGETS}
- *   does not map: either would silently misread a declaration the server
- *   keeps.
- */
-export function resolveStoredDeclarations(
-  policy: RichTextPolicy,
-  tag: string,
-  style: string | null
-): Map<string, string | null> {
-  const resolved = new Map<string, string | null>()
-  const pairs =
-    style === null ? null : splitCanonicalStyle(style, policy.css.alphabet)
-  for (const [property, value] of pairs ?? []) {
-    const rule = styleRuleOf(policy, tag, property)
-    if (rule === undefined) {
-      continue
-    }
-    if (rule.role === "input_only") {
-      if (!isScalarGrammar(rule.grammar)) {
-        // `border`, `border-width`, `border-style`, `border-color`: they
-        // set the cell sides, which a stored border side below refuses to
-        // read, so they cannot change anything this reader returns.
-        continue
-      }
-      // Own keys only, so a property named like an Object method is unknown.
-      const target = Object.hasOwn(SHORTHAND_TARGETS, property)
-        ? SHORTHAND_TARGETS[property]
-        : undefined
-      if (target === undefined) {
-        throw new Error(
-          `resolveStoredDeclarations: ${tag} ${property} is an input-only shorthand whose stored property is unknown; add it to SHORTHAND_TARGETS as the server's cascade maps it (editor.md §3.1 rule 1).`
-        )
-      }
-      // Re-inserting moves nothing: a Map keeps first-insertion order.
-      resolved.set(target, null)
-      continue
-    }
-    if (!isScalarGrammar(rule.grammar)) {
-      throw new Error(
-        `resolveStoredDeclarations: ${tag} ${property} has the grammar ${rule.grammar.kind}, which this reader does not check; read cell borders with a reader that implements editor.md §3.1 rule 2.`
-      )
-    }
-    resolved.set(property, isCanonicalValue(rule.grammar, value) ? value : null)
-  }
-  return resolved
-}
-
-/**
- * The stored declarations of a style string for one element: those whose
- * property the policy stores on that element, whose winning declaration
- * sets that property itself and whose value is canonical
- * ({@link resolveStoredDeclarations}). Anything else (another property, an
- * input-only shorthand, a value outside the grammar or in another spelling)
- * is left out.
- *
- * Every declaration it keeps is one the server stores with the same value
- * (`css-vectors.jsonl` checks it); it may keep less than the server, never
- * something else.
- *
- * @param policy - the content-v1 policy.
- * @param tag - the element's tag name, lower case.
- * @param style - the `style` attribute's value, or `null` when there is none.
- * @returns the declarations by property, in first-setting order.
- * @throws {Error} as {@link resolveStoredDeclarations} does.
+ * @returns the stored declarations; empty when the server keeps none. The
+ *   map is shared between calls with the same style and must not be
+ *   changed.
+ * @throws {PolicyError} as `canonicalStyle` does.
  */
 export function readStoredDeclarations(
   policy: RichTextPolicy,
   tag: string,
   style: string | null
-): Map<string, string> {
-  return keptDeclarations(resolveStoredDeclarations(policy, tag, style))
+): ReadonlyMap<string, string> {
+  if (style === null) {
+    return new Map()
+  }
+  let cache = memo.get(policy)
+  if (cache === undefined) {
+    cache = new Map()
+    memo.set(policy, cache)
+  }
+  // A tag name holds no NUL, so the key is unambiguous.
+  const key = `${tag}\u0000${style}`
+  const cached = cache.get(key)
+  if (cached !== undefined) {
+    return cached
+  }
+  const css = canonicalStyle(policy, tag, style)
+  const declarations: ReadonlyMap<string, string> =
+    css === null
+      ? new Map()
+      : (readCanonicalDecls(css, policy.css.alphabet) ?? new Map())
+  if (cache.size >= MEMO_SIZE) {
+    cache.clear()
+  }
+  cache.set(key, declarations)
+  return declarations
 }
 
 /**
- * The declarations of a resolution that are kept, without the refused ones.
+ * Reads an element's raw `style` attribute ({@link readStoredDeclarations}).
  *
- * @param resolved - a resolution from {@link resolveStoredDeclarations}, or
- *   several folded together.
- * @returns the properties whose value is not `null`, in the same order.
+ * @param policy - the content-v1 policy.
+ * @param element - the element a parse rule matched.
+ * @returns the declarations the server stores for it.
  */
-export function keptDeclarations(
-  resolved: ReadonlyMap<string, string | null>
-): Map<string, string> {
-  const kept = new Map<string, string>()
-  for (const [property, value] of resolved) {
-    if (value !== null) {
-      kept.set(property, value)
-    }
-  }
-  return kept
+export function readStyleDecls(
+  policy: RichTextPolicy,
+  element: Element
+): ReadonlyMap<string, string> {
+  return readStoredDeclarations(
+    policy,
+    element.localName,
+    element.getAttribute("style")
+  )
 }

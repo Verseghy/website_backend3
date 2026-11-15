@@ -4,16 +4,14 @@ import { describe, expect, it } from "vitest"
 import type { StyleGrammar } from "./policy"
 import { CONTENT_V1_POLICY } from "./policy"
 import type { ScalarGrammar } from "./style-decls"
+import { canonicalStyle } from "./css/canonical-style"
 import {
   isCanonicalValue,
   isScalarGrammar,
-  keptDeclarations,
   MAX_DECLARATIONS,
   readCanonicalDecls,
   readStoredDeclarations,
   readStyleDecls,
-  resolveStoredDeclarations,
-  SHORTHAND_TARGETS,
 } from "./style-decls"
 import type { Json } from "@/test/rich-text-policy"
 import {
@@ -127,21 +125,30 @@ describe("readStyleDecls", () => {
     element.setAttribute("style", "color: #c00000; font-size: 1.25em")
     // jsdom's CSSOM re-spells the colour as rgb(192, 0, 0).
     expect(element.style.color).not.toBe("#c00000")
-    expect([...readStyleDecls(element, ALPHABET)]).toEqual([
+    expect([...readStyleDecls(CONTENT_V1_POLICY, element)]).toEqual([
       ["color", "#c00000"],
       ["font-size", "1.25em"],
     ])
   })
 
+  it("reads another spelling as the server writes it", () => {
+    const element = document.createElement("span")
+    element.setAttribute("style", "COLOR: RED; Font-Size: 1.5EM")
+    expect([...readStyleDecls(CONTENT_V1_POLICY, element)]).toEqual([
+      ["color", "#ff0000"],
+      ["font-size", "1.5em"],
+    ])
+  })
+
   it.each([
     ["no style attribute", null],
-    ["a style outside the alphabet", "COLOR: RED"],
+    ["only declarations the server drops on it", "color: red; margin: 0"],
   ])("reads nothing from an element with %s", (_name, style) => {
     const element = document.createElement("p")
     if (style !== null) {
       element.setAttribute("style", style)
     }
-    expect(readStyleDecls(element, ALPHABET).size).toBe(0)
+    expect(readStyleDecls(CONTENT_V1_POLICY, element).size).toBe(0)
   })
 })
 
@@ -272,38 +279,63 @@ describe("readStoredDeclarations", () => {
       "list-style-type: square",
       [["list-style-type", "square"]],
     ],
-    ["the omitted default bullet", "ul", "list-style-type: disc", []],
-    ["a property the element does not store", "p", "color: #c00000", []],
-    ["an input-only shorthand", "span", "background: #ffff00", []],
-    ["a value outside the grammar", "span", "font-size: 4em", []],
-    ["a value in another spelling", "span", "color: #C00000", []],
-    ["transparent text", "span", "color: transparent", []],
-    ["an element without a style", "strong", "color: #c00000", []],
-    ["an element outside content-v1", "div", "text-align: center", []],
-    ["no style at all", "p", null, []],
     [
-      "a later canonical occurrence",
+      "nothing of the omitted default bullet",
+      "ul",
+      "list-style-type: disc",
+      [],
+    ],
+    [
+      "nothing of a property the element does not store",
+      "p",
+      "color: #c00000",
+      [],
+    ],
+    [
+      "the stored property of an input-only shorthand",
       "span",
-      "color: #000000; color: #c00000",
+      "background: #ffff00",
+      [["background-color", "#ffff00"]],
+    ],
+    ["nothing of a value outside the grammar", "span", "font-size: 4em", []],
+    [
+      "a value in another spelling, as the server writes it",
+      "span",
+      "color: #C00",
+      [["color", "#cc0000"]],
+    ],
+    ["no transparent text", "span", "color: transparent", []],
+    ["nothing on an element without a style", "strong", "color: #c00000", []],
+    [
+      "nothing on an element outside content-v1",
+      "div",
+      "text-align: center",
+      [],
+    ],
+    ["nothing without a style", "p", null, []],
+    [
+      "the last occurrence",
+      "span",
+      "color: #000000; color: red",
+      [["color", "#ff0000"]],
+    ],
+    [
+      "an earlier occurrence when the later one is refused",
+      "span",
+      "color: #c00000; color: transparent",
       [["color", "#c00000"]],
     ],
     [
-      "nothing of a property whose last occurrence the server would rewrite",
+      "the stored declarations beside a refused property",
       "span",
-      "color: #c00000; color: red",
-      [],
+      "color: #c00000; font-family: 'Calibri'",
+      [["color", "#c00000"]],
     ],
     [
-      "a style outside the alphabet, which keeps nothing",
-      "span",
-      "color: #c00000; font-family: Calibri",
-      [],
-    ],
-    [
-      "nothing of a stored property that a later input-only shorthand sets",
+      "the value a later input-only shorthand sets",
       "span",
       "background-color: #00ff00; background: #ff0000",
-      [],
+      [["background-color", "#ff0000"]],
     ],
     [
       "a stored property set after the shorthand",
@@ -312,12 +344,25 @@ describe("readStoredDeclarations", () => {
       [["background-color", "#00ff00"]],
     ],
     [
-      "the other declarations next to a shorthand",
+      "the other declarations next to a shorthand, sorted",
       "span",
       "color: #c00000; background: #ff0000; font-size: 2em",
       [
+        ["background-color", "#ff0000"],
         ["color", "#c00000"],
         ["font-size", "2em"],
+      ],
+    ],
+    [
+      "a cell's four border sides from one shorthand",
+      "td",
+      "border: 1px solid #000000; text-align: center; border-width: 2px",
+      [
+        ["border-bottom", "2px solid #000000"],
+        ["border-left", "2px solid #000000"],
+        ["border-right", "2px solid #000000"],
+        ["border-top", "2px solid #000000"],
+        ["text-align", "center"],
       ],
     ],
   ])("keeps %s", (_name, tag, style, expected) => {
@@ -326,23 +371,7 @@ describe("readStoredDeclarations", () => {
     )
   })
 
-  it("refuses to read a cell border side, which needs its own reader", () => {
-    expect(() =>
-      readStoredDeclarations(CONTENT_V1_POLICY, "td", "border-top: none")
-    ).toThrow("td border-top has the grammar border_side")
-  })
-
-  it("skips the cell border shorthands, which set no property it returns", () => {
-    expect([
-      ...readStoredDeclarations(
-        CONTENT_V1_POLICY,
-        "td",
-        "border: 1px solid #000000; text-align: center; border-width: 2px"
-      ),
-    ]).toEqual([["text-align", "center"]])
-  })
-
-  it("refuses a scalar input-only shorthand whose stored property it does not know", () => {
+  it("passes on canonicalStyle's refusal of a shorthand it cannot expand", () => {
     const policy = policyWith((json) => {
       const span = (json.elements as { [key: string]: Json }).span as {
         [key: string]: Json
@@ -356,42 +385,19 @@ describe("readStoredDeclarations", () => {
       })
     })
     expect(() => readStoredDeclarations(policy, "span", "font: 2em")).toThrow(
-      "span font is an input-only shorthand whose stored property is unknown"
+      "span font is an input-only shorthand whose stored property canonicalStyle does not know"
     )
-    expect([
-      ...readStoredDeclarations(policy, "span", "color: #c00000"),
-    ]).toEqual([["color", "#c00000"]])
   })
 
-  it("agrees with every vector the server writes for the elements the schema reads", () => {
-    let checked = 0
+  it("reads every vector as the server writes it", () => {
     for (const { element, input, output } of readVectors()) {
-      if (!SCHEMA_STYLED.includes(element)) {
-        continue
-      }
-      // The server's canonical output reads back unchanged.
-      if (output !== null) {
-        expect(
-          writeDeclarations(
-            readStoredDeclarations(CONTENT_V1_POLICY, element, output)
-          ),
-          `${element} ${output}`
-        ).toBe(output)
-      }
-      // Every declaration this reader keeps of an input is in the server's
-      // output with the same value: it may refuse more (other spellings),
-      // never keep something else.
-      const server = readCanonicalDecls(output ?? "", ALPHABET)
-      for (const [property, value] of readStoredDeclarations(
-        CONTENT_V1_POLICY,
-        element,
-        input
-      )) {
-        expect(server?.get(property), `${element} ${input}`).toBe(value)
-      }
-      checked += 1
+      expect(
+        writeDeclarations(
+          readStoredDeclarations(CONTENT_V1_POLICY, element, input)
+        ),
+        `${element} ${input}`
+      ).toBe(output)
     }
-    expect(checked).toBeGreaterThan(90)
   })
 
   it("keeps only stored properties with canonical values, whatever the style", () => {
@@ -403,10 +409,12 @@ describe("readStoredDeclarations", () => {
       "text-align",
       "list-style-type",
       "#c00000",
+      "#C00000",
       "#c0000080",
       "transparent",
       "1.5em",
       "0.4em",
+      "12pt",
       "center",
       "circle",
       "disc",
@@ -414,8 +422,10 @@ describe("readStoredDeclarations", () => {
       ";",
       " ",
       "red",
+      "rgb(1, 2, 3)",
       "(",
-      "!"
+      "!",
+      "!important"
     )
     fc.assert(
       fc.property(
@@ -441,66 +451,8 @@ describe("readStoredDeclarations", () => {
       )
     )
   })
-})
 
-describe("resolveStoredDeclarations", () => {
-  it.each<[string, string, string | null, [string, string | null][]]>([
-    [
-      "a refused value as null",
-      "span",
-      "color: #c00000; color: red",
-      [["color", null]],
-    ],
-    [
-      "the shorthand's stored property as null",
-      "span",
-      "background-color: #00ff00; background: #ff0000",
-      [["background-color", null]],
-    ],
-    [
-      "a stored property after the shorthand",
-      "span",
-      "background: #ff0000; background-color: #00ff00",
-      [["background-color", "#00ff00"]],
-    ],
-    [
-      "the omitted default as null, which the server leaves out",
-      "ul",
-      "list-style-type: disc",
-      [["list-style-type", null]],
-    ],
-    [
-      "nothing for properties the element does not store",
-      "span",
-      "line-height: 2; text-align: center",
-      [],
-    ],
-    ["nothing for a style outside the alphabet", "span", "color: Red", []],
-    ["nothing for no style", "span", null, []],
-  ])("resolves %s", (_name, tag, style, expected) => {
-    expect([
-      ...resolveStoredDeclarations(CONTENT_V1_POLICY, tag, style),
-    ]).toEqual(expected)
-  })
-
-  it("maps every scalar input-only shorthand of the policy to a stored property of the same kind", () => {
-    let checked = 0
-    for (const [tag, element] of Object.entries(CONTENT_V1_POLICY.elements)) {
-      for (const rule of element.style ?? []) {
-        if (rule.role !== "input_only" || !isScalarGrammar(rule.grammar)) {
-          continue
-        }
-        const target = SHORTHAND_TARGETS[rule.property]
-        const stored = element.style?.find((entry) => entry.property === target)
-        expect(stored?.role, `${tag} ${rule.property}`).toBe("stored")
-        expect(stored?.grammar, `${tag} ${rule.property}`).toEqual(rule.grammar)
-        checked += 1
-      }
-    }
-    expect(checked).toBeGreaterThan(0)
-  })
-
-  it("keeps a declaration only when it is the last one that sets its property", () => {
+  it("reads what canonicalStyle writes, whether or not the read is memoised", () => {
     const declaration = fc
       .tuple(
         fc.constantFrom(
@@ -517,47 +469,30 @@ describe("resolveStoredDeclarations", () => {
       fc.property(
         fc.array(declaration, { maxLength: 40 }).map((list) => list.join("; ")),
         (style) => {
-          // The pairs the server reads, in source order: the first
-          // MAX_DECLARATIONS, each naming the stored property it sets.
-          const setters = style
-            .split(";")
-            .slice(0, MAX_DECLARATIONS)
-            .map((piece) => piece.split(":").map((part) => part.trim()))
-            .map(([property, value]) => ({
-              target: SHORTHAND_TARGETS[property] ?? property,
-              property,
-              value,
-            }))
-          for (const [property, value] of readStoredDeclarations(
-            CONTENT_V1_POLICY,
-            "span",
-            style
-          )) {
-            const last = setters
-              .filter(({ target }) => target === property)
-              .at(-1)
-            expect(last, style).toEqual({ target: property, property, value })
-          }
+          const first = readStoredDeclarations(CONTENT_V1_POLICY, "span", style)
+          expect(writeDeclarations(first)).toBe(
+            canonicalStyle(CONTENT_V1_POLICY, "span", style)
+          )
+          expect(readStoredDeclarations(CONTENT_V1_POLICY, "span", style)).toBe(
+            first
+          )
         }
       )
     )
   })
-})
 
-describe("keptDeclarations", () => {
-  it("drops the refused properties and keeps the order", () => {
-    expect([
-      ...keptDeclarations(
-        new Map<string, string | null>([
-          ["font-size", "2em"],
-          ["color", null],
-          ["background-color", "#ffff00"],
-        ])
-      ),
-    ]).toEqual([
-      ["font-size", "2em"],
-      ["background-color", "#ffff00"],
-    ])
-    expect(keptDeclarations(new Map()).size).toBe(0)
+  it("starts its memo over when it is full, and keeps reading correctly", () => {
+    const styles = Array.from(
+      { length: 1500 },
+      (_, index) =>
+        `font-size: ${(0.5 + (index % 250) / 100).toFixed(2)}em; color: #${index.toString(16).padStart(6, "0")}`
+    )
+    for (const style of [...styles, ...styles]) {
+      expect(
+        writeDeclarations(
+          readStoredDeclarations(CONTENT_V1_POLICY, "span", style)
+        )
+      ).toBe(canonicalStyle(CONTENT_V1_POLICY, "span", style))
+    }
   })
 })
