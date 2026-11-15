@@ -36,7 +36,8 @@
 //!   ([`storage_rules::method_answer`]).
 //! - **The headers.** `SetResponseHeaderLayer::overriding` puts the three
 //!   that every answer carries (`Access-Control-Allow-Origin: *`,
-//!   `Access-Control-Expose-Headers` and `nosniff`) on everything the router
+//!   `Access-Control-Expose-Headers: Content-Range`, which ADR 0046 cut
+//!   down to that one name, and `nosniff`) on everything the router
 //!   sends; [`with_contract_headers`] adds the ones that depend on the
 //!   answer, as [`storage_rules::response_headers`] decides them: the
 //!   sandbox policy, `Content-Disposition: attachment` and `Cache-Control`

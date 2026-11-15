@@ -6,7 +6,7 @@ This directory is the only source of its configuration:
 
 | File | What it is |
 |---|---|
-| `nginx.conf` | The complete nginx configuration. It implements the media contract of ADR 0015 §1 and the `/storage` header rows of [ADR 0013](../../docs/design/adr/0013-rich-text-editor-and-html-sanitiser.md) §7, and serves `stub_status` to the media exporter on the pod's loopback address ([below](#the-exporters-source-stub_status-on-loopback)). Its comments say why each line is there. |
+| `nginx.conf` | The complete nginx configuration. It implements the media contract of ADR 0015 §1, whose CORS row [ADR 0046](../../docs/design/adr/0046-only-content-range-exposed-to-cross-origin-storage-readers.md) amends, and the `/storage` header rows of [ADR 0013](../../docs/design/adr/0013-rich-text-editor-and-html-sanitiser.md) §7, and serves `stub_status` to the media exporter on the pod's loopback address ([below](#the-exporters-source-stub_status-on-loopback)). Its comments say why each line is there. |
 | `image.txt` | The image, `registry.access.redhat.com/ubi9/nginx-126`, by tag and digest. The maintainer chose nginx 1.26 over 1.24 on 2026-10-25 (research: DECISIONS R9, D35); the 1.26 stream retires in May 2028. |
 
 The maintainer decided that this repository holds the configuration and that
@@ -36,7 +36,10 @@ image ships `curl`.
 with accents, spaces and upper-case extensions; 404 for missing files,
 directories, dot-files and names that differ only in case or Unicode
 normalisation; no file served through a symbolic link; `Access-Control-Allow-Origin: *`
-exactly once on every response, 404 and 416 included; the CORS preflight
+exactly once on every response, 404 and 416 included;
+`Access-Control-Expose-Headers: Content-Range` exactly once on every
+response, naming no other header ([below](#cross-origin-readers-see-content-range-only));
+the CORS preflight
 for `Range`; 206, 416 and the multi-range answer (the whole file with 200,
 or 416); `Last-Modified`, `ETag`, `If-Modified-Since` and `If-None-Match`;
 `Cache-Control` per folder; `nosniff`; the sandbox CSP except on PDF;
@@ -107,6 +110,22 @@ production claim:
 
 Other files may sit beside the fixtures, but none of the paths that the
 fixture table lists as missing may exist.
+
+## Cross-origin readers see `Content-Range` only
+
+Every answer lets scripts on other origins read `Content-Range` and no
+other header beyond the CORS-safelisted ones
+([ADR 0046](../../docs/design/adr/0046-only-content-range-exposed-to-cross-origin-storage-readers.md);
+research: DECISIONS R34). pdf.js uses range requests only when it can read
+`Accept-Ranges: bytes`, and the old Angular site's service worker answers a
+range request with `200` and the whole file, which pdf.js rejects. The
+Diáktoll viewer reads its PDF cross-origin, from the legacy host, so it
+must read it whole, as it did from backend1. `Content-Length` is not listed
+either; the Fetch Standard safelists it, so browsers let scripts read it
+anyway. Ranges themselves are unchanged: a file's `200` still sends
+`Accept-Ranges: bytes`, and a `Range` still gets `206` or `416`. Never add
+`Accept-Ranges` or `*` to the list; the suite fails both, on this server
+and on the fallback router.
 
 ## How the cluster runs it
 

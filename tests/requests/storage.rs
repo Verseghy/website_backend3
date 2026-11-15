@@ -168,8 +168,10 @@ fn assert_refusal_headers(request: &Request, response: &Response) {
         Some("nosniff"),
         "{request}"
     );
-    assert!(
-        response.single("access-control-expose-headers").is_some(),
+    // ADR 0046: Content-Range alone, also on a refusal.
+    assert_eq!(
+        response.single("access-control-expose-headers"),
+        Some("Content-Range"),
         "{request}"
     );
     assert_eq!(

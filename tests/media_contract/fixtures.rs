@@ -119,8 +119,9 @@ pub const FILES: &[Fixture] = &[
     file("uploads/docs/sitemap.xml", "text/xml", 300),
 ];
 
-/// The PDF that the Diáktoll viewer loads cross-origin with range requests
-/// (ADR 0015, "The URL contract"); large enough for several ranges.
+/// The PDF that the Diáktoll viewer loads cross-origin (ADR 0015, "The URL
+/// contract"), whole since ADR 0046; large enough for several ranges, which
+/// other clients may still ask for.
 pub const DIAKTOLL: Fixture = file(
     "uploads/diaktoll/ujsag_final_2021osz.pdf",
     "application/pdf",

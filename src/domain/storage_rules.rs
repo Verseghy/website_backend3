@@ -56,8 +56,18 @@ pub const ONE_HOUR: &str = "public, max-age=3600";
 /// (pdf.js) reads its PDF cross-origin and breaks without it.
 pub const ALLOW_ORIGIN: &str = "*";
 
-/// ADR 0015 §1, CORS: the headers pdf.js reads cross-origin to use ranges.
-pub const EXPOSE_HEADERS: &str = "Accept-Ranges, Content-Range, Content-Length";
+/// ADR 0015 §1, CORS, as ADR 0046 amends it: the one header that a script
+/// on another origin may read beyond the CORS-safelisted ones, on every
+/// response.
+///
+/// `Accept-Ranges` is left out on purpose: pdf.js uses range requests only
+/// when it can read `Accept-Ranges: bytes`, and the old site's Angular
+/// service worker answers a range request with the whole file, which pdf.js
+/// rejects, so a cross-origin viewer must fetch its PDF whole, as it did
+/// from backend1. `Content-Length` is left out too (the Fetch Standard
+/// safelists it anyway). Ranges themselves are unchanged: a client that
+/// sends `Range` still gets `206` and may read `Content-Range`.
+pub const EXPOSE_HEADERS: &str = "Content-Range";
 
 /// ADR 0015 §1, Headers: every response.
 pub const NOSNIFF: &str = "nosniff";
@@ -68,8 +78,8 @@ pub const NOSNIFF: &str = "nosniff";
 /// The same value as nginx's.
 pub const ALLOWED_METHODS: &str = "GET, HEAD, OPTIONS";
 
-/// The request header the preflight allows: `Range`, which pdf.js sends
-/// cross-origin (ADR 0015 §1, CORS).
+/// The request header the preflight allows: `Range`, which a cross-origin
+/// reader of a byte range sends (ADR 0015 §1, CORS; ADR 0046 keeps it).
 pub const PREFLIGHT_ALLOW_HEADERS: &str = "Range";
 
 /// How long a browser may keep the preflight answer, in seconds: 7200, the
@@ -828,11 +838,24 @@ mod tests {
         );
         assert_eq!(ALLOW_ORIGIN, "*");
         assert_eq!(NOSNIFF, "nosniff");
-        for token in ["Accept-Ranges", "Content-Range", "Content-Length"] {
-            assert!(EXPOSE_HEADERS.split(", ").any(|listed| listed == token));
-        }
+        assert_eq!(EXPOSE_HEADERS, "Content-Range");
         assert_eq!(PREFLIGHT_ALLOW_HEADERS, "Range");
         assert_eq!(PREFLIGHT_MAX_AGE.parse::<u32>(), Ok(7200));
+    }
+
+    /// ADR 0046: cross-origin scripts must not see `Accept-Ranges`, or
+    /// pdf.js switches to range requests, nor `Content-Length`; a wildcard
+    /// would expose both.
+    #[test]
+    fn cross_origin_readers_never_see_the_range_support_or_the_length() {
+        let listed: Vec<&str> = EXPOSE_HEADERS.split(',').map(str::trim).collect();
+        for hidden in ["Accept-Ranges", "Content-Length", "*"] {
+            assert!(
+                !listed.iter().any(|name| name.eq_ignore_ascii_case(hidden)),
+                "{hidden} in {EXPOSE_HEADERS:?}"
+            );
+        }
+        assert_eq!(listed, ["Content-Range"]);
     }
 
     /// A name that is a served segment: no `/`, no NUL, not starting with

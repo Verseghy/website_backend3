@@ -17,6 +17,12 @@ pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// ADR 0015 §1: everything else, because `uploads/` names can be replaced.
 pub const ONE_HOUR: &str = "public, max-age=3600";
 
+/// ADR 0015 §1, CORS, as ADR 0046 amends it: the only names that
+/// `Access-Control-Expose-Headers` may list. `Accept-Ranges` would make a
+/// cross-origin pdf.js switch to range requests; `Content-Length` was
+/// dropped with it.
+pub const EXPOSED: [&str; 1] = ["Content-Range"];
+
 /// The folders whose files get [`IMMUTABLE`].
 const IMMUTABLE_FOLDERS: [&str; 3] = ["posts_images/", "authors_images/", "colleagues_images/"];
 
@@ -105,6 +111,22 @@ pub fn lists(value: &str, token: &str) -> bool {
     value
         .split(',')
         .any(|item| item.trim().eq_ignore_ascii_case(token))
+}
+
+/// Whether a comma-separated header value lists every one of `tokens` and
+/// nothing else, ignoring case, spaces, order, repeats and empty items (RFC
+/// 9110 §5.6.1 has recipients ignore empty list items). A wildcard `*` is a
+/// token like any other, so it fails unless `tokens` names it.
+///
+/// - `value`: the header value, such as `Access-Control-Expose-Headers`.
+/// - `tokens`: the complete list the value must name.
+pub fn lists_exactly(value: &str, tokens: &[&str]) -> bool {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .all(|item| tokens.iter().any(|token| item.eq_ignore_ascii_case(token)))
+        && tokens.iter().all(|token| lists(value, token))
 }
 
 #[cfg(test)]
@@ -205,6 +227,37 @@ mod tests {
         assert!(!lists("", "GET"));
     }
 
+    #[test]
+    fn lists_exactly_wants_the_whole_list_and_nothing_more() {
+        for value in [
+            "Content-Range",
+            "content-range",
+            " Content-Range ",
+            "Content-Range, Content-Range",
+            "Content-Range,",
+        ] {
+            assert!(lists_exactly(value, &EXPOSED), "{value:?}");
+        }
+        for value in [
+            "",
+            "*",
+            "Accept-Ranges, Content-Range, Content-Length",
+            "Content-Range, Accept-Ranges",
+            "Content-Range, Content-Length",
+            "Content-Range, *",
+            "Content-Ranges",
+        ] {
+            assert!(!lists_exactly(value, &EXPOSED), "{value:?}");
+        }
+        assert!(lists_exactly("HEAD, get", &["GET", "HEAD"]));
+        assert!(!lists_exactly("GET", &["GET", "HEAD"]));
+    }
+
+    #[test]
+    fn the_exposed_list_is_content_range_alone() {
+        assert_eq!(EXPOSED, ["Content-Range"]);
+    }
+
     proptest! {
         #[test]
         fn a_target_decodes_back_to_the_stored_bytes(path in "[a-zA-Z0-9 ()\\[\\]#?%&+éáőűÁ/._~-]{0,40}") {
@@ -259,6 +312,77 @@ mod tests {
             for part in [&token[..at], &token[at..]] {
                 let listed = tokens.iter().any(|other| other.eq_ignore_ascii_case(part));
                 prop_assert_eq!(lists(&value, part), listed, "{} in {}", part, value);
+            }
+        }
+
+        #[test]
+        fn lists_exactly_is_set_equality_of_the_tokens(
+            listed in proptest::collection::vec("[A-Za-z*-]{1,12}", 0..5),
+            wanted in proptest::collection::vec("[A-Za-z*-]{1,12}", 0..4),
+            spacing in "[ \t]{0,2}",
+            upper in any::<bool>(),
+        ) {
+            let value = listed
+                .iter()
+                .map(|token| if upper { token.to_ascii_uppercase() } else { token.clone() })
+                .collect::<Vec<_>>()
+                .join(&format!("{spacing},{spacing}"));
+            let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
+            let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+            let expected = listed.iter().all(|item| wanted.iter().any(|token| same(item, token)))
+                && wanted.iter().all(|token| listed.iter().any(|item| same(item, token)));
+            prop_assert_eq!(lists_exactly(&value, &wanted), expected, "{:?} against {:?}", value, wanted);
+            // The list itself always matches its own tokens, in any order.
+            let mut reversed: Vec<&str> = listed.iter().map(String::as_str).collect();
+            reversed.reverse();
+            prop_assert!(lists_exactly(&value, &reversed));
+        }
+
+        // Independent draws, as above, almost never give a wanted list that
+        // is the value's own names in another order and case, or one name
+        // short or long of them, so this property builds those from the
+        // value: the first must match, and the other two must not, from
+        // either side.
+        #[test]
+        fn lists_exactly_tells_its_own_names_from_one_name_more_or_less(
+            listed in proptest::collection::vec("[A-Za-z-]{1,12}", 1..5),
+            turn in any::<proptest::sample::Index>(),
+            flips in proptest::collection::vec(any::<bool>(), 4),
+            again in any::<proptest::sample::Index>(),
+            dropped in any::<proptest::sample::Index>(),
+            extra in "[A-Za-z*-]{1,12}",
+            spacing in "[ \t]{0,2}",
+        ) {
+            let value = listed.join(&format!("{spacing},{spacing}"));
+            let own: Vec<&str> = listed.iter().map(String::as_str).collect();
+            // The same names, turned round, each upper- or lower-cased, with
+            // one of them named twice.
+            let mut same = listed.clone();
+            same.rotate_left(turn.index(listed.len()));
+            for (name, upper) in same.iter_mut().zip(&flips) {
+                *name = if *upper { name.to_ascii_uppercase() } else { name.to_ascii_lowercase() };
+            }
+            let repeated = again.get(&same).clone();
+            same.push(repeated);
+            let same: Vec<&str> = same.iter().map(String::as_str).collect();
+            prop_assert!(lists_exactly(&value, &same), "{:?} against {:?}", value, same);
+            // One name short (every spelling of it): the value lists a name
+            // that is not wanted.
+            let gone = dropped.get(&listed);
+            let fewer: Vec<&str> = own
+                .iter()
+                .copied()
+                .filter(|name| !name.eq_ignore_ascii_case(gone))
+                .collect();
+            prop_assert!(!lists_exactly(&value, &fewer), "{:?} against {:?}", value, fewer);
+            // One name more, when it is new: wanted, the value lacks it;
+            // listed, the value names one too many.
+            if !own.iter().any(|name| name.eq_ignore_ascii_case(&extra)) {
+                let mut more = own.clone();
+                more.push(&extra);
+                prop_assert!(!lists_exactly(&value, &more), "{:?} against {:?}", value, more);
+                let longer = format!("{value},{spacing}{extra}");
+                prop_assert!(!lists_exactly(&longer, &own), "{:?} against {:?}", longer, own);
             }
         }
 

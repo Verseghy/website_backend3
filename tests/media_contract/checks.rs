@@ -11,7 +11,10 @@ use super::{
     Server,
     fixtures::{Fixture, LAST_MODIFIED},
     http::Response,
-    rules::{SANDBOX_CSP, cache_control, lists, media_type, needs_attachment, needs_sandbox},
+    rules::{
+        EXPOSED, SANDBOX_CSP, cache_control, lists, lists_exactly, media_type, needs_attachment,
+        needs_sandbox,
+    },
 };
 
 /// Headers that have one value by definition, apart from the four that
@@ -54,15 +57,15 @@ pub fn common(response: &Response, sandbox_type: Option<&str>) -> Vec<String> {
     }
     exactly(response, "access-control-allow-origin", "*", &mut problems);
     exactly(response, "x-content-type-options", "nosniff", &mut problems);
+    // ADR 0046: the list names Content-Range and nothing else. Exposing
+    // Accept-Ranges would make a cross-origin pdf.js switch to range
+    // requests, so a list that only contains the right name is not enough.
     let exposed = response.single("access-control-expose-headers");
-    if !exposed.is_some_and(|value| {
-        ["Accept-Ranges", "Content-Range", "Content-Length"]
-            .iter()
-            .all(|token| lists(value, token))
-    }) {
+    if !exposed.is_some_and(|value| lists_exactly(value, &EXPOSED)) {
         problems.push(format!(
-            "Access-Control-Expose-Headers must be sent once and list Accept-Ranges, \
-             Content-Range and Content-Length, got {:?}",
+            "Access-Control-Expose-Headers must be sent once and list {} and nothing else \
+             (ADR 0046), got {:?}",
+            EXPOSED.join(", "),
             response.values("access-control-expose-headers")
         ));
     }
@@ -219,7 +222,7 @@ mod tests {
         http::{HeaderMap, HeaderName, HeaderValue},
     };
 
-    const EXPOSE: &str = "Accept-Ranges, Content-Range, Content-Length";
+    const EXPOSE: &str = "Content-Range";
 
     fn response(status: StatusCode, headers: &[(&'static str, &str)]) -> Response {
         let mut map = HeaderMap::new();
@@ -308,6 +311,44 @@ mod tests {
             "names a version",
         ] {
             assert!(problems.contains(needle), "{needle}: {problems}");
+        }
+    }
+
+    /// ADR 0046: `Content-Range` alone. The list ADR 0015 first had, a
+    /// wildcard and a second header line all fail; case does not matter.
+    #[test]
+    fn only_content_range_may_be_exposed() {
+        let with = |exposed: &[&'static str]| {
+            let mut headers = vec![
+                ("access-control-allow-origin", "*"),
+                ("x-content-type-options", "nosniff"),
+            ];
+            headers.extend(
+                exposed
+                    .iter()
+                    .map(|value| ("access-control-expose-headers", *value)),
+            );
+            common(&response(StatusCode::OK, &headers), Some("application/pdf"))
+        };
+        assert_eq!(with(&["Content-Range"]), Vec::<String>::new());
+        assert_eq!(with(&["content-range"]), Vec::<String>::new());
+        for exposed in [
+            &["Accept-Ranges, Content-Range, Content-Length"][..],
+            &["Content-Range, Accept-Ranges"],
+            &["Content-Range, Content-Length"],
+            &["*"],
+            &[],
+            &["Content-Range", "Content-Range"],
+        ] {
+            let problems = with(exposed);
+            assert_eq!(problems.len(), 1, "{exposed:?}: {problems:?}");
+            assert!(
+                problems[0].starts_with(
+                    "Access-Control-Expose-Headers must be sent once and list Content-Range \
+                     and nothing else (ADR 0046)"
+                ),
+                "{problems:?}"
+            );
         }
     }
 
