@@ -11,7 +11,10 @@
 //!   hand it down (ADR 0023 §9, ADR 0008 rule 3). It also stores the upload
 //!   handles ([`MediaUploads`]: the media settings and the process's one
 //!   image optimiser permit, ADR 0015 §7), which upload handlers take from
-//!   there.
+//!   there, and the handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]:
+//!   the media settings and the file-owner registry, ADR 0011 §6). It checks
+//!   that registry before storing it and refuses to start on a name that is
+//!   not a plain identifier, because the worker writes the names into SQL.
 //! - `load_config` runs the database-target guard of ADR 0024 §4 (layer 3)
 //!   and validates the typed settings, including that `settings.metrics.port`
 //!   is not `server.port`, and the admin session's `auth.jwt` section
@@ -72,12 +75,8 @@ use chrono::{DateTime, Utc};
 // `cargo loco generate worker` injects
 // `queue.register(crate::workers::<name>::Worker::build(ctx)).await?;` into
 // `connect_workers` (loco-gen 1.2.0, `templates/worker/worker.t`). `build` is
-// a method of the `BackgroundWorker` trait, so the trait must be in scope
-// before the first worker exists, as in Loco's own `app.rs` template.
-#[allow(
-    unused_imports,
-    reason = "used by the lines `cargo loco generate worker` injects into connect_workers"
-)]
+// a method of the `BackgroundWorker` trait, so the trait stays in scope here,
+// as in Loco's own `app.rs` template.
 use loco_rs::bgworker::BackgroundWorker;
 use loco_rs::{
     Error, Result,
@@ -122,6 +121,7 @@ use crate::{
     settings::{
         METRICS_BINDING_KEY, METRICS_PORT_KEY, MetricsSettings, Settings, check_session_jwt,
     },
+    workers::delete_owned_files::OwnedFiles,
 };
 
 /// The Loco application.
@@ -403,7 +403,9 @@ impl Hooks for App {
     /// the clock and the registry are there before any other hook,
     /// initializer, route or worker runs. Tasks get a registry as well; an
     /// unused one costs a few allocations. Last, it stores the upload
-    /// handles ([`MediaUploads`]), one optimiser permit per process.
+    /// handles ([`MediaUploads`]), one optimiser permit per process, and the
+    /// handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]), whose
+    /// file-owner registry it checks.
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
         set_clock(&ctx, Arc::new(SystemClock));
         let mut registry = Registry::default();
@@ -420,6 +422,11 @@ impl Hooks for App {
         // validated the settings, so this parse cannot fail on them.
         let settings = Settings::from_section(ctx.config.settings.as_ref()).map_err(Error::msg)?;
         ctx.shared_store.insert(MediaUploads::new(&settings));
+        // The handles of the DeleteOwnedFiles worker: the media settings and
+        // the file-owner registry, refused here when a name in it is not a
+        // plain identifier, because the worker writes the names into SQL.
+        ctx.shared_store
+            .insert(OwnedFiles::new(&settings).map_err(Error::wrap)?);
         Ok(ctx)
     }
 
@@ -549,8 +556,10 @@ impl Hooks for App {
 
     // `cargo loco generate worker` injects `queue.register(...)` right after
     // the signature line below, using these parameter names.
-    #[allow(unused_variables)]
     async fn connect_workers(ctx: &AppContext, queue: &Queue) -> Result<()> {
+        queue
+            .register(crate::workers::delete_owned_files::Worker::build(ctx))
+            .await?;
         Ok(())
     }
 

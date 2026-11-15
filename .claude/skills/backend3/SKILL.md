@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, or an activity-log entry. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, or a queue worker. Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its eight repeated tasks. They sit on
+These recipes are backend3's way of doing its nine repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -171,7 +171,20 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    (`media_rules::stored_value`, data-migration.md §6), never `stored.path`,
    the path below the root: the public URL is
    `{public_base_url}/{disk}/{stored value}` (public-api.md §2.3), and the
-   admin's is `/storage/` followed by `stored.path` (ADR 0015 §3).
+   admin's is `/storage/` followed by `stored.path` (ADR 0015 §3). The
+   slice that adds the column joins the file-owner registry with one line,
+   `FileOwner { entity: "<table>", column: "<column>", folder: <the
+   EntityImageFolder> }` in `FILE_OWNERS` (`src/domain/owned_files.rs`):
+   the `DeleteOwnedFiles` worker checks a file only against the registered
+   columns of its folder and refuses a folder that has none (recipe 9).
+   The entity's revision snapshot type lists the column in `FIELDS` under
+   the same name (recipe 2 step 6): a purge reads the column's files from
+   every revision by that name, and `files_of_record` refuses a snapshot
+   type that lacks it.
+   `tests/models/owned_files.rs` runs the reference query of every
+   registered column against the migrated schema. A replace or a clear
+   removes no file: the old file stays while a revision shows it, and goes
+   with the record's purge (step 7 of recipe 2).
    Request tests of an upload endpoint follow `tests/requests/media_upload.rs`
    and give each test its own media volume (`tests/support::TempMedia`).
    A handler for a signed-in account takes
@@ -318,7 +331,23 @@ revisions and activity-log entries in the PR that adds it (ADR 0011 section 1).
    save that is still running ends first and its revision is deleted too;
    a plain `DELETE` would miss that revision, which would then outlive the
    purge or keep the personal data that the anonymisation removes.
-   Owned files are removed by a queue job after the commit (ADR 0016).
+   Owned files are removed by the `DeleteOwnedFiles` job after the commit
+   (ADR 0011 §6, ADR 0016; recipe 9). Before the row and its revisions
+   go, collect the files they name with
+   `models::owned_files::files_of_record::<S>(&txn, owners, id)`, where `S`
+   is the entity's revision snapshot type, with the registry of
+   `workers::delete_owned_files::owned_files(&ctx)?`: it reads the
+   registered columns of the row and the members of the same name in every
+   one of its revisions, an older snapshot upcast first, because an image
+   replaced long ago is shown only by an old revision and nothing would
+   name it after the purge. It refuses an `S` whose `FIELDS` lack a
+   registered column, and skips with a warning what names no file. End
+   the transaction with
+   `workers::delete_owned_files::commit_then_enqueue(&ctx, txn, &paths)`
+   instead of `txn.commit()`: it commits, then enqueues the jobs, so no
+   job runs while the purge may still roll back. After the commit it
+   never fails; `AfterCommit::NotEnqueued` means the files stay as harmless
+   orphans, which the log names.
 8. **Admin API and UI**: the restore, purge and revisions routes of ADR 0011
    section 8 behind the resource's permission (ADR 0007 section 4), the
    trash filter on the list, and the „Előzmények” panel on the edit page.
@@ -880,3 +909,65 @@ are in `src/domain/activity.rs` (`Actor`, `Action`, `check_entry`,
    actor, entity, label, the changed field names) and that a failed entry
    rolls the change back. Compare `occurred_at` with the database's clock,
    as recipe 7 step 6 says.
+
+---
+
+## 9. Add a queue worker
+
+Out-of-request work runs on Loco's Postgres queue inside the web process,
+never with `tokio::spawn` (ADR 0016 §3). A recurring job is enqueued by a
+task that a CronJob runs (recipe 6), because CronJob pods never mount the
+uploads volume (ADR 0015 §3). `AGENTS.md`, "Queue workers", has the rules
+this recipe follows.
+
+1. **Generate** it with `cargo loco generate worker <name>`: it writes
+   `src/workers/<name>.rs` with `Worker`, `WorkerArgs` and `class_name()`
+   (the job's name in `jobs dump` and `jobs retry`), and registers it in
+   `App::connect_workers`. Rewrite the generated test,
+   `tests/workers/<name>.rs`, on `tests/support::with_app` (recipe 1 step
+   11); `config/test.yaml` runs jobs inline (`ForegroundBlocking`), so
+   `perform_later` returns the job's own outcome.
+   `config/development.yaml` queues jobs (`BackgroundQueue`), and a plain
+   `cargo loco start` runs none of them: start the server locally with
+   `cargo loco start --server-and-worker`, as the image does, to see the
+   job run (`AGENTS.md`, "Queue workers").
+2. **Arguments**: ids and small values only, never file contents
+   (ADR 0016 §3). Do not refuse unknown members of `WorkerArgs`
+   (`deny_unknown_fields`): Loco 1.2.0 merges a failed job's error into its
+   stored data as an `error` member, and `jobs retry` runs the job with that
+   data. Check the arguments at the start of `perform`, before any work,
+   with a pure rule in `src/domain/` where there is one.
+3. **Handles**: what the job needs besides `ctx.db` (settings, a registry)
+   comes from a struct that `App::after_context` stores in the shared
+   store, as `OwnedFiles` and `MediaUploads` do, so a test can replace it
+   with a volume and registrations of its own. The work itself lives on a
+   model or a model module without an entity, which takes the connection
+   and the handles as arguments (ADR 0008 rules 2 and 3); blocking
+   file-system calls go through `tokio::task::spawn_blocking`, which the
+   job awaits.
+4. **Idempotent**: two runs give the result of one; a test runs the job
+   twice on the same input and checks that the second changes nothing and
+   does not fail (ADR 0016, "What must be true").
+5. **Outcome**: a job that works on a row records its outcome there
+   (ADR 0016 §3), and a reconciliation task re-enqueues the rows still
+   marked as not done. A job whose work is files (`DeleteOwnedFiles`, the
+   media trash purge, the sitemap) has no row to mark: its outcome is the
+   state of the files, a failure leaves only orphans that nothing refers to
+   (ADR 0011 §6), and its recovery is an operator's `jobs retry` once the
+   cause is fixed (`AGENTS.md`, "Queue workers"). Either way a failure
+   returns an error, and never loops with `sleep` or retries by itself.
+   Let the job try all of its items before it fails, and name each failed
+   item in the error, which Loco stores on the failed job.
+6. **Enqueue after the commit**: a job that follows a database change is
+   enqueued only once that change has committed, so it never acts on a
+   change that rolls back. `commit_then_enqueue` in
+   `src/workers/delete_owned_files.rs` is the pattern: it takes the
+   transaction by value, commits, then enqueues with `perform_all_later`
+   (one round trip for several jobs), and after the commit it logs a
+   failed enqueue rather than fail the request whose change stands.
+7. **Tests** in `tests/workers/<name>.rs`: the work and its idempotence,
+   each refusal of the arguments, each failure (it returns an error, and
+   the other items were still done), the order around the commit (a commit
+   that fails enqueues nothing), and, with a `PgQueue` on the test's pool
+   in `BackgroundQueue` mode, the job as the queue stores it
+   (`tests/workers/delete_owned_files.rs` has the set-up).
