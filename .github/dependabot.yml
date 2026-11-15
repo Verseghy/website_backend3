@@ -233,10 +233,10 @@ updates:
       - dependency-name: jsonwebtoken
         update-types: ["version-update:semver-major"]
       # The server sanitiser (ADR 0013 section 5, docs/design/editor.md
-      # section 7) is pinned: ammonia 4.2.4, html5ever 0.40.1 (whose
+      # section 7) is pinned: ammonia 4.2.5, html5ever 0.40.1 (whose
       # serialiser defines the stored HTML, editor.md section 3.8), scraper
       # 0.29 and cssparser 0.38. scraper and the sanitiser's own parser and
-      # CSS tokenizer must be the copies ammonia uses (ammonia 4.2.4 and
+      # CSS tokenizer must be the copies ammonia uses (ammonia 4.2.5 and
       # scraper 0.29.0 both require html5ever "^0.40" and cssparser "^0.38.0";
       # editor.md sections 7.3, 7.5 and 7.6), and the canonical output relies
       # on ammonia internals, so every upgrade goes through the corpus job
@@ -244,7 +244,7 @@ updates:
       # deliberate editor PR; the updates that remain still arrive as PRs and
       # must pass that job. ammonia, html5ever, scraper and cssparser are
       # dependencies (src/domain/rich_text/, cssparser for the style grammar
-      # in its css/ module; ammonia exactly "=4.2.4", whose behaviour the
+      # in its css/ module; ammonia exactly "=4.2.5", whose behaviour the
       # pinned-ammonia unit tests hold).
       - dependency-name: ammonia
         update-types: ["version-update:semver-major"]

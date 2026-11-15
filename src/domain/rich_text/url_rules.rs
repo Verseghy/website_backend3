@@ -42,8 +42,8 @@ pub fn is_relative(value: &str) -> bool {
     matches!(Url::parse(value), Err(ParseError::RelativeUrlWithoutBase))
 }
 
-/// The scheme check that ammonia 4.2.4 makes at its allow-list step
-/// (ammonia@4.2.4:src/lib.rs, `clean_child`): an absolute URL must use one of
+/// The scheme check that ammonia 4.2.5 makes at its allow-list step
+/// (ammonia@4.2.5:src/lib.rs, `clean_child`): an absolute URL must use one of
 /// [`URL_SCHEMES`], a relative URL passes on to the later rules, and a value
 /// that does not parse at all is dropped.
 ///

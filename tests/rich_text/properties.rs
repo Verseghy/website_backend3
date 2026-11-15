@@ -16,14 +16,25 @@
 //! states), which is where a serialised tree can parse differently the
 //! next time.
 //!
+//! A second generator draws the shapes of RUSTSEC-2026-0533 (editor.md
+//! §3.5): soup weighted to the `MathML` text integration points and SVG's
+//! HTML integration points, the elements of the other foreign namespace, and
+//! payloads that are a comment or CDATA in one namespace and live HTML in
+//! the other. Over it, P1, P0 and P5 hold, and the output holds only
+//! content-v1 elements in the HTML namespace, with no comment and no
+//! event-handler attribute, as a renderer's parse reads it.
+//!
 //! P1 runs at least 512 cases; `PROPTEST_CASES` raises that (the nightly
 //! run asks for 20,000). Every shrunk failure is added to
 //! `tests/fixtures/regressions/` with its expected output, so it is checked
 //! on every run from then on.
 
 use backend3::domain::rich_text::Sanitizer;
+use backend3::domain::rich_text::policy::element_rule;
+use html5ever::ns;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
+use scraper::{Html, Node};
 
 use super::sanitizer;
 
@@ -37,7 +48,8 @@ const TAGS: &[&str] = &[
     "blockquote", "ul", "ol", "li", "a", "span", "img", "table", "tbody", "tr", "td", "th",
     "iframe",
     // removed with their content, raw text and parser-state tags
-    "svg", "math", "annotation-xml", "foreignObject", "mi", "mtext", "mglyph", "desc", "g",
+    "svg", "math", "annotation-xml", "foreignObject", "mi", "mo", "mn", "ms", "mtext", "mglyph",
+    "desc", "g",
     "noscript", "template", "xmp", "plaintext", "textarea", "title", "style", "script",
     "button", "marquee", "select", "option", "object", "embed", "xml", "frameset",
     // unwrapped, or restructured by the parser
@@ -184,6 +196,113 @@ pub(super) fn arb_html() -> impl Strategy<Value = String> {
     prop::collection::vec(arb_part(), 0..40).prop_map(|parts| parts.concat())
 }
 
+/// Tags for the shapes of RUSTSEC-2026-0533: the two foreign roots, the
+/// `MathML` text integration points, SVG's HTML integration points and
+/// `annotation-xml`, other elements of both foreign namespaces, the elements
+/// whose content the tokenizer reads as raw text in HTML, and content-v1 and
+/// formatting tags around them (a formatting end tag inside foreign content
+/// reaches the adoption agency).
+#[rustfmt::skip]
+const FOREIGN_SOUP_TAGS: &[&str] = &[
+    "svg", "math", "mi", "mo", "mn", "ms", "mtext", "foreignObject", "desc", "title",
+    "annotation-xml", "mglyph", "malignmark", "g", "path", "mrow", "semantics", "annotation",
+    "iframe", "style", "xmp", "noembed", "noframes", "noscript", "textarea", "script", "img",
+    "p", "a", "b", "em", "font", "span", "table", "td", "li", "div",
+];
+
+/// Attributes that change how the parser reads foreign content (`encoding`
+/// on `annotation-xml`, `color` on `font`) and attributes a payload uses.
+#[rustfmt::skip]
+const FOREIGN_SOUP_ATTRIBUTES: &[&str] = &[
+    r#" encoding="text/html""#, r#" encoding="application/xhtml+xml""#, r#" color="red""#,
+    r#" src="/storage/uploads/a.png""#, r#" alt="a""#, " src", " onerror=alert(1)",
+    r#" href="/x""#, r#" xlink:href="javascript:alert(1)""#,
+];
+
+/// Markup that is a comment, CDATA or the end of an element in one
+/// namespace and live HTML in another, and its pieces.
+#[rustfmt::skip]
+const FOREIGN_SOUP_PAYLOADS: &[&str] = &[
+    "<!--</iframe><img src onerror=alert(1)>-->", "<!--</style><img src onerror=alert(1)>-->",
+    "</xmp><img src onerror=alert(1)>", "</title><img src onerror=alert(1)>",
+    "<![CDATA[</iframe><img src onerror=alert(1)>]]>", "<!--", "-->", "<![CDATA[", "]]>", "x",
+];
+
+/// The advisory's openings: each `MathML` text integration point holding the
+/// SVG root, and each SVG HTML integration point (and an HTML-encoded
+/// `annotation-xml`) holding the `MathML` root, so that the soup reaches them
+/// often rather than by chance.
+#[rustfmt::skip]
+const FOREIGN_SOUP_OPENINGS: &[&str] = &[
+    "<math><mi><svg>", "<math><mo><svg>", "<math><mn><svg>", "<math><ms><svg>",
+    "<math><mtext><svg>", "<svg><foreignObject><math>", "<svg><desc><math>",
+    "<svg><title><math>", r#"<math><annotation-xml encoding="text/html"><svg>"#,
+];
+
+/// One piece of the soup of RUSTSEC-2026-0533's shapes.
+fn arb_foreign_part() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => prop::sample::select(FOREIGN_SOUP_OPENINGS).prop_map(str::to_owned),
+        5 => (
+            prop::sample::select(FOREIGN_SOUP_TAGS),
+            0u8..3,
+            prop::collection::vec(prop::sample::select(FOREIGN_SOUP_ATTRIBUTES), 0..3),
+            prop::bool::weighted(0.1),
+        )
+            .prop_map(|(tag, case, attributes, closing)| {
+                format!(
+                    "<{}{}{}>",
+                    cased(tag, case),
+                    attributes.concat(),
+                    if closing { "/" } else { "" }
+                )
+            }),
+        2 => (prop::sample::select(FOREIGN_SOUP_TAGS), 0u8..3)
+            .prop_map(|(tag, case)| format!("</{}>", cased(tag, case))),
+        3 => prop::sample::select(FOREIGN_SOUP_PAYLOADS).prop_map(str::to_owned),
+    ]
+}
+
+/// A body of up to 30 pieces of that soup.
+fn arb_foreign_soup() -> impl Strategy<Value = String> {
+    prop::collection::vec(arb_foreign_part(), 0..30).prop_map(|parts| parts.concat())
+}
+
+/// Checks that `output`, parsed as a renderer parses a body (an HTML
+/// fragment), holds only content-v1 elements in the HTML namespace, no
+/// comment and no event-handler attribute.
+fn assert_html_only(output: &str) -> Result<(), TestCaseError> {
+    let parsed = Html::parse_fragment(output);
+    // The body's nodes are the descendants of the fragment's `html` root.
+    // The parser's context element also lives in the tree, unattached, so
+    // the walk starts from the root rather than from every node.
+    for node in parsed.root_element().descendants().skip(1) {
+        match node.value() {
+            Node::Element(element) => {
+                prop_assert!(
+                    element.name.ns == ns!(html),
+                    "{:?}: {:?}",
+                    output,
+                    element.name
+                );
+                let name = element.name();
+                prop_assert!(element_rule(name).is_some(), "{:?}: {}", output, name);
+                for (attribute, _) in element.attrs() {
+                    prop_assert!(
+                        !attribute.to_ascii_lowercase().starts_with("on"),
+                        "{:?}: {}",
+                        output,
+                        attribute
+                    );
+                }
+            }
+            Node::Comment(_) => prop_assert!(false, "{:?} holds a comment", output),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// At least 512 cases (editor.md §13.6), or more when `PROPTEST_CASES`
 /// asks for more. proptest itself reads the variable in its default
 /// configuration.
@@ -242,6 +361,29 @@ proptest! {
             prop_assert_eq!(&sanitizer().sanitize(&input), &first, "{:?}", input);
         }
     }
+
+    // The shapes of RUSTSEC-2026-0533: P1, P0, P5, and nothing foreign left.
+    // `svg` and `math` go with their content before ammonia's namespace
+    // check, so the output is HTML only, whichever ammonia check it has.
+    // The oracle checks the output against `policy.json`, as it does every
+    // P1 output; `assert_html_only` adds what the advisory is about, the
+    // namespace and the comments a renderer's parse finds.
+    #[test]
+    fn foreign_content_in_integration_points_settles_and_leaves_nothing(
+        input in arb_foreign_soup()
+    ) {
+        let sanitizer = sanitizer();
+        assert_idempotent(&sanitizer, &input)?;
+        let first = sanitizer
+            .sanitize(&input)
+            .map_err(|error| TestCaseError::fail(format!("{input:?} was refused: {error}")))?;
+        super::oracle::assert_content_v1(first.html.as_str()).map_err(TestCaseError::fail)?;
+        assert_html_only(first.html.as_str())?;
+        for _ in 0..3 {
+            let again = super::sanitizer().sanitize(&input);
+            prop_assert_eq!(again.as_ref(), Ok(&first), "{:?}", input);
+        }
+    }
 }
 
 #[test]
@@ -274,10 +416,38 @@ fn the_generator_reaches_the_tricky_parts() {
         "</iframe",
         "<![cdata[",
         "\0",
+        // The integration points of foreign content (RUSTSEC-2026-0533).
+        "<mi",
+        "<mo",
+        "<mn",
+        "<ms",
+        "<mtext",
+        "<foreignobject",
+        "<annotation-xml",
     ] {
         assert!(lower.contains(needle), "{needle}");
     }
     assert!(sample.contains("<IFRAME") || sample.contains("<IfRaMe"));
+}
+
+#[test]
+fn the_foreign_generator_puts_the_other_namespace_in_every_integration_point() {
+    // A sample of the second generator holds every opening of the
+    // advisory, the payloads, and the tags in more than one case.
+    let mut runner = proptest::test_runner::TestRunner::deterministic();
+    let strategy = arb_foreign_soup();
+    let mut sample = String::new();
+    for _ in 0..2_000 {
+        let tree = strategy
+            .new_tree(&mut runner)
+            .expect("the generator always produces a value");
+        sample.push_str(&tree.current());
+    }
+    for needle in FOREIGN_SOUP_OPENINGS.iter().chain(FOREIGN_SOUP_PAYLOADS) {
+        assert!(sample.contains(needle), "{needle}");
+    }
+    assert!(sample.contains("<MTEXT"));
+    assert!(sample.contains("<FOREIGNOBJECT"));
 }
 
 #[test]

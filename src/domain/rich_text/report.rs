@@ -213,11 +213,11 @@ impl RemovalReport {
     }
 }
 
-/// HTML-namespace tag names that ammonia 4.2.4 removes together with their
+/// HTML-namespace tag names that ammonia 4.2.5 removes together with their
 /// content although they are not in `clean_content_tags`: the lower-case
 /// names of its `is_svg_tag` and `is_mathml_tag` lists, without `title`,
 /// `style`, `font`, `a`, `script` and `span`, which it also accepts as HTML
-/// (ammonia@4.2.4:src/lib.rs, `check_expected_namespace` and `is_html_tag`).
+/// (ammonia@4.2.5:src/lib.rs, `check_expected_namespace` and `is_html_tag`).
 /// An HTML parser lower-cases tag names, so the mixed-case names of those
 /// lists (`clipPath`, `foreignObject`) never occur on an HTML element and are
 /// left out, and so is `image`, which the parser renames to `img`.
@@ -250,7 +250,7 @@ pub const AMMONIA_FOREIGN_TAGS: &[&str] = &[
     "vectorproduct", "view", "xor",
 ];
 
-/// Parses `input` the way ammonia 4.2.4 does (ammonia@4.2.4:src/lib.rs,
+/// Parses `input` the way ammonia 4.2.5 does (ammonia@4.2.5:src/lib.rs,
 /// `make_parser`): an HTML fragment in a `div` context, default options,
 /// into a tree that treats an HTML-encoded `annotation-xml` as an
 /// integration point, as ammonia's own tree does
@@ -277,7 +277,7 @@ pub fn parse_like_ammonia(input: &str) -> Html {
 /// element was created: an `annotation-xml` whose `encoding` is `text/html`
 /// or `application/xhtml+xml` is one, and html5ever passes that in the
 /// creation flags. ammonia's tree keeps the flag and answers with it
-/// (ammonia@4.2.4:src/rcdom.rs, `is_mathml_annotation_xml_integration_point`);
+/// (ammonia@4.2.5:src/rcdom.rs, `is_mathml_annotation_xml_integration_point`);
 /// scraper's always answers no (`scraper@0.29.0:src/html/tree_sink.rs`). The
 /// trees then differ: `<math><annotation-xml encoding="text/html"><img>`
 /// keeps the `img` inside the `math` in ammonia's tree, which removes it

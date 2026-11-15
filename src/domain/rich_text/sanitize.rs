@@ -1,4 +1,4 @@
-//! The [`Sanitizer`]: ammonia 4.2.4 configured from the content-v1 tables,
+//! The [`Sanitizer`]: ammonia 4.2.5 configured from the content-v1 tables,
 //! the structural pass, the fixed-point loop around both, the
 //! [`SanitizedHtml`] type, and the removal report of each run (editor.md
 //! §7.2, §7.5, ADR 0013 §5).
@@ -334,7 +334,7 @@ fn fixed_point(
 }
 
 /// The ammonia builder for content-v1 (the sketch of editor.md §7.2, pinned
-/// against ammonia 4.2.4): [`allow_list`] plus the attribute filter.
+/// against ammonia 4.2.5): [`allow_list`] plus the attribute filter.
 fn builder(policy: Arc<SanitizePolicy>) -> Builder<'static> {
     let mut builder = allow_list();
     builder.attribute_filter(move |element, attribute, value| {
@@ -685,6 +685,126 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn foreign_content_goes_whole_before_the_namespace_check() {
+        // The shapes of RUSTSEC-2026-0533, fixed in ammonia 4.2.5: up to
+        // 4.2.4, ammonia's namespace check let a MathML text integration
+        // point (`mi`, `mo`, `mn`, `ms`, `mtext`) keep any SVG element, and
+        // SVG's `foreignObject` any MathML element, without the other
+        // namespace's root, which parses differently as HTML and as XML.
+        // content-v1 never reaches that check with a foreign parent: `svg`
+        // and `math` are in `clean_content_tags`, which ammonia tests before
+        // the namespace, so it removes them with everything inside, and the
+        // parser keeps every foreign element inside its `svg` or `math`.
+        // One ammonia pass therefore removes each shape whole, and the
+        // report counts only the root (editor.md §3.5).
+        const COMMENT: &str = "<!--</iframe><img src onerror=alert(1)>-->";
+        const STYLE: &str = "<!--</style><img src onerror=alert(1)>-->";
+        let mut shapes = Vec::new();
+        for point in ["mi", "mo", "mn", "ms", "mtext"] {
+            for (open, payload, close) in [
+                ("<svg><iframe>", COMMENT, "</iframe></svg>"),
+                ("<svg><style>", STYLE, "</style></svg>"),
+                ("<svg><g><iframe>", COMMENT, "</iframe></g></svg>"),
+            ] {
+                shapes.push((
+                    "math",
+                    format!("<math><{point}>{open}{payload}{close}</{point}></math>"),
+                ));
+            }
+        }
+        for point in ["foreignObject", "desc", "title"] {
+            for (open, payload, close) in [
+                ("<math><iframe>", COMMENT, "</iframe></math>"),
+                ("<math><style>", STYLE, "</style></math>"),
+                (
+                    "<math><mi><svg><iframe>",
+                    COMMENT,
+                    "</iframe></svg></mi></math>",
+                ),
+            ] {
+                shapes.push((
+                    "svg",
+                    format!("<svg><{point}>{open}{payload}{close}</{point}></svg>"),
+                ));
+            }
+        }
+        for (root, shape) in &shapes {
+            let input = format!("<p>a{shape}b</p>");
+            assert_eq!(ammonia(&input), "<p>ab</p>", "{input}");
+            let result = sanitizer().sanitize(&input).expect("small input");
+            assert_eq!(result.html.as_str(), "<p>ab</p>", "{input}");
+            let entries: Vec<_> = result
+                .report
+                .entries()
+                .map(|(removal, count)| (removal.rule, removal.element.as_str(), count))
+                .collect();
+            assert_eq!(
+                entries,
+                [(RemovalRule::ElementRemoved, *root, 1)],
+                "{input}"
+            );
+        }
+        // ammonia's own vectors for the fix, unclosed, through content-v1:
+        // the root swallows the rest of the body. They came out empty before
+        // the fix as well; the next test holds the fix itself.
+        for input in [
+            "<math><mi><svg><iframe><!--</iframe><img src onerror=alert(1)>-->",
+            "<svg><foreignObject><math><iframe><!--</iframe><img src onerror=alert(1)>-->",
+        ] {
+            assert_eq!(ammonia(input), "", "{input}");
+            assert_eq!(clean(input), "", "{input}");
+        }
+        // `mtext` and `foreignObject` are scope boundaries for the parser, so
+        // the end tag of a formatting element opened outside cannot move one
+        // out of its root through the adoption agency: the `</b>` is
+        // ignored, and the rest of the paragraph stays inside the removed
+        // `math` or `svg`.
+        assert_eq!(
+            clean(&format!(
+                "<p><b>a<math><mtext></b><svg><iframe>{COMMENT}</p>"
+            )),
+            "<p>a</p>"
+        );
+        assert_eq!(
+            clean(&format!(
+                "<p><b>a<svg><foreignObject></b><math><iframe>{COMMENT}</p>"
+            )),
+            "<p>a</p>"
+        );
+    }
+
+    #[test]
+    fn ammonia_keeps_the_other_namespace_only_under_its_own_root() {
+        // ammonia's own fix for RUSTSEC-2026-0533 (ammonia 4.2.5), which no
+        // test through content-v1 can see, because content-v1 removes `svg`
+        // and `math` whole before the namespace check (the test above). So
+        // this builds ammonia's own test configurations (its `ns_mathml_4`
+        // and `ns_svg_3`): they allow the integration point and the `iframe`
+        // but not the other namespace's root, and they keep comments. The
+        // root is unwrapped, so the `iframe`, still in the root's namespace,
+        // becomes a child of the integration point. Up to 4.2.4 ammonia kept
+        // it with its comment, which HTML reads as raw text ending at
+        // `</iframe>`, followed by a live `img`; 4.2.5 removes it with its
+        // content. This fails if the pin ever moves back to a version
+        // without the fix (editor.md §13.6, "Pinned ammonia behaviour").
+        const PAYLOAD: &str = "<iframe><!--</iframe><img src onerror=alert(1)>-->";
+        for point in ["mi", "mo", "mn", "ms", "mtext"] {
+            let output = Builder::default()
+                .add_tags(["math", point, "iframe"])
+                .strip_comments(false)
+                .clean(&format!("<math><{point}><svg>{PAYLOAD}"))
+                .to_string();
+            assert_eq!(output, format!("<math><{point}></{point}></math>"));
+        }
+        let output = Builder::default()
+            .add_tags(["svg", "foreignObject", "iframe"])
+            .strip_comments(false)
+            .clean(&format!("<svg><foreignObject><math>{PAYLOAD}"))
+            .to_string();
+        assert_eq!(output, "<svg><foreignObject></foreignObject></svg>");
     }
 
     #[test]
