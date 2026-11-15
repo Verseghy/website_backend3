@@ -22,7 +22,11 @@
 //! 4. checks the paths: the resolution file can be read, `storage_root` is a
 //!    directory, and `report` is an empty directory outside `storage_root`
 //!    ([`paths`]);
-//! 5. then, under the task lock (ADR 0016 §4; a run that finds the lock
+//! 5. reads the resolution file (at most 1 MiB of UTF-8) and validates it,
+//!    naming the entry and the field of every problem, and keeps the
+//!    SHA-256 of the bytes it validated ([`resolutions`],
+//!    `domain::import_mysql::resolutions`, data-migration.md §8.2);
+//! 6. then, under the task lock (ADR 0016 §4; a run that finds the lock
 //!    held exits 0 and writes nothing), builds the source pool, calls
 //!    [`run`] with the source, the target and the options, reads the end of
 //!    the run from the app clock and writes the report, also for a run that
@@ -41,15 +45,15 @@
 //!    every table's `AUTO_INCREMENT` and the latest timestamp, which
 //!    `snapshot_at` must not precede ([`session`]).
 //!
-//! The resolution file, the defect detector and the table steps follow,
-//! and until they arrive the run imports nothing, and the report says so
-//! section by section. Every step reads the legacy tables through
-//! [`source::select_rows`] on the session's connection, the source query
-//! layer, which reads only the tables of the source allow-list
-//! (`domain::import_mysql::source_tables`; the newsletter is never read,
-//! NWS-01). `tests/architecture.rs` fails when a file of this module other
-//! than `source.rs` and `session.rs` builds or sends a statement to the
-//! source or opens a connection to it.
+//! The defect detectors and the table steps follow; they take their
+//! entries from the validated resolution file. Until they arrive the run
+//! imports nothing, and the report says so section by section. Every step
+//! reads the legacy tables through [`source::select_rows`] on the session's
+//! connection, the source query layer, which reads only the tables of the
+//! source allow-list (`domain::import_mysql::source_tables`; the newsletter
+//! is never read, NWS-01). `tests/architecture.rs` fails when a file of
+//! this module other than `source.rs` and `session.rs` builds or sends a
+//! statement to the source or opens a connection to it.
 //!
 //! The whole module, and the MySQL driver, exist only with the default Cargo
 //! feature `import-mysql` (data-migration.md §3.3).
@@ -57,6 +61,7 @@
 pub mod expected_schema;
 mod paths;
 pub mod report;
+pub mod resolutions;
 pub mod session;
 pub mod source;
 pub mod target;
@@ -99,9 +104,12 @@ impl Task for ImportMysql {
     /// # Errors
     ///
     /// A refused argument, an unset or unusable source setting, a path that
-    /// fails its check, a failed step of the import or a report that cannot
-    /// be written. Every message names what to fix and never shows the
-    /// source URL. A run that finds the task lock held is not an error.
+    /// fails its check, a resolution file that fails validation, a failed
+    /// step of the import or a report that cannot be written. Every message
+    /// names what to fix and never shows the source URL. These checks, the
+    /// resolution file's included, run before the task lock, so a run that
+    /// finds the lock held still fails on them; the held lock itself is not
+    /// an error.
     async fn run(&self, ctx: &AppContext, vars: &Vars) -> Result<()> {
         let clock = app::clock(ctx)?;
         let started_at = clock.now();
@@ -112,6 +120,13 @@ impl Task for ImportMysql {
             &ctx.environment.to_string(),
         )?;
         paths::check(&options)?;
+        // Validated before the lock and before the source is read
+        // (data-migration.md §4.3), so a broken list fails the nightly at
+        // once, even while another run holds the lock. The defect detectors
+        // of the steps will take their entries from it, and the activity
+        // entries its digest; until then the run only refuses an invalid
+        // file and logs what the list holds.
+        let loaded = resolutions::load(&options.resolutions)?;
 
         with_task_lock(&ctx.db, &self.task().name, || async {
             tracing::info!(
@@ -119,6 +134,12 @@ impl Task for ImportMysql {
                 mode = options.mode.as_str(),
                 snapshot_at = %format_instant(options.snapshot_at),
                 report = %options.report.display(),
+                resolution_entries = loaded.file.entry_count(),
+                resolutions_signed_off = %loaded
+                    .file
+                    .signed_off
+                    .map_or_else(|| "no".to_owned(), |date| date.to_string()),
+                resolutions_sha256 = %loaded.digest,
                 "the import run starts"
             );
             let source_db = source::pool(source_options);
@@ -149,9 +170,11 @@ impl Task for ImportMysql {
 /// Everything runs in one transaction on the target ([`target`]): the
 /// checks of the code tables, the refusal of a target that holds data, and
 /// the source session ([`session::read`]). `apply` commits it, `dry-run`
-/// rolls it back, and a failed run always rolls back. The resolution file,
-/// the defect detector and the table steps come in the slices that follow
-/// (ADR 0025 class d), and each adds its part of the report.
+/// rolls it back, and a failed run always rolls back. The defect detectors
+/// and the table steps come in the slices that follow (ADR 0025 class d),
+/// take their entries from the resolution file that [`ImportMysql::run`]
+/// has validated before the task lock, and each adds its part of the
+/// report.
 ///
 /// # Errors
 ///

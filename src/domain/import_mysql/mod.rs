@@ -29,6 +29,10 @@
 //! - [`target`]: the checks on backend3's own database before the import:
 //!   `roles` and the `user_permissions` CHECK agree with the code, and every
 //!   table the import writes is empty (§4.2);
+//! - [`resolutions`]: the defect resolution file of data-migration.md §8.2,
+//!   `data/import/resolutions.toml`: its TOML schema, parsed and validated
+//!   into [`resolutions::ResolutionFile`] with a message that names the
+//!   entry and the field for every problem;
 //! - [`report`]: the run report's `summary.json` and its Markdown skeleton
 //!   (data-migration.md §11.3), from the instants the task read from the app
 //!   clock;
@@ -45,6 +49,7 @@ pub mod fingerprint;
 pub mod not_migrated;
 pub mod options;
 pub mod report;
+pub mod resolutions;
 pub mod source;
 pub mod source_guard;
 pub mod source_session;

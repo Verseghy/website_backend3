@@ -184,8 +184,8 @@ RUN SOURCE_COMMIT="$SOURCE_COMMIT" cargo build --release --locked \
 RUN bash scripts/crate-notices.sh --out /src/target/licenses
 
 ########################################################################
-# Stage runtime: ubi-micro with the binary, config/, admin/dist and the
-# licence notices
+# Stage runtime: ubi-micro with the binary, config/, data/, admin/dist and
+# the licence notices
 ########################################################################
 FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:5be877a2a280ae36eb9ab80ca4efb28bbf77c57abbba38137cdc37a03b8465e6 AS runtime
 
@@ -201,6 +201,16 @@ ENV SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 WORKDIR /app
 COPY --from=rust /src/target/release/backend3-cli /app/backend3-cli
 COPY --from=rust /src/config/ /app/config/
+# The versioned data the tasks read in the pod (ADR 0045): data/import/
+# (the defect resolution list, whose in-image path
+# /app/data/import/resolutions.toml is the import_mysql default of
+# `resolutions`; data/import/README.md says what may be committed there)
+# and, once they land, data/seed/ (the release-1 seed files, at
+# /app/data/seed/).
+# GitHub Actions never builds this file, so tests/image_data/ fails a PR whose
+# runtime stage stops copying data/. The rust stage's `COPY . .` brought the
+# directory in, owned by root and readable as committed, like config/.
+COPY --from=rust /src/data/ /app/data/
 # crates.html, notices/, COPYRIGHT-library.html and README.txt (ADR 0042); the
 # script made them world-readable, and the rust stage's files are root's.
 COPY --from=rust /src/target/licenses/ /app/licenses/

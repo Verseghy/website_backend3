@@ -32,6 +32,7 @@ use backend3::{
             not_migrated::NOT_MIGRATED_TABLES,
             options::{CanteenAuditLocalBefore, DEFAULT_RESOLUTIONS, ImportOptions, Mode},
             report::{NO_STEP_YET, Outcome, ReportParts, RunSummary, escape_cell},
+            resolutions::{FileDigest, MAX_FILE_BYTES, ResolutionFile},
             source_guard::COMPOSE_SOURCE_URL,
             source_session::{AutoIncrement, SourceFacts},
             source_tables::SOURCE_TABLES,
@@ -39,7 +40,10 @@ use backend3::{
         },
     },
     models::activity_log::{self, EntityRef, Entry},
-    tasks::import_mysql::report::{self, REPORT_FILE_MODE},
+    tasks::import_mysql::{
+        report::{self, REPORT_FILE_MODE},
+        resolutions::load,
+    },
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use loco_rs::{app::AppContext, boot::run_task, task::Vars};
@@ -398,6 +402,176 @@ async fn the_paths_are_checked_before_the_run_with_a_message_that_names_each_one
             0,
             "a refused run wrote into storage_root"
         );
+    })
+    .await;
+}
+
+/// data-migration.md §4.1, §8.2: the task reads the resolution file and
+/// validates it before the task lock, so a refused file stops the run before
+/// the source is read or a report is written, and the message names the
+/// argument, the path and every problem by entry and field.
+#[tokio::test]
+async fn the_resolution_file_is_validated_before_the_run_naming_entry_and_field() {
+    with_app_at(start(), |_router, ctx, _clock| async move {
+        let ctx = with_source(&ctx, &source_url());
+        let paths = Paths::new();
+        let file = paths.resolutions();
+        let invalid = "which is not a valid resolution file (data-migration.md §8.2; its schema \
+                       is documented in src/domain/import_mysql/resolutions.rs): ";
+        let cases: [(&[u8], String); 5] = [
+            (
+                b"version = 1\n[[canteen_duplicate]]\ndate = 2022-04-01\nexpect_ids = [393, \
+                  398]\nkeep = 400\n[[page_hidden]]\npage_id = 0\nexpect_updated_at = \
+                  2024-03-01T10:00:00Z\n",
+                format!(
+                    "{invalid}2 problems:\n- canteen_duplicate[1] (D6), field keep: row 400 is \
+                     not in expect_ids [393, 398]: keep one of the listed rows\n- page_hidden[1] \
+                     (D10), field page_id: 0 is not a row id: write a whole number from 1 to \
+                     4294967295"
+                ),
+            ),
+            (
+                b"version = 2\n",
+                format!(
+                    "{invalid}1 problem:\n- version: 2 is not a schema version this build \
+                     reads: it reads version 1"
+                ),
+            ),
+            (
+                b"",
+                format!(
+                    "{invalid}1 problem:\n- version: missing: the file starts with version = 1"
+                ),
+            ),
+            (
+                b"version = 1\nsigned_off = 2026-11-20\npost_author = \"55\"\n",
+                format!(
+                    "{invalid}1 problem:\n- post_author (D2): expected an array of tables, \
+                     written [[post_author]], found the string \"55\""
+                ),
+            ),
+            (
+                b"version = 1\n\xff\xfe\n",
+                "which is not UTF-8 text (the first invalid byte is at offset 12): give the \
+                 editor-signed resolution file (data-migration.md §8.2), a UTF-8 TOML file"
+                    .to_owned(),
+            ),
+        ];
+        for (contents, problem) in cases {
+            fs::write(&file, contents).expect("write the resolution file");
+            let message = refusal(&ctx, paths.arguments()).await;
+            assert_eq!(
+                message,
+                format!("the argument resolutions is {}, {problem}", file.display())
+            );
+        }
+        assert!(
+            paths.report_files().is_empty(),
+            "a refused run wrote a report"
+        );
+    })
+    .await;
+}
+
+/// The task reads at most `MAX_FILE_BYTES` of the resolution file: a file of
+/// exactly that size is read, one byte more is refused before it is parsed.
+#[test]
+fn the_resolution_file_is_read_up_to_its_size_limit() {
+    let root = ScratchDir::new("import-resolutions-limit");
+    let path = root.path().join("resolutions.toml");
+    let limit = usize::try_from(MAX_FILE_BYTES).expect("the limit fits in memory");
+    // A valid list padded with a comment to exactly the limit.
+    let header = "version = 1\n#";
+    let at_limit = format!("{header}{}", "x".repeat(limit - header.len()));
+    assert_eq!(at_limit.len(), limit);
+    fs::write(&path, &at_limit).expect("write");
+    let loaded = load(&path).expect("a file at the limit");
+    assert_eq!(loaded.file, ResolutionFile::default());
+    assert_eq!(loaded.digest, FileDigest::of(at_limit.as_bytes()));
+
+    fs::write(&path, format!("{at_limit}x")).expect("write");
+    assert_eq!(
+        load(&path)
+            .expect_err("one byte over the limit")
+            .to_string(),
+        format!(
+            "the argument resolutions is {}, which is larger than 1048576 bytes: give the \
+             editor-signed resolution file (data-migration.md §8.2), which is far smaller",
+            path.display()
+        )
+    );
+
+    let missing = root.path().join("missing.toml");
+    let message = load(&missing).expect_err("a missing file").to_string();
+    assert!(
+        message.starts_with(&format!(
+            "the argument resolutions is {}, which cannot be opened (",
+            missing.display()
+        )),
+        "{message}"
+    );
+}
+
+/// The committed list is what the image ships and the nightly reads: the
+/// task's own loader accepts it, and its digest is that of the committed
+/// bytes.
+#[test]
+fn the_task_loads_the_committed_resolution_file() {
+    let committed = crate::support::repository_root().join("data/import/resolutions.toml");
+    let loaded = load(&committed).unwrap_or_else(|error| panic!("{error}"));
+    let bytes = fs::read(&committed).expect("the committed file");
+    assert_eq!(loaded.digest, FileDigest::of(&bytes));
+}
+
+/// The digest is that of the bytes the task read and validated, comments
+/// and layout included, as `sha256sum` prints it for the file
+/// (data-migration.md §5.4).
+#[test]
+fn the_loaded_digest_is_the_sha256_of_the_file_as_written() {
+    let root = ScratchDir::new("import-resolutions-digest");
+    let path = root.path().join("resolutions.toml");
+    fs::write(&path, "version = 1\n").expect("write");
+    let plain = load(&path).expect("the empty list");
+    // sha256sum's output for the 12 bytes "version = 1\n".
+    assert_eq!(
+        plain.digest.to_string(),
+        "dbab12665d98aef021ba64953c61b0ed8a908cfb56a1c01e2fcb4b052b71a2a1"
+    );
+
+    fs::write(&path, "# The empty list.\nversion = 1\n").expect("write");
+    let commented = load(&path).expect("the empty list with a comment");
+    assert_eq!(commented.file, plain.file);
+    assert_ne!(commented.digest, plain.digest);
+}
+
+/// ADR 0016 §4, data-migration.md §4.1: the resolution file is validated
+/// before the task lock is taken, so a run that finds the lock held still
+/// refuses an invalid list, with the full message and no report, instead of
+/// exiting 0 with nothing done.
+#[tokio::test]
+async fn an_invalid_resolution_file_is_refused_while_another_run_holds_the_lock() {
+    with_app_at(start(), |_router, ctx, _clock| async move {
+        let ctx = with_source(&ctx, &source_url());
+        let paths = Paths::new();
+        fs::write(paths.resolutions(), "version = 2\n").expect("write the resolution file");
+
+        let other_run = hold_task_lock(&ctx.db, TASK).await;
+        let message = refusal(&ctx, paths.arguments()).await;
+        assert_eq!(
+            message,
+            format!(
+                "the argument resolutions is {}, which is not a valid resolution file \
+                 (data-migration.md §8.2; its schema is documented in \
+                 src/domain/import_mysql/resolutions.rs): 1 problem:\n- version: 2 is not a \
+                 schema version this build reads: it reads version 1",
+                paths.resolutions().display()
+            )
+        );
+        assert!(
+            paths.report_files().is_empty(),
+            "a refused run wrote a report"
+        );
+        other_run.rollback().await.expect("release the other run");
     })
     .await;
 }

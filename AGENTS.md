@@ -66,6 +66,7 @@ edited: `scripts/sync-loco-skill.sh` re-syncs it, and CI fails when it drifts
 | `src/workers/`, `src/tasks/` | background workers and tasks (ADR 0016); `src/workers/delete_owned_files.rs` is the `DeleteOwnedFiles` worker, which removes the owned files that a purge left unreferenced (below, "Queue workers"); `src/tasks/import_mysql/` is the legacy import (ADR 0017, `docs/design/data-migration.md`), built only with the default Cargo feature `import-mysql`, which also brings its MySQL driver; its pure parts, in `src/domain/import_mysql/`, are built in every build |
 | `migration/` | Sea-ORM migrations (ADR 0009) |
 | `config/` | `development`, `test`, `e2e` and `production` configuration; typed settings under `settings:`, among them `settings.media` (ADR 0015 §3), whose local directories are under the git-ignored `target/media/<env>/`, and whose `serve_storage` is on only in `e2e` |
+| `data/` | versioned data that tasks read in the pod; the image ships it as `/app/data/` (ADR 0045: the `Containerfile`'s runtime stage, which `tests/image_data/` checks, since GitHub Actions never builds the image). `data/import/` (`/app/data/import/`) holds the legacy import's defect resolution list, `resolutions.toml`, the default of the task's `resolutions` argument (data-migration.md §8.2; schema and validation in `src/domain/import_mysql/resolutions.rs`), and a README that says what may be committed there: ids, dates, choices and source values only, never names or content. `data/seed/` (`/app/data/seed/`) is where the release-1 seed files go (data-migration.md §13 item 7) |
 | `tests/` | integration, request and architecture tests (`tests/architecture.rs`, with the SQL date lint of ADR 0010 point 10 in `tests/architecture/sql_dates.rs` and the lint of ADR 0007 §5 that only the admin route table builds `/api/admin` routes in `tests/architecture/admin_mounts.rs`), the `/storage` media contract suite (`tests/media_contract/`), the schema snapshot (`tests/schema/`, ADR 0009), the tz-data parity test of backend3's and PostgreSQL's Budapest midnights, with the snapshot of backend3's (`tests/tz_parity/`, ADR 0041), the expected DDL of the legacy MySQL database (`tests/fixtures/legacy/schema.sql`), which compose.yaml's MySQL source loads, and the shared helpers of `tests/support/`, among them the safety-net checks that every admin-editable entity runs on its write methods (`tests/support/safety_net.rs`, ADR 0011; recipe 2 step 9 of the project skill) and the probe tables, accounts and session tokens of the admin route table's tests (`tests/support/admin_probe.rs`; the table's own test is `tests/requests/admin_routes.rs`, recipe 10). `tests/support/` also holds the `/api/v1` test harness (public-api.md §16, §17): the named fixtures with their soft-deleted twins (`fixtures.rs`), the response check against the served OpenAPI document (`openapi_schema.rs`), and the route samples (`public_samples.rs`) and rules (`public_rules.rs`) of the global suite `tests/requests/public_global.rs`; recipe 3 of `.claude/skills/backend3/SKILL.md` says what each endpoint adds to them |
 | `examples/media_contract.rs` | runs that suite from the command line against a running server (ADR 0015 §3, the co-mount test) |
 | `deploy/media/` | the media server: its nginx configuration, which website_k8s copies without its comment lines (Verseghy/website_k8s#83), and its pinned image (`deploy/media/README.md`, ADR 0015 §1) |
@@ -159,7 +160,13 @@ the latest timestamp in the source. The whole run is one transaction on
 the target, which `dry-run` rolls back and `apply` commits, and it first
 refuses a target whose `roles` or `user_permissions` CHECK differ from the
 code, or in which a table it writes holds a row (`src/tasks/import_mysql/target.rs`,
-data-migration.md §4.2; the invariant below).
+data-migration.md §4.2; the invariant below). Before any of that, and before
+the task lock, it reads the resolution file of its `resolutions` argument
+(by default `/app/data/import/resolutions.toml`, the image's copy of
+`data/import/resolutions.toml`; give `resolutions:data/import/resolutions.toml`
+for a local run) and refuses one that fails validation, naming the entry and
+the field of every problem (`src/domain/import_mysql/resolutions.rs`,
+data-migration.md §8.2).
 
 Uploaded media go below `settings.media` (ADR 0015 §3): locally
 `target/media/<env>/public` (the served tree), `tmp` (upload staging) and
