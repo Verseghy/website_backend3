@@ -5,6 +5,7 @@ mod grants;
 mod job_queue;
 mod media;
 mod revisions;
+mod roles;
 mod safety_net;
 mod task_lock;
 mod users;

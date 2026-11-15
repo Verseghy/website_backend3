@@ -2,14 +2,18 @@
 //! §11.3), run as Loco runs it: `run_task::<App>` with the task's
 //! arguments, on the test's own database.
 //!
-//! The source is a URL that nothing listens on: the task opens the source
-//! connection on first use, and no import step reads the source yet. Each
-//! test sets the source in its own copy of the app context, because
+//! A run that completes reads the MySQL source of compose.yaml (profile
+//! `import`; the CI Test job starts it), whose legacy schema matches the
+//! expected DDL and holds no rows, so the run imports nothing and its source
+//! session finds no timestamp. The tests of refusals before the task lock
+//! use a URL on the discard port, where nothing listens: they never connect.
+//! Each test sets the source in its own copy of the app context, because
 //! config/test.yaml configures none.
 //!
-//! No import step can fail yet, so the tests of a failed run and of the
-//! report writer's own refusals call `tasks::import_mysql::report` directly,
-//! with the result a failing step would return.
+//! The checks of the target and of the source session have their own tests
+//! (`import_mysql_target.rs`, `import_mysql_session.rs`); the tests of the
+//! report writer's own refusals call `tasks::import_mysql::report`
+//! directly, with the result a failing step would return.
 
 use std::{
     collections::BTreeMap,
@@ -22,19 +26,27 @@ use std::{
 use backend3::{
     app::{App, set_clock},
     domain::{
+        activity::{Action, Actor},
         clock::Clock,
         import_mysql::{
             not_migrated::NOT_MIGRATED_TABLES,
             options::{CanteenAuditLocalBefore, DEFAULT_RESOLUTIONS, ImportOptions, Mode},
-            report::{NO_STEP_YET, Outcome, RunSummary, escape_cell},
+            report::{NO_STEP_YET, Outcome, ReportParts, RunSummary, escape_cell},
+            source_guard::COMPOSE_SOURCE_URL,
+            source_session::{AutoIncrement, SourceFacts},
+            source_tables::SOURCE_TABLES,
+            target::IMPORT_TARGET_TABLES,
         },
     },
+    models::activity_log::{self, EntityRef, Entry},
     tasks::import_mysql::report::{self, REPORT_FILE_MODE},
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use loco_rs::{app::AppContext, boot::run_task, task::Vars};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde_json::{Value, json};
 
+use super::import_mysql_source::compose_source;
 use crate::support::{ScratchDir, hold_task_lock, with_app, with_app_at};
 
 /// The task's registered name, which is also its lock name.
@@ -44,9 +56,18 @@ const TASK: &str = "import_mysql";
 const PASSWORD: &str = "pw-source-never-shown-5b1e";
 
 /// A source URL in the shape of production's, on the discard port of the
-/// local host, where nothing answers.
+/// local host, where nothing answers. For the refusals before the task
+/// lock, which never connect.
 fn source_url() -> String {
     format!("mysql://backend3_import:{PASSWORD}@127.0.0.1:9/verseghy")
+}
+
+/// The compose source with an account it does not have: its server refuses
+/// the sign-in at once (MySQL error 1045), so a run that reaches the source
+/// fails quickly, without retrying a refused connection for the pool's
+/// acquire timeout.
+fn refused_source_url() -> String {
+    format!("mysql://backend3_import:{PASSWORD}@127.0.0.1:3306/verseghy")
 }
 
 /// The instant the tests' runs start at.
@@ -152,6 +173,7 @@ impl Clock for SteppingClock {
 
 #[tokio::test]
 async fn a_run_writes_its_report_with_the_start_and_end_from_the_app_clock() {
+    compose_source().await;
     with_app(|_router, ctx| async move {
         for mode in ["dry-run", "apply"] {
             let paths = Paths::new();
@@ -168,7 +190,7 @@ async fn a_run_writes_its_report_with_the_start_and_end_from_the_app_clock() {
             let mut arguments = paths.arguments();
             arguments.insert("mode".to_owned(), mode.to_owned());
 
-            run(&with_source(&ctx, &source_url()), arguments)
+            run(&with_source(&ctx, COMPOSE_SOURCE_URL), arguments)
                 .await
                 .unwrap_or_else(|error| panic!("{mode}: {error}"));
 
@@ -189,8 +211,23 @@ async fn a_run_writes_its_report_with_the_start_and_end_from_the_app_clock() {
                 summary["arguments"]["canteen_audit_local_before"],
                 "2022-01-21T00:00:00Z"
             );
+            // The source session's part: the empty compose source matched
+            // the expected DDL and holds no timestamp.
+            assert_eq!(summary["source"]["fingerprint"], "matched", "{mode}");
+            assert_eq!(summary["source"]["latest_timestamp"], Value::Null);
+            assert_eq!(
+                summary["source"]["auto_increment"]
+                    .as_object()
+                    .expect("an object")
+                    .len(),
+                SOURCE_TABLES.len()
+            );
             let markdown = fs::read_to_string(paths.report().join("report.md")).expect("report.md");
             assert!(markdown.contains("| Duration | 2.750 s |"), "{markdown}");
+            assert!(
+                markdown.contains("\n## Source\n\nThe schema fingerprint of the 17 legacy tables"),
+                "{markdown}"
+            );
             assert!(markdown.contains(NO_STEP_YET), "{markdown}");
             for row in NOT_MIGRATED_TABLES {
                 let cell = escape_cell(row.table);
@@ -203,9 +240,10 @@ async fn a_run_writes_its_report_with_the_start_and_end_from_the_app_clock() {
 
 #[tokio::test]
 async fn a_run_at_a_standing_clock_takes_no_time() {
+    compose_source().await;
     with_app_at(start(), |_router, ctx, _clock| async move {
         let paths = Paths::new();
-        run(&with_source(&ctx, &source_url()), paths.arguments())
+        run(&with_source(&ctx, COMPOSE_SOURCE_URL), paths.arguments())
             .await
             .expect("the run");
         let text = fs::read_to_string(paths.report().join("summary.json")).expect("summary");
@@ -456,41 +494,179 @@ async fn a_source_that_is_not_local_is_refused_naming_the_setting() {
     .await;
 }
 
-/// The local spellings pass the guard: the run goes on and writes its
+/// The local spellings pass the guard: the run goes on, takes the lock and
+/// opens the source session, which fails at the connection, and writes its
 /// report. A socket parameter replaces the host, as in the MySQL driver.
+/// (`[::1]` passes the guard as well, `source.rs`'s unit tests show; the
+/// compose source listens on 127.0.0.1 only, and the pool would retry a
+/// refused connection for its whole acquire timeout.)
 #[tokio::test]
 async fn a_local_source_passes_the_guard() {
+    compose_source().await;
     with_app_at(start(), |_router, ctx, _clock| async move {
-        for source in [
-            format!("mysql://backend3_import:{PASSWORD}@localhost:9/verseghy"),
-            format!("mysql://backend3_import:{PASSWORD}@[::1]:9/verseghy"),
-            format!(
-                "mysql://backend3_import:{PASSWORD}@source-host-3f9a.example/verseghy\
-                 ?socket=%2Frun%2Fmysqld%2Fmysqld.sock"
+        for (source, problem) in [
+            (
+                format!("mysql://backend3_import:{PASSWORD}@localhost:3306/verseghy"),
+                "the MySQL server answered with error 1045 (SQLSTATE 28000)",
+            ),
+            (
+                format!(
+                    "mysql://backend3_import:{PASSWORD}@source-host-3f9a.example/verseghy\
+                     ?socket=%2Frun%2Fmysqld-absent-7c1d%2Fmysqld.sock"
+                ),
+                "the connection to the source failed",
             ),
         ] {
             let paths = Paths::new();
-            run(&with_source(&ctx, &source), paths.arguments())
-                .await
-                .unwrap_or_else(|error| panic!("{error}"));
+            let message = refusal(&with_source(&ctx, &source), paths.arguments()).await;
+            assert!(
+                message.starts_with("opening the source session from the source failed: "),
+                "{message}"
+            );
+            assert!(message.contains(problem), "{problem}: {message}");
             assert_eq!(paths.report_files(), ["report.md", "summary.json"]);
+            let text = fs::read_to_string(paths.report().join("summary.json")).expect("summary");
+            let summary: Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(summary["outcome"], "failed");
+            assert_eq!(summary["error"], message.as_str());
+            assert_eq!(summary["source"], Value::Null);
         }
     })
     .await;
 }
 
+/// A run that fails at the source keeps every part of the URL out of its
+/// error and its report (data-migration.md §4.1).
 #[tokio::test]
 async fn the_report_never_holds_the_source_url() {
+    compose_source().await;
     with_app_at(start(), |_router, ctx, _clock| async move {
         let paths = Paths::new();
-        run(&with_source(&ctx, &source_url()), paths.arguments())
-            .await
-            .expect("the run");
+        let message = refusal(&with_source(&ctx, &refused_source_url()), paths.arguments()).await;
+        assert!(message.contains("error 1045"), "{message}");
+        assert!(!message.contains(PASSWORD), "{message}");
         for file in ["summary.json", "report.md"] {
             let text = fs::read_to_string(paths.report().join(file)).expect(file);
+            assert!(text.contains("error 1045"), "{file}: {text}");
             assert!(!text.contains(PASSWORD), "{file}: {text}");
             assert!(!text.contains("backend3_import"), "{file}: {text}");
         }
+    })
+    .await;
+}
+
+/// The number of rows of every table the import writes that the target
+/// has.
+async fn target_row_counts(db: &DatabaseConnection) -> Vec<(&'static str, i64)> {
+    let mut counts = Vec::new();
+    for table in IMPORT_TARGET_TABLES {
+        let exists: bool = scalar(db, &format!("SELECT to_regclass('{table}') IS NOT NULL")).await;
+        if exists {
+            counts.push((
+                table,
+                scalar(db, &format!("SELECT count(*) FROM \"{table}\"")).await,
+            ));
+        }
+    }
+    counts
+}
+
+/// The single value in the first column of the first row of `sql`.
+async fn scalar<T: sea_orm::TryGetable>(db: &DatabaseConnection, sql: &str) -> T {
+    db.query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
+        .await
+        .unwrap_or_else(|error| panic!("{sql}: {error}"))
+        .expect("one row")
+        .try_get_by_index(0)
+        .expect("a value")
+}
+
+/// data-migration.md §11.1: a dry run, and so far an apply run too, since
+/// no step writes yet, leave every table the import writes empty, and a
+/// later run into the same database is not refused.
+#[tokio::test]
+async fn dry_run_and_apply_leave_the_target_empty() {
+    compose_source().await;
+    with_app_at(start(), |_router, ctx, _clock| async move {
+        let ctx = with_source(&ctx, COMPOSE_SOURCE_URL);
+        for mode in ["dry-run", "apply", "dry-run"] {
+            let paths = Paths::new();
+            let mut arguments = paths.arguments();
+            arguments.insert("mode".to_owned(), mode.to_owned());
+            run(&ctx, arguments)
+                .await
+                .unwrap_or_else(|error| panic!("{mode}: {error}"));
+            for (table, rows) in target_row_counts(&ctx.db).await {
+                assert_eq!(rows, 0, "{mode}: {table}");
+            }
+        }
+    })
+    .await;
+}
+
+/// data-migration.md §4.2: the task refuses a target in which a table it
+/// writes holds a row, before it reads the source, and names the table in
+/// its error and its report.
+#[tokio::test]
+async fn the_task_refuses_a_target_that_holds_a_row() {
+    compose_source().await;
+    with_app_at(start(), |_router, ctx, _clock| async move {
+        let ctx = with_source(&ctx, COMPOSE_SOURCE_URL);
+        activity_log::record(
+            &ctx.db,
+            Actor::Import,
+            Entry {
+                entity: Some(EntityRef::table("labels")),
+                ..Entry::new(Action::Import)
+            },
+        )
+        .await
+        .expect("an activity entry");
+        for (table, write_first) in [("activity_log", false), ("users", true)] {
+            if write_first {
+                ctx.db
+                    .execute_unprepared(
+                        "INSERT INTO users (pid, name, email) VALUES (gen_random_uuid(), \
+                         'Próba', 'elso@example.test')",
+                    )
+                    .await
+                    .expect("an account");
+            }
+            let paths = Paths::new();
+            let message = refusal(&ctx, paths.arguments()).await;
+            assert!(
+                message.starts_with(&format!(
+                    "refusing to import: the target table `{table}` already holds a row."
+                )),
+                "{table}: {message}"
+            );
+            let text = fs::read_to_string(paths.report().join("summary.json")).expect("summary");
+            let summary: Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(summary["outcome"], "failed");
+            assert_eq!(summary["error"], message.as_str());
+            // Refused before the source session.
+            assert_eq!(summary["source"], Value::Null);
+        }
+    })
+    .await;
+}
+
+/// The import maps the legacy roles onto the target's `roles` rows by
+/// name, so a target whose roles differ from the code is refused first.
+#[tokio::test]
+async fn the_task_refuses_a_target_whose_roles_differ_from_the_code() {
+    compose_source().await;
+    with_app_at(start(), |_router, ctx, _clock| async move {
+        let ctx = with_source(&ctx, COMPOSE_SOURCE_URL);
+        ctx.db
+            .execute_unprepared("DELETE FROM roles WHERE id = 4")
+            .await
+            .expect("remove a role");
+        let message = refusal(&ctx, Paths::new().arguments()).await;
+        assert!(
+            message.contains(": missing 4 `admin`. Migrate the target"),
+            "{message}"
+        );
     })
     .await;
 }
@@ -499,8 +675,9 @@ async fn the_report_never_holds_the_source_url() {
 /// none of the work; here, it writes no report.
 #[tokio::test]
 async fn the_task_exits_successfully_without_its_work_while_another_run_holds_the_lock() {
+    compose_source().await;
     with_app_at(start(), |_router, ctx, _clock| async move {
-        let ctx = with_source(&ctx, &source_url());
+        let ctx = with_source(&ctx, COMPOSE_SOURCE_URL);
         let paths = Paths::new();
 
         let other_run = hold_task_lock(&ctx.db, TASK).await;
@@ -523,8 +700,9 @@ async fn the_task_exits_successfully_without_its_work_while_another_run_holds_th
 
 #[tokio::test]
 async fn a_second_run_into_the_same_report_directory_is_refused() {
+    compose_source().await;
     with_app_at(start(), |_router, ctx, _clock| async move {
-        let ctx = with_source(&ctx, &source_url());
+        let ctx = with_source(&ctx, COMPOSE_SOURCE_URL);
         let paths = Paths::new();
         run(&ctx, paths.arguments()).await.expect("the first run");
         let first = fs::read_to_string(paths.report().join("summary.json")).expect("summary");
@@ -562,9 +740,10 @@ fn mode_of(path: &Path) -> u32 {
 /// own user may read its files.
 #[tokio::test]
 async fn the_report_files_are_readable_by_the_task_user_only() {
+    compose_source().await;
     with_app_at(start(), |_router, ctx, _clock| async move {
         let paths = Paths::new();
-        run(&with_source(&ctx, &source_url()), paths.arguments())
+        run(&with_source(&ctx, COMPOSE_SOURCE_URL), paths.arguments())
             .await
             .expect("the run");
         for file in ["report.md", "summary.json"] {
@@ -589,6 +768,7 @@ fn the_report_writer_never_overwrites_a_file() {
         started_at: start(),
         finished_at: start(),
         outcome: Outcome::Completed,
+        parts: ReportParts::default(),
     };
 
     // An existing report.md: nothing is written at all.
@@ -628,17 +808,36 @@ fn the_report_writer_never_overwrites_a_file() {
 }
 
 /// A run whose import fails still writes its report, with the outcome
-/// `failed` and the error, and the task returns the import's error.
+/// `failed`, the error and the parts of the steps that ended before it
+/// failed, and the task returns the import's error.
 #[test]
 fn a_failed_run_writes_its_report_and_returns_its_own_error() {
     let directory = ScratchDir::new("import-failed-run");
     let message = "V8 failed: duplicate live canteen dates";
     let finished_at = start() + TimeDelta::milliseconds(1_500);
+    // The source session ended before the step that failed.
+    let parts = ReportParts {
+        source: Some(
+            SourceFacts::checked(
+                SOURCE_TABLES
+                    .iter()
+                    .map(|table| AutoIncrement {
+                        table: *table,
+                        next_id: Some(7),
+                    })
+                    .collect(),
+                None,
+                start(),
+            )
+            .expect("an empty source bounds no snapshot_at"),
+        ),
+    };
 
     let returned = report::finish(
         &options_into(directory.path()),
         start(),
         finished_at,
+        parts,
         Err(loco_rs::Error::Message(message.to_owned())),
     )
     .expect_err("the run's error");
@@ -649,6 +848,8 @@ fn a_failed_run_writes_its_report_and_returns_its_own_error() {
     assert_eq!(summary["outcome"], "failed");
     assert_eq!(summary["error"], message);
     assert_eq!(summary["duration_ms"], 1_500);
+    assert_eq!(summary["source"]["fingerprint"], "matched");
+    assert_eq!(summary["source"]["auto_increment"]["users"], 7);
     let markdown = fs::read_to_string(directory.path().join("report.md")).expect("report.md");
     assert!(markdown.contains("| Outcome | failed |"), "{markdown}");
     assert!(
@@ -679,15 +880,22 @@ fn a_report_that_cannot_be_written_fails_only_a_completed_run() {
         &options_into(directory.path()),
         start(),
         start(),
+        ReportParts::default(),
         Err(loco_rs::Error::Message("V3 failed".to_owned())),
     )
     .expect_err("the run's error");
     assert_eq!(returned.to_string(), "V3 failed");
 
     let directory = blocked();
-    let returned = report::finish(&options_into(directory.path()), start(), start(), Ok(()))
-        .expect_err("the report's error")
-        .to_string();
+    let returned = report::finish(
+        &options_into(directory.path()),
+        start(),
+        start(),
+        ReportParts::default(),
+        Ok(()),
+    )
+    .expect_err("the report's error")
+    .to_string();
     assert!(
         returned.starts_with("cannot write the run report file ") && returned.contains("report.md"),
         "{returned}"

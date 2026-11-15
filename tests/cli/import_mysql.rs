@@ -9,18 +9,23 @@
 //! while production, the operator's environment, accepts it.
 //!
 //! The child process connects to the test's own migrated database (Loco
-//! builds a task's context with a database pool), and the source URL points
-//! at a port where nothing answers or at a host that is never resolved: the
-//! task opens the source connection on first use, and no import step reads
-//! the source yet.
+//! builds a task's context with a database pool). A run that completes
+//! reads the MySQL source of compose.yaml; the runs that fail at the source
+//! sign in to it with an account it does not have, or name a host that is
+//! never resolved, so they fail at once.
 
 use std::{fs, time::Duration};
 
+use backend3::domain::import_mysql::source_guard::COMPOSE_SOURCE_URL;
 use loco_rs::app::AppContext;
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
-use crate::support::{
-    CLI_MEDIA_PUBLIC_BASE_URL, CliRun, ScratchDir, cli_jwt_secret, cli_totp_key, run_cli, with_app,
+use crate::{
+    support::{
+        CLI_MEDIA_PUBLIC_BASE_URL, CliRun, ScratchDir, cli_jwt_secret, cli_totp_key, run_cli,
+        with_app,
+    },
+    tasks::import_mysql_source::compose_source,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -177,13 +182,15 @@ async fn production_refuses_an_unset_source_in_both_spellings_and_when_the_varia
 
 #[tokio::test]
 async fn production_never_shows_the_source_url_in_its_output_or_its_logs() {
+    compose_source().await;
     with_app(|_router, ctx| async move {
         let database_url = child_database_url(&ctx);
-        let source = format!("mysql://backend3_import:{PASSWORD}@127.0.0.1:9/verseghy");
+        // The compose source's server, with an account it does not have.
+        let source = format!("mysql://backend3_import:{PASSWORD}@127.0.0.1:3306/verseghy");
 
-        // A run that completes and writes its report.
+        // A run that completes and writes its report, on the compose source.
         let run = Run::new();
-        let cli = run.cli(&database_url, Some(&source));
+        let cli = run.cli(&database_url, Some(COMPOSE_SOURCE_URL));
         wait_for_children_to_disconnect(&ctx).await;
         assert!(cli.status.success(), "{}\n{}", cli.stdout, cli.stderr);
         assert!(
@@ -193,6 +200,18 @@ async fn production_never_shows_the_source_url_in_its_output_or_its_logs() {
         );
         let report = run.report_text();
         assert!(report.contains("\"outcome\": \"completed\""), "{report}");
+        // `loco` is the compose source's user name and password, but also
+        // the name of the framework in every log line, so the check looks
+        // for the URL's other parts and the credentials together.
+        for (name, text) in [
+            ("stdout", &cli.stdout),
+            ("stderr", &cli.stderr),
+            ("report", &report),
+        ] {
+            for part in ["mysql://", "loco:loco", "127.0.0.1:3306"] {
+                assert!(!text.contains(part), "{name} shows {part}: {text}");
+            }
+        }
 
         // A run that the task refuses: the report directory is not empty any
         // more.
@@ -216,6 +235,26 @@ async fn production_never_shows_the_source_url_in_its_output_or_its_logs() {
             rejected.stderr
         );
 
+        // A run whose sign-in the source refuses: it fails at the source
+        // session, writes its report and shows only the error number.
+        let denied_run = Run::new();
+        let denied = denied_run.cli(&database_url, Some(&source));
+        wait_for_children_to_disconnect(&ctx).await;
+        assert!(!denied.status.success(), "{}", denied.stderr);
+        assert!(
+            denied.stderr.contains(
+                "opening the source session from the source failed: the MySQL server answered \
+                 with error 1045 (SQLSTATE 28000)"
+            ),
+            "{}",
+            denied.stderr
+        );
+        let denied_report = denied_run.report_text();
+        assert!(
+            denied_report.contains("\"outcome\": \"failed\""),
+            "{denied_report}"
+        );
+
         for (name, text) in [
             ("stdout", &cli.stdout),
             ("stderr", &cli.stderr),
@@ -224,6 +263,9 @@ async fn production_never_shows_the_source_url_in_its_output_or_its_logs() {
             ("refused stderr", &refused.stderr),
             ("rejected stdout", &rejected.stdout),
             ("rejected stderr", &rejected.stderr),
+            ("denied stdout", &denied.stdout),
+            ("denied stderr", &denied.stderr),
+            ("denied report", &denied_report),
         ] {
             assert!(!text.contains(PASSWORD), "{name}: {text}");
             assert!(!text.contains("backend3_import"), "{name}: {text}");
@@ -274,8 +316,9 @@ async fn development_refuses_a_source_that_is_not_local_without_showing_it() {
 
 /// Staging and production imports are operator runs (data-migration.md
 /// §3.3): production applies no locality rule, so a remote source passes
-/// and the run goes on. No import step reads the source yet, so nothing
-/// connects to it.
+/// and the run goes on to the source session. The host is never resolved
+/// (`.example` is reserved), so the session fails at the connection, and
+/// the run writes its report.
 #[tokio::test]
 async fn production_accepts_a_source_that_is_not_local() {
     with_app(|_router, ctx| async move {
@@ -284,9 +327,17 @@ async fn production_accepts_a_source_that_is_not_local() {
         let run = Run::new();
         let cli = run.cli(&database_url, Some(&source));
         wait_for_children_to_disconnect(&ctx).await;
-        assert!(cli.status.success(), "{}\n{}", cli.stdout, cli.stderr);
+        assert!(!cli.status.success(), "{}\n{}", cli.stdout, cli.stderr);
+        assert!(
+            cli.stderr.contains(
+                "opening the source session from the source failed: the connection to the source \
+                 failed"
+            ),
+            "{}",
+            cli.stderr
+        );
         let report = run.report_text();
-        assert!(report.contains("\"outcome\": \"completed\""), "{report}");
+        assert!(report.contains("\"outcome\": \"failed\""), "{report}");
         for text in [&cli.stdout, &cli.stderr, &report] {
             for part in [PASSWORD, "backend3_import", REMOTE_HOST] {
                 assert!(!text.contains(part), "{part}: {text}");

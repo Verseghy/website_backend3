@@ -186,7 +186,7 @@ Source: research: SYNTHESIS §2.11.
 
 | ID | Feature | Disposition | ADR | Notes |
 |---|---|---|---|---|
-| NWS-01 | Newsletter subscriber list (e-mail and token), reachable by URL only | retired | [0019] | The table is not migrated (ADR 0017). The newsletter is removed from the safety-net list (ADR 0011), and `edit newsletter` is not created (ADR 0007, confirmed by the maintainer on 2026-10-25; research: DECISIONS R9 (D06)). |
+| NWS-01 | Newsletter subscriber list (e-mail and token), reachable by URL only | retired | [0019] | The table is not migrated (ADR 0017): the import's source session locks, describes and reads only the tables of its allow-list, so the subscriber list is never read (data-migration.md §3.3). The newsletter is removed from the safety-net list (ADR 0011), and `edit newsletter` is not created (ADR 0007, confirmed by the maintainer on 2026-10-25; research: DECISIONS R9 (D06)). |
 | NWS-02 | backend1's public subscribe and unsubscribe endpoints, which no frontend ever called | retired | [0019] | Not ported |
 
 ## 10. Authentication (AUTH)

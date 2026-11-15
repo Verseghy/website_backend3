@@ -73,7 +73,8 @@
 //!
 //! A seventh check also covers all of `src/`: the legacy MySQL source is
 //! reached only through the import's source layer,
-//! `src/tasks/import_mysql/source.rs` (data-migration.md §3.3; NWS-01;
+//! `src/tasks/import_mysql/source.rs`, and its locked source session,
+//! `src/tasks/import_mysql/session.rs` (data-migration.md §3.3; NWS-01;
 //! ADR 0024 §4, layer 3). Outside `src/tasks/import_mysql/`, no file names
 //! `sqlx`, the import's MySQL driver. Inside it, only the files of
 //! `SOURCE_STATEMENT_FILES` name sqlx's statement and connection API (the
@@ -156,11 +157,18 @@ const IMPORT_TASK_DIR: &str = "tasks/import_mysql";
 /// send statements to the legacy source and open connections to it. Every
 /// other file reads the source through their functions, so neither the
 /// source allow-list (`src/domain/import_mysql/source_tables.rs`) nor the
-/// source guard can be passed by. A file that adds a kind of statement, such
-/// as the source session's `LOCK TABLES` or the schema fingerprint, joins
-/// this list in the PR that adds it, so that PR's review sees the new
-/// statement path; it names its tables from `SOURCE_TABLES` as well.
-const SOURCE_STATEMENT_FILES: &[&str] = &["tasks/import_mysql/source.rs"];
+/// source guard can be passed by. `source.rs` holds the pool and the reads
+/// of legacy rows; `session.rs` holds the locked source session (the session
+/// settings, `LOCK TABLES`, the schema fingerprint, the `AUTO_INCREMENT` and
+/// latest-timestamp reads and `UNLOCK TABLES`), whose statements come from
+/// `src/domain/import_mysql/source_session.rs` and name their tables from
+/// `SOURCE_TABLES`. A file that adds another kind of statement joins this
+/// list in the PR that adds it, so that PR's review sees the new statement
+/// path; it names its tables from `SOURCE_TABLES` as well.
+const SOURCE_STATEMENT_FILES: &[&str] = &[
+    "tasks/import_mysql/source.rs",
+    "tasks/import_mysql/session.rs",
+];
 
 /// sqlx's names that build or send a statement, or open a connection to send
 /// one on; every name that starts with `query` counts too (the `query*`
@@ -1126,9 +1134,10 @@ fn src_reaches_the_legacy_source_only_through_the_source_layer() {
         report.is_empty(),
         "Reach the legacy MySQL source only through `tasks::import_mysql::source` \
          (data-migration.md §3.3; NWS-01; ADR 0024 §4, layer 3): a step reads a legacy table \
-         with `select_rows`, which reads only the tables of the source allow-list, from the pool \
-         that `run` gets. A new kind of statement goes into a file of SOURCE_STATEMENT_FILES in \
-         tests/architecture.rs and names its tables from `SOURCE_TABLES`:\n{}",
+         with `select_rows`, which reads only the tables of the source allow-list, on the \
+         connection of the source session (`tasks::import_mysql::session`). A new kind of \
+         statement goes into a file of SOURCE_STATEMENT_FILES in tests/architecture.rs and \
+         names its tables from `SOURCE_TABLES`:\n{}",
         report.join("\n")
     );
 }

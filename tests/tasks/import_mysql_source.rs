@@ -47,7 +47,7 @@ const REFUSED: [&str; 4] = [
 
 /// A pool of one lazy connection to `url`, built the way the task builds
 /// it, in the test environment.
-fn task_pool(url: &str) -> MySqlPool {
+pub(crate) fn task_pool(url: &str) -> MySqlPool {
     let options = connect_options(&SourceDatabaseUrl::new(url.to_owned()), "test")
         .unwrap_or_else(|error| panic!("{error}"));
     pool(options)
@@ -124,7 +124,7 @@ async fn the_newsletter_refusal_names_the_table_and_its_reason() {
 
 /// The compose source, checked to answer, or a panic that says how to
 /// start it.
-async fn compose_source() -> MySqlPool {
+pub(crate) async fn compose_source() -> MySqlPool {
     // A first connection with a short timeout, so a source that is not
     // running fails the test in seconds, not after the pool's 30 s.
     let options = connect_options(
@@ -318,13 +318,13 @@ async fn a_failed_tls_handshake_shows_the_fixed_description() {
 
 /// Every log event and span field the code under test records, as text.
 #[derive(Clone, Default)]
-struct CapturedLog {
+pub(crate) struct CapturedLog {
     lines: Arc<Mutex<Vec<String>>>,
     next_span: Arc<AtomicU64>,
 }
 
 impl CapturedLog {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         self.lines.lock().expect("the log").join("\n")
     }
 

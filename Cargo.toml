@@ -471,7 +471,11 @@ rustix = { workspace = true }
 getrandom = { workspace = true }
 futures-util = { workspace = true }
 # The importer's MySQL driver, only with the `import-mysql` feature below.
-sqlx = { workspace = true, optional = true, features = ["mysql"] }
+# `chrono` decodes the legacy `DATETIME` and `TIMESTAMP` values (the source
+# session's latest timestamp, tasks::import_mysql::session); Sea-ORM's
+# `with-chrono` already turns it on for the sqlx it links, so it adds no
+# crate, but the importer says that it needs it.
+sqlx = { workspace = true, optional = true, features = ["mysql", "chrono"] }
 
 [features]
 # `import-mysql`: the legacy importer, the `import_mysql` task and its MySQL

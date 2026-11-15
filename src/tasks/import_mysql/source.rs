@@ -17,14 +17,15 @@
 //! goes through it, and it reads only the tables of the source allow-list
 //! (`domain::import_mysql::source_tables`). A read of any other table, the
 //! newsletter's subscriber list first of all (NWS-01), is refused before
-//! anything is sent to the source. This file is the only one of the import
-//! task that builds or sends a statement to the source or opens a connection
-//! to it: `tests/architecture.rs` fails when another file of
+//! anything is sent to the source. This file and `session.rs`, the locked
+//! source session (its settings, `LOCK TABLES`, the schema fingerprint and
+//! the `AUTO_INCREMENT` and timestamp reads), are the only files of the
+//! import task that build or send a statement to the source or open a
+//! connection to it: `tests/architecture.rs` fails when another file of
 //! `src/tasks/import_mysql/` names sqlx's statement or connection API, and
-//! when a file outside the import task names sqlx at all. A later statement
-//! (the source session's `LOCK TABLES`, the schema fingerprint) is added to
-//! that test's list of statement files in its own PR, and names its tables
-//! from `SOURCE_TABLES` too.
+//! when a file outside the import task names sqlx at all. A statement of
+//! another kind joins that test's list of statement files in its own PR,
+//! and names its tables from `SOURCE_TABLES` too.
 //!
 //! The URL holds the source password, so no message here contains any part
 //! of it, and neither do the driver's: sqlx's `MySqlConnectOptions` prints

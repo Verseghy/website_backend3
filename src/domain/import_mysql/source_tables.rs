@@ -23,14 +23,19 @@
 //!   table, before the task sends anything to the source
 //!   (`tasks::import_mysql::source::select_rows`, the one function that
 //!   sends it);
-//! - only `src/tasks/import_mysql/source.rs` builds or sends a statement to
-//!   the source: `tests/architecture.rs` fails when another file of the
-//!   import task names sqlx's statement or connection API, and when a file
-//!   outside the import task names sqlx at all;
-//! - a statement of another kind, such as the source session's
-//!   `LOCK TABLES` or the schema fingerprint, names its tables from
-//!   [`SOURCE_TABLES`]; it joins the architecture test's list of statement
-//!   files in the PR that adds it, so that review checks this.
+//! - only `src/tasks/import_mysql/source.rs` and the source session,
+//!   `src/tasks/import_mysql/session.rs`, build or send a statement to the
+//!   source: `tests/architecture.rs` fails when another file of the import
+//!   task names sqlx's statement or connection API, and when a file outside
+//!   the import task names sqlx at all;
+//! - the source session's statements (`LOCK TABLES`, the schema
+//!   fingerprint, the `AUTO_INCREMENT` and timestamp reads;
+//!   `super::source_session`) name their tables from [`SOURCE_TABLES`] or
+//!   check them against it, and a statement of another kind does the same
+//!   and joins the architecture test's list of statement files in the PR
+//!   that adds it, so that review checks this. Under `LOCK TABLES` the
+//!   session can read only the tables it locked, so the lock keeps the
+//!   other tables unread as well.
 //!
 //! The source account itself may read every legacy table (data-migration.md
 //! §3.3 grants `SELECT` on the whole database), so this list, not the
