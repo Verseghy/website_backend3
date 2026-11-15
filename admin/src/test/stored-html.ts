@@ -8,6 +8,10 @@
  *   fixtures (`tests/fixtures/regressions/`, editor.md §13.6): every input
  *   and the sanitiser's output for it, so the admin's L2 tests run over the
  *   same bodies as the server's (§13.4, "Over every committed fixture").
+ * - {@link normaliserOutputs} reads the outputs of the import normaliser's
+ *   fixtures (`tests/fixtures/normalise/*.out.html`), the bodies of the
+ *   editor round trip of data-migration.md §12 (§13.4, "The importer's
+ *   fixtures").
  * - {@link reparse} parses HTML the way the server's sanitiser does (a
  *   fragment in a `div`) and copies it into the stored tree.
  */
@@ -99,6 +103,49 @@ export function regressionFixtures(): RegressionFixture[] {
     )
   }
   return fixtures
+}
+
+/** One output of the import normaliser's fixtures. */
+export interface NormaliserOutput {
+  /** The fixture's name, the file name without `.out.html`. */
+  readonly name: string
+  /** What the normaliser writes for the fixture's input, read as UTF-8. */
+  readonly html: string
+}
+
+/**
+ * The import normaliser's fixture outputs, by path, read by Vite at
+ * transform time like {@link REGRESSION_FILES}.
+ */
+const NORMALISER_FILES = import.meta.glob<string>(
+  "../../../tests/fixtures/normalise/*.out.html",
+  { query: "?raw", import: "default", eager: true }
+)
+
+/**
+ * Every output of the import normaliser's fixtures, in file-name order
+ * (`tests/fixtures/normalise/README.md` says what each name shows).
+ *
+ * @returns the outputs.
+ * @throws {Error} when no output is found, so the round trip cannot pass
+ *   by reading nothing.
+ */
+export function normaliserOutputs(): NormaliserOutput[] {
+  const outputs = Object.keys(NORMALISER_FILES)
+    .sort()
+    .map((path) => {
+      const file = path.slice(path.lastIndexOf("/") + 1)
+      return {
+        name: file.slice(0, -".out.html".length),
+        html: NORMALISER_FILES[path],
+      }
+    })
+  if (outputs.length === 0) {
+    throw new Error(
+      "normaliserOutputs: no fixture output found under tests/fixtures/normalise/; the editor round trip reads the server's normaliser fixtures from there."
+    )
+  }
+  return outputs
 }
 
 /**

@@ -37,8 +37,9 @@ pub enum FixedPointError {
         /// The byte offset of the first difference.
         at: usize,
         /// The report of the second run: the rules that changed it, and
-        /// what N7 removed.
-        report: NormaliseReport,
+        /// what N7 removed. Boxed, so that the error stays small beside
+        /// the `Ok` of a fixed point.
+        report: Box<NormaliseReport>,
     },
 }
 
@@ -60,7 +61,7 @@ pub fn check_fixed_point(out: &str, sanitizer: &Sanitizer) -> Result<(), FixedPo
     if again.html != out {
         return Err(FixedPointError::Renormalised {
             at: first_difference(out, &again.html),
-            report: again.report,
+            report: Box::new(again.report),
         });
     }
     Ok(())
@@ -131,7 +132,7 @@ mod tests {
         );
         let error = FixedPointError::Renormalised {
             at,
-            report: NormaliseReport::default(),
+            report: Box::default(),
         };
         assert_eq!(
             error.to_string(),

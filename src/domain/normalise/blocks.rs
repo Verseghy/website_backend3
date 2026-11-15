@@ -456,6 +456,22 @@ fn without_italic(style: &str) -> Option<String> {
     if important.or(normal) != Some(true) {
         return None;
     }
+    Some(join_declarations(&kept))
+}
+
+/// The declarations `kept`, pieces of one `style` as [`declaration_texts`]
+/// cuts it, written back in their order as a `style` value: byte for byte,
+/// except the leading white space and the `;` that would end the result,
+/// which go, as N7 writes no trailing `;` either. Empty when they hold
+/// nothing but white space and `;`. Leaving whole declarations out from
+/// between them cannot change how the others read, because each one that
+/// is followed by another ended at a top-level `;` (see
+/// [`without_italic`]). N5b's image rules write what they leave for N7 the
+/// same way (`image_layout.rs`).
+///
+/// - `kept`: declarations of one `style`, in their order, each with
+///   whether a top-level `;` ends it.
+pub(super) fn join_declarations(kept: &[(&str, bool)]) -> String {
     let mut out = String::new();
     if let Some((&(last, ended), rest)) = kept.split_last() {
         for (text, _) in rest {
@@ -472,9 +488,9 @@ fn without_italic(style: &str) -> Option<String> {
     }
     let out = out.trim_start_matches(|c: char| c.is_ascii_whitespace());
     if out.chars().all(|c| c.is_ascii_whitespace() || c == ';') {
-        Some(String::new())
+        String::new()
     } else {
-        Some(out.to_owned())
+        out.to_owned()
     }
 }
 
@@ -1200,6 +1216,31 @@ mod tests {
     }
 
     #[test]
+    fn kept_declarations_are_joined_as_written() {
+        let pieces = declaration_texts(" a: b; c: (d; e);e:f ; /* g; */ h");
+        assert_eq!(
+            join_declarations(&pieces),
+            "a: b; c: (d; e);e:f ; /* g; */ h"
+        );
+        // The `;` that ends the last kept declaration goes, and only it.
+        assert_eq!(join_declarations(&pieces[..2]), "a: b; c: (d; e)");
+        assert_eq!(
+            join_declarations(&[pieces[1], pieces[3]]),
+            "c: (d; e); /* g; */ h"
+        );
+        // A `;` that ends nothing stays: here an escaped one.
+        assert_eq!(join_declarations(&declaration_texts(r"a: b\;")), r"a: b\;");
+        for blank in ["", " ", ";", " ; ;"] {
+            assert_eq!(
+                join_declarations(&declaration_texts(blank)),
+                "",
+                "{blank:?}"
+            );
+        }
+        assert_eq!(join_declarations(&[]), "");
+    }
+
+    #[test]
     fn angles_convert_to_degrees() {
         assert_eq!(degrees(45.0, "deg"), Some(45.0));
         assert_eq!(degrees(100.0, "grad"), Some(90.0));
@@ -1579,6 +1620,45 @@ mod tests {
                 let twin = twin_body(&pieces);
                 prop_assert!(normalise(&twin, &sanitizer()).is_err(), "{:?} is refused, but not {:?}", body, twin);
             }
+        }
+
+        // Joining any choice of a style's declarations reads back as those
+        // declarations, in their order: leaving the others out changes
+        // nothing about how the kept ones read.
+        #[test]
+        fn joined_declarations_read_as_the_kept_ones(
+            declarations in prop::collection::vec(
+                prop::sample::select(&[
+                    "color: red", "width: 300px", "border: 1px solid #000000", "font-family: \"a; b\"",
+                    "background: url(x;y)", "/* c; */ margin: 0", "height:auto", "", " ",
+                ][..]),
+                0..8,
+            ),
+            keep in prop::collection::vec(any::<bool>(), 8),
+            ending in prop::sample::select(&["", ";", "; "][..]),
+        ) {
+            let style = format!("{}{ending}", declarations.join("; "));
+            let pieces = declaration_texts(&style);
+            let kept: Vec<(&str, bool)> = pieces
+                .iter()
+                .zip(keep.iter().cycle())
+                .filter(|(_, keep)| **keep)
+                .map(|(piece, _)| *piece)
+                .collect();
+            let joined = join_declarations(&kept);
+            let read = |pieces: &[(&str, bool)]| {
+                pieces
+                    .iter()
+                    .flat_map(|(text, _)| declarations::read(text).read)
+                    .collect::<Vec<_>>()
+            };
+            prop_assert_eq!(declarations::read(&joined).read, read(&kept), "{:?} from {:?}", joined, style);
+            prop_assert_eq!(
+                declarations::read(&joined).unreadable,
+                kept.iter().map(|(text, _)| declarations::read(text).unreadable).sum::<usize>(),
+                "{:?} from {:?}", joined, style
+            );
+            prop_assert!(!joined.starts_with(|c: char| c.is_ascii_whitespace()) && !joined.ends_with(';'), "{:?}", joined);
         }
 
         // The twins hold nothing for the rules.

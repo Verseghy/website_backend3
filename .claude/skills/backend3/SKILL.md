@@ -583,12 +583,16 @@ is its specification; each slice adds the step for its own tables.
    A new normaliser rule adds its step to the pass in
    `src/domain/normalise/mod.rs`, its `Rule` variants, and a
    before-and-after pair to `tests/fixtures/normalise/` (a new N7 rule a
-   pair named after it, `n7-<rule>`); a rule that plans a removal that N7
-   makes (it rewrites the markup before N7 sees it, or N7's
-   `PLANNED_REMOVALS` gains a row) takes the fixtures it settles off the
-   runner's `UNPLANNED` list. Unit tests cover every
-   rule of sections 5-7 for the table, each defect including a precondition
-   mismatch, and each exemption flag of section 4.3; proptests cover
+   pair named after it, `n7-<rule>`; the runner,
+   `tests/normalise/fixtures.rs`, says what it checks); a rule that plans
+   a removal that N7 makes (it rewrites the markup before N7 sees it, or
+   N7's `PLANNED_REMOVALS` gains a row) takes the fixtures it settles off
+   the runner's `UNPLANNED` list. A pair whose output is in the editor's
+   stored form joins the admin's editor round trip
+   (`admin/src/rich-text/normaliser-round-trip.test.ts`, data-migration.md
+   section 12), which loads it and must save it byte for byte. Unit tests
+   cover every rule of sections 5-7 for the table, each defect including a
+   precondition mismatch, and each exemption flag of section 4.3; proptests cover
    round trips and idempotence.
 3. **The step** in `src/tasks/import_mysql/` (code that only the task uses,
    ADR 0008 rule 5), called from `run(&source_db, &target_db, &ImportOptions,

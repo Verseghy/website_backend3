@@ -20,11 +20,14 @@ export default defineConfig({
     fs: {
       // The stored-HTML serialiser's tests read the server's sanitiser
       // regression fixtures (editor.md §13.4, "Over every committed
-      // fixture"; src/test/stored-html.ts). Vite serves nothing outside
-      // admin/ unless it is listed, so that one directory is added here.
+      // fixture"), and the editor round trip reads the import normaliser's
+      // fixture outputs (data-migration.md §12; src/test/stored-html.ts).
+      // Vite serves nothing outside admin/ unless it is listed, so those
+      // two directories are added here.
       allow: [
         import.meta.dirname,
         resolve(import.meta.dirname, "../tests/fixtures/regressions"),
+        resolve(import.meta.dirname, "../tests/fixtures/normalise"),
       ],
     },
   },

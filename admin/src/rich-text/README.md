@@ -82,6 +82,12 @@ canonical shapes, `J(J(x)) == J(x)` over the server's regression fixtures
 fast-check documents with every kind of whitespace and U+0000, and the guard that the
 output never holds `rgb(` or `border-width:` and that prosemirror-model's
 `style` branch is unchanged. `src/test/stored-html.ts` has the `J` harness.
+`normaliser-round-trip.test.ts` is the importer's editor round trip
+(data-migration.md §12): `J(z) == z` for the outputs of the import
+normaliser's image fixtures (`tests/fixtures/normalise/`, which
+`vitest.config.ts` lets Vite read too), the body with images without alt
+text among them; the other normaliser outputs join it with the rest of
+N5b.
 The tables have their own (`serialize/tables.test.ts`,
 `tables.property.test.ts`): every canonical table is a fixed point, every
 table input reaches its pinned form in one load, a span far wider than its
