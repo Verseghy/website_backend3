@@ -32,8 +32,10 @@
 //!   [`NotModifiedCors`] right outside its `etag` middleware, so a `304`
 //!   under `/api/v1` carries the CORS header that the `etag` middleware drops
 //!   (public-api.md §9, ADR 0014).
-//! - `after_routes` wraps the finished router, middleware stack included, in
-//!   the HTTP request metrics layer.
+//! - `after_routes` adds the fallback `/storage` router when
+//!   `settings.media.serve_storage` is on (ADR 0015 §4), outside Loco's
+//!   middleware stack, and then wraps the finished router, middleware stack
+//!   and `/storage` included, in the HTTP request metrics layer.
 //! - `serve` puts [`trim_trailing_slash`] in front of the finished router,
 //!   so `/api/v1/posts/` is served exactly like `/api/v1/posts`
 //!   (public-api.md DEC-10, open item O-2), and runs the `/metrics` listener
@@ -103,7 +105,7 @@ use crate::{
         admin::media::MediaUploads,
         admin_ui::{self, DistRequirement},
         metrics::{self, HttpMetrics, Metrics, runtime::RuntimeMetrics},
-        not_found,
+        not_found, storage,
         v1::caching::NotModifiedCors,
     },
     domain::{
@@ -489,10 +491,19 @@ impl Hooks for App {
         stack
     }
 
-    /// Wraps the router, after Loco's middleware stack, in the HTTP request
-    /// metrics layer ([`metrics::with_http_metrics`]).
+    /// Adds the fallback `/storage` router when `settings.media.serve_storage`
+    /// is on ([`storage::mount`], ADR 0015 §4), then wraps everything in the
+    /// HTTP request metrics layer ([`metrics::with_http_metrics`]).
+    ///
+    /// Loco calls this hook with its middleware stack already applied
+    /// (loco-rs 1.2.0 `boot::setup_routes`), so the `/storage` routes stay
+    /// outside it: no body limit, request timeout, `etag` or compression
+    /// layer reaches them. The metrics layer comes last, so it counts
+    /// `/storage` requests too.
     async fn after_routes(router: AxumRouter, ctx: &AppContext) -> Result<AxumRouter> {
         let metrics = shared_metrics(ctx)?;
+        let settings = Settings::from_section(ctx.config.settings.as_ref()).map_err(Error::msg)?;
+        let router = storage::mount(router, &settings.media);
         Ok(metrics::with_http_metrics(router, metrics.http().clone()))
     }
 

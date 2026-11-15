@@ -13,7 +13,8 @@
 //!
 //! `media_contract` boots no app: it checks a `/storage` server over HTTP
 //! (ADR 0015 §1). Its nginx test starts a container, so it is ignored here and
-//! run by its own step of the Test job.
+//! run by its own step of the Test job. `requests::storage` runs the same
+//! suite against backend3's fallback router, in the ordinary run.
 
 mod boot;
 mod cli;

@@ -199,19 +199,24 @@ npm test            # Vitest: unit tests, i18n completeness checks, licence-poli
 npm run licenses    # the production-dependency licence check
 npm run clean-room  # no @react-admin/ (Enterprise) package in package.json or the lockfile
 npm run build       # writes dist/, which backend3 serves at /admin
-npm run e2e         # Playwright (Chromium) against http://localhost:5150/admin
+npm run e2e         # Playwright: the admin in Chromium, /storage in Chromium, Firefox and WebKit
 ```
 
 `npm run e2e` needs backend3 already running with `LOCO_ENV=e2e` and serving
 a `dist/` built as CI builds it
 (`VITE_REPORT_MISSING_KEYS=1 VITE_CLIPBOARD_RECORDER=1 npm run build`), and
 the seed account (`LOCO_ENV=e2e cargo loco db seed`; the root `AGENTS.md`,
-"The seed account"). It fails on any CSP violation or console error. A test
-of a page with a session calls `signIn(page)` from `e2e/fixtures.ts` first. A
-test that expects an HTTP error answer, such as the `401` of `/auth/me`
-before the sign-in, lists it in `expectedHttpErrors` (status and path):
-Chromium logs every such answer as a console error, and the guard ignores
-only the listed ones. A test that signs out ends every session of the seed
-account, which the other tests share in parallel, so it goes into
-`e2e/sign-out.spec.ts`: `playwright.config.ts` runs that file in its own
-`sign-out` project, after every other test has passed, one test at a time.
+"The seed account"). The admin specs fail on any CSP violation or console
+error (`e2e/fixtures.ts`). A test of a page with a session calls
+`signIn(page)` from `e2e/fixtures.ts` first. A test that expects an HTTP
+error answer, such as the `401` of `/auth/me` before the sign-in, lists it in
+`expectedHttpErrors` (status and path): Chromium logs every such answer as a
+console error, and the guard ignores only the listed ones. A test that signs
+out ends every session of the seed account, which the other tests share in
+parallel, so it goes into `e2e/sign-out.spec.ts`: `playwright.config.ts` runs
+that file in its own `sign-out` project, after every other admin test has passed,
+one test at a time. `e2e/storage.spec.ts` opens files under `/storage` in all
+three engines, so it needs
+`npx playwright install --with-deps chromium firefox webkit`, and it does not
+use that guard: the scripts a sandboxed file tries to run are reported as
+exactly those errors, which is what it tests.

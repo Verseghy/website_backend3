@@ -48,6 +48,7 @@ pub mod seed;
 pub mod session;
 pub mod session_cookie;
 pub mod session_jwt;
+pub mod storage_rules;
 pub mod task_lock_key;
 pub mod totp;
 pub mod totp_secret;

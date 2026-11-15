@@ -387,7 +387,8 @@ jobs:
     timeout-minutes: 45
     env:
       # config/e2e.yaml: database backend3_e2e on the compose Postgres,
-      # auto-migrate, admin/dist served at /admin on port 5150.
+      # auto-migrate, admin/dist served at /admin and target/media/e2e/public
+      # at /storage (the fallback router of ADR 0015 §4) on port 5150.
       LOCO_ENV: e2e
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -473,9 +474,14 @@ jobs:
         # with (admin/e2e/seed-account.ts). It runs only in development, test
         # and e2e; production refuses `db seed`.
         run: target/debug/backend3-cli db seed
-      - name: Install Playwright Chromium
+      - name: Install the Playwright browsers
+        # Chromium for the admin suite, and all three engines for
+        # admin/e2e/storage.spec.ts: files under /storage, which this server
+        # serves with the fallback router (config/e2e.yaml), opened in
+        # Chromium, Firefox and WebKit (editor.md §13 P9). `chromium` installs
+        # both the headless shell and the full build that spec runs in.
         working-directory: admin
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox webkit
       - name: Playwright
         working-directory: admin
         run: npm run e2e

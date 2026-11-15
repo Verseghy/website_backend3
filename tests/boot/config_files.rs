@@ -371,7 +371,7 @@ fn production_takes_bodies_of_128_mib() {
 }
 
 #[test]
-fn local_media_settings_point_below_target_and_never_serve_storage() {
+fn local_media_settings_point_below_target_and_only_e2e_serves_storage() {
     for environment in local_environments() {
         let settings = Settings::from_section(load(&environment).settings.as_ref())
             .unwrap_or_else(|error| panic!("{environment}: {error}"));
@@ -393,7 +393,13 @@ fn local_media_settings_point_below_target_and_never_serve_storage() {
             "{environment}: {base_url}"
         );
         assert!(base_url.ends_with("/storage"), "{environment}: {base_url}");
-        assert!(!media.serve_storage, "{environment}");
+        // Only the E2E server serves /storage, with the fallback router
+        // (ADR 0015 §4): it stands in for the backend3 host and has no media
+        // server (config/e2e.yaml). Development and the tests keep it off,
+        // as production does; the request tests turn it on themselves
+        // (tests/requests/storage.rs).
+        let e2e = environment == Environment::Any("e2e".to_owned());
+        assert_eq!(media.serve_storage, e2e, "{environment}");
         // ADR 0015 §7: 50 megapixels.
         assert_eq!(
             settings.image_optimisation.pixel_budget,
