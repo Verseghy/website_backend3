@@ -2,8 +2,10 @@
  * The licence notices of the bundled code (ADR 0038), as a visitor of
  * `/admin` gets them: the file the Vite build wrote into `dist/`, served by
  * backend3's root-file row (ADR 0004 §3), with its UTF-8 charset stated, and
- * shown inline by the browser. Every test also passes the CSP and console
- * guard of `fixtures.ts`. The request tests decode non-ASCII text against the
+ * shown inline by the browser. The notices need no session, so no test signs
+ * in. Every test also passes the CSP and console guard of `fixtures.ts`; the
+ * test that opens `/admin` lists the `401` of the admin's session check, and
+ * nothing else. The request tests decode non-ASCII text against the
  * fixture (`tests/requests/admin_ui.rs`); here the real file's non-ASCII
  * text is the licence file of the Hungarian strings, compared with the
  * committed copy.
@@ -48,22 +50,33 @@ test.describe("the licence notices served by backend3", () => {
     expect(text).toContain(hungarian)
   })
 
-  test("are named by the comment at the start of the admin's script", async ({
-    page,
-  }) => {
-    const response = await page.goto("/admin")
-    expect(response?.status()).toBe(200)
-    const entry = await page
-      .locator('script[type="module"][src^="/admin/assets/"]')
-      .getAttribute("src")
-    expect(entry).not.toBeNull()
+  test.describe("to a visitor without a session", () => {
+    // checkAuth asks /auth/me, which answers 401 to a visitor without a
+    // session; the guard ignores that one answer and nothing else.
+    test.use({
+      expectedHttpErrors: [{ status: 401, path: "/api/admin/auth/me" }],
+    })
 
-    const script = await page.request.get(entry ?? "")
-    expect(script.status()).toBe(200)
-    expect(
-      (await script.text()).startsWith(
-        "/*! Licence notices of the bundled code: /admin/licenses.txt */"
-      )
-    ).toBe(true)
+    test("are named by the comment at the start of the admin's script", async ({
+      page,
+    }) => {
+      const response = await page.goto("/admin")
+      expect(response?.status()).toBe(200)
+      // The session check is over once the sign-in screen shows, so the
+      // page is settled before the guard reads it.
+      await expect(page.getByTestId("sign-in-page")).toBeVisible()
+      const entry = await page
+        .locator('script[type="module"][src^="/admin/assets/"]')
+        .getAttribute("src")
+      expect(entry).not.toBeNull()
+
+      const script = await page.request.get(entry ?? "")
+      expect(script.status()).toBe(200)
+      expect(
+        (await script.text()).startsWith(
+          "/*! Licence notices of the bundled code: /admin/licenses.txt */"
+        )
+      ).toBe(true)
+    })
   })
 })

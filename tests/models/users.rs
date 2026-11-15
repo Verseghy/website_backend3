@@ -2,8 +2,9 @@
 //! every failed check, then, against PostgreSQL, the two finders, the `pid`
 //! hook, a hash that round-trips through the table, `App::truncate`, which
 //! leaves the accounts alone, sign-in and its cost, the session token, the
-//! session state the admin extractor checks, the `Authenticable` impl, and
-//! the stored TOTP secret, which decrypts only for its own row (ADR 0006
+//! session state the admin extractor checks, the `Authenticable` impl, the
+//! seed account, which the seed creates once and never changes, and the
+//! stored TOTP secret, which decrypts only for its own row (ADR 0006
 //! §6). Every account, password and secret is invented.
 
 use std::time::{Duration, Instant};
@@ -12,11 +13,12 @@ use backend3::{
     app::App,
     domain::{
         password_hash::DUMMY_PASSWORD_HASH,
+        seed::SeedAccount,
         session::AccountState,
         totp::TotpSecret,
         totp_secret::{self, DecryptError},
     },
-    models::users::{self, ActiveModel, Model},
+    models::users::{self, ActiveModel, Model, SeedOutcome},
     settings::Settings,
 };
 use chrono::DateTime;
@@ -28,7 +30,9 @@ use loco_rs::{
         ActiveModelTrait, ActiveValue, Authenticable, DateTimeWithTimeZone, IntoActiveModel, Uuid,
     },
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, PaginatorTrait, Statement,
+};
 use serde_json::json;
 
 use crate::support::with_app;
@@ -332,6 +336,75 @@ async fn a_stored_hash_round_trips_through_the_table() {
         // A pending account (no password) never verifies.
         let pending = insert(&ctx.db, "fuggo@example.test", |_| {}).await;
         assert!(!pending.verify_password(""));
+    })
+    .await;
+}
+
+/// An invented seed account for the `seed_account` tests; its password is a
+/// test value, not the published seed password.
+const SEED: SeedAccount = SeedAccount {
+    name: "Mag Próba",
+    email: "Mag.Proba@example.test",
+    password: "egy kitalált magjelszó",
+};
+
+#[tokio::test]
+async fn seed_account_creates_an_active_account_that_signs_in() {
+    with_app(|_router, ctx| async move {
+        let outcome = Model::seed_account(&ctx.db, &SEED).await.expect("seed");
+
+        let SeedOutcome::Created(created) = outcome else {
+            panic!("expected Created, got {outcome:?}");
+        };
+        assert_eq!(created.name, SEED.name);
+        assert_eq!(created.email.as_deref(), Some(SEED.email));
+        assert!(created.active);
+        assert!(!created.must_change_password);
+        assert_eq!(created.token_version, 0);
+        assert!(created.totp_secret_encrypted.is_none());
+        assert_eq!(created.created_by, None);
+        // A fresh Argon2id hash, with the hasher's default cost.
+        let hash = created.password_hash.as_deref().expect("hash");
+        assert_eq!(phc_head(hash), ["", "argon2id", "v=19", "m=19456,t=2,p=1"]);
+        let signed_in = Model::authenticate(&ctx.db, "mag.proba@EXAMPLE.test", SEED.password)
+            .await
+            .expect("authenticate");
+        assert_eq!(signed_in.map(|user| user.id), Some(created.id));
+    })
+    .await;
+}
+
+/// Seeding never touches an existing account with the address, in any case
+/// spelling and in any state, the trash included: the unique index covers
+/// trashed rows, so an insert would fail, and the seed must not restore,
+/// reactivate or re-password anything.
+#[tokio::test]
+async fn seed_account_leaves_an_existing_account_with_the_address_alone() {
+    with_app(|_router, ctx| async move {
+        let existing = insert(&ctx.db, "mag.proba@example.test", |new| {
+            new.name = ActiveValue::Set("Már Létező".to_owned());
+            new.active = ActiveValue::Set(false);
+        })
+        .await;
+        let existing = update(&ctx.db, existing, |active| {
+            active.deleted_at = ActiveValue::Set(Some(instant()));
+        })
+        .await;
+
+        let outcome = Model::seed_account(&ctx.db, &SEED).await.expect("seed");
+
+        let SeedOutcome::AlreadyPresent(found) = outcome else {
+            panic!("expected AlreadyPresent, got {outcome:?}");
+        };
+        assert_eq!(found, existing);
+        let stored = Model::find_by_pid(&ctx.db, &existing.pid.to_string())
+            .await
+            .expect("stored");
+        assert_eq!(stored, existing, "the row is unchanged");
+        assert_eq!(
+            users::Entity::find().count(&ctx.db).await.expect("count"),
+            1
+        );
     })
     .await;
 }

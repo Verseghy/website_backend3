@@ -1,6 +1,6 @@
 # 0006. Admin authentication and account lifecycle
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0040](0040-local-seed-account-and-every-db-seed-refused-in-production.md) (2026-11-01)
 - Decision questions: Q5, Q10a, Q10b, Q10c, Q10d, Q10e (10e was added during the design review; it has no entry in the question list)
 
 ## Context

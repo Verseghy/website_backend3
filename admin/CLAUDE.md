@@ -74,6 +74,24 @@ ADR 0005 (bindings) before changing anything here.
   notice); ADR 0030 §3 has the details. A new top-level namespace needs an
   amending ADR and an entry in `NAMESPACES` of `src/i18n/key-usage.test.ts`,
   which a test there checks (ADR 0030 §4).
+- **Authentication (ADR 0006).** The auth provider in
+  `src/auth/auth-provider.ts` is the only code that talks to
+  `/api/admin/auth`. The session is an `HttpOnly` cookie, so the admin never
+  reads or stores a token: `checkAuth` and `getIdentity` ask `/auth/me`.
+  `checkError` signs out on `401` only, never on `403`. Every page needs a
+  session (`requireAuth` in `src/App.tsx`); the only page without one is the
+  Hungarian sign-in screen `src/auth/SignInPage.tsx`, which replaces the
+  kit's login page and carries the source link. A refused request's message
+  comes from its error envelope through `src/api/error-envelope.ts`
+  (`errors.<code>`, or the server's text for an unknown code, ADR 0021 §4).
+  The kit's user menu stays hidden (`userMenu={null}` in
+  `src/layout/AppLayout.tsx`) until the logout slice adds the server's
+  sign-out.
+- **Clean room (ADR 0011 §8, ADR 0018 §3.4).** Never install an
+  `@react-admin/` package (react-admin's Enterprise Edition), and never read
+  or copy Enterprise source, types, styles or examples. `npm run clean-room`
+  (in the `Admin licenses` CI job) fails when `package.json` or the lockfile
+  names one.
 - **Links to fixed admin paths** go through the basename:
   `` to={`${useBasename()}/about`} ``, never `to="/about"`. ra-core's
   `LinkBase` is a plain router link; `useCreatePath` and `useRedirect` add the
@@ -169,11 +187,18 @@ npm run lint        # ESLint, including local/no-ui-literals
 npm run typecheck   # tsc -b --noEmit over the app, the scripts and the E2E suite
 npm test            # Vitest: unit tests, i18n completeness checks, licence-policy tests
 npm run licenses    # the production-dependency licence check
+npm run clean-room  # no @react-admin/ (Enterprise) package in package.json or the lockfile
 npm run build       # writes dist/, which backend3 serves at /admin
 npm run e2e         # Playwright (Chromium) against http://localhost:5150/admin
 ```
 
 `npm run e2e` needs backend3 already running with `LOCO_ENV=e2e` and serving
 a `dist/` built as CI builds it
-(`VITE_REPORT_MISSING_KEYS=1 VITE_CLIPBOARD_RECORDER=1 npm run build`); it
-fails on any CSP violation or console error.
+(`VITE_REPORT_MISSING_KEYS=1 VITE_CLIPBOARD_RECORDER=1 npm run build`), and
+the seed account (`LOCO_ENV=e2e cargo loco db seed`; the root `AGENTS.md`,
+"The seed account"). It fails on any CSP violation or console error. A test
+of a page with a session calls `signIn(page)` from `e2e/fixtures.ts` first. A
+test that expects an HTTP error answer, such as the `401` of `/auth/me`
+before the sign-in, lists it in `expectedHttpErrors` (status and path):
+Chromium logs every such answer as a console error, and the guard ignores
+only the listed ones.

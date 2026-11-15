@@ -10,10 +10,12 @@
  */
 import { readFile } from "node:fs/promises"
 
-import { expect, test } from "./fixtures.ts"
+import { expect, signIn, test } from "./fixtures.ts"
 
 test.describe("the clipboard recorder", () => {
   test("downloads a scrubbed JSON capture of a paste", async ({ page }) => {
+    // The recorder's route is inside the layout, which needs a session.
+    await signIn(page)
     await page.goto("/admin/clipboard-recorder")
     await expect(
       page.getByRole("heading", { name: "Vágólap-rögzítő" }),

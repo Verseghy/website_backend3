@@ -35,6 +35,9 @@
 //!   so `/api/v1/posts/` is served exactly like `/api/v1/posts`
 //!   (public-api.md DEC-10, open item O-2), and runs the `/metrics` listener
 //!   of `settings.metrics` next to it ([`serve_until`]).
+//! - `seed` creates the invented account of the development, test and E2E
+//!   seed and refuses every other environment, production and staging
+//!   included (`domain::seed`, ADR 0040).
 //!
 //! The session `TimeZone = UTC` of ADR 0002 ("Session settings") and ADR 0010
 //! rule 9 needs no hook: every connection backend3 opens goes through
@@ -102,7 +105,9 @@ use crate::{
     domain::{
         clock::Clock,
         database_target::{self, Connection},
+        seed,
     },
+    models::users::{self, SeedOutcome},
     settings::{
         METRICS_BINDING_KEY, METRICS_PORT_KEY, MetricsSettings, Settings, check_session_jwt,
     },
@@ -537,9 +542,36 @@ impl Hooks for App {
         Ok(())
     }
 
-    /// Loads seed fixtures from `base`. Each slice that adds fixtures adds
-    /// them here.
-    async fn seed(_ctx: &AppContext, _base: &Path) -> Result<()> {
+    /// Seeds a local database: `cargo loco db seed` (and `backend3-cli db
+    /// seed`, which the E2E job runs) creates the invented account of
+    /// [`seed::SEED_ACCOUNT`] unless an account already has its address
+    /// ([`users::Model::seed_account`]).
+    ///
+    /// - `ctx`: the application context; the hook takes the environment and
+    ///   the database from it.
+    /// - `_base`: the `--from` directory, unused. backend3 seeds no fixture
+    ///   files: its entities derive no serde, so Loco's YAML loader
+    ///   (`loco_rs::db::seed`) cannot read them, and seeds are built through
+    ///   the models instead (recipe 1 step 3 of the project skill).
+    ///
+    /// It refuses every environment but development, test and e2e before it
+    /// touches the database ([`seed::check_environment`]). The CLI pre-check
+    /// already refuses `db seed` in production; this refusal also covers any
+    /// other environment name and any caller that reaches the hook without
+    /// the CLI, such as Loco's testing helper `loco_rs::testing::db::seed`.
+    async fn seed(ctx: &AppContext, _base: &Path) -> Result<()> {
+        seed::check_environment(&ctx.environment.to_string()).map_err(Error::msg)?;
+        match users::Model::seed_account(&ctx.db, &seed::SEED_ACCOUNT).await? {
+            SeedOutcome::Created(_) => {
+                tracing::info!(email = seed::SEED_ACCOUNT.email, "created the seed account");
+            }
+            SeedOutcome::AlreadyPresent(_) => {
+                tracing::info!(
+                    email = seed::SEED_ACCOUNT.email,
+                    "an account with the seed address already exists; the seed left it unchanged"
+                );
+            }
+        }
         Ok(())
     }
 }

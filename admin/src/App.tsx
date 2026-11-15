@@ -4,12 +4,24 @@
  * Every dependency (providers, source commit) arrives as a prop from the
  * composition root (`main.tsx`), so tests mount the same component with stubs
  * and a memory router.
+ *
+ * Every page needs a session (`requireAuth`, ADR 0006): before it renders
+ * the layout, ra-core asks the auth provider's `checkAuth`, and without a
+ * session it sends the visitor to the Hungarian sign-in screen
+ * (`/admin/login`), which is the only page outside the session. After the
+ * sign-in it returns to the page the visitor asked for.
  */
 import { useMemo, type ReactNode } from "react"
-import { CustomRoutes, type DataProvider, type I18nProvider } from "ra-core"
+import {
+  CustomRoutes,
+  type AuthProvider,
+  type DataProvider,
+  type I18nProvider,
+} from "ra-core"
 import { Route } from "react-router-dom"
 
 import { AboutPage } from "@/about/AboutPage"
+import { createSignInPage } from "@/auth/SignInPage"
 import { Admin } from "@/components/admin"
 import { Dashboard } from "@/dashboard/Dashboard"
 import { ABOUT_PATH } from "@/layout/AppFooter"
@@ -20,6 +32,8 @@ import { ADMIN_BASENAME } from "@/router"
 export interface AdminAppProps {
   /** The data provider (`createDataProvider`). */
   readonly dataProvider: DataProvider
+  /** The auth provider (`createAuthProvider`). */
+  readonly authProvider: AuthProvider
   /** The Hungarian i18n provider (`createI18nProvider`). */
   readonly i18nProvider: I18nProvider
   /** The build's raw `VITE_SOURCE_COMMIT`, for the source links. */
@@ -41,17 +55,28 @@ export interface AdminAppProps {
  */
 export function AdminApp({
   dataProvider,
+  authProvider,
   i18nProvider,
   sourceCommit,
   developmentRoutes,
 }: AdminAppProps) {
   const layout = useMemo(() => createAppLayout(sourceCommit), [sourceCommit])
+  const signInPage = useMemo(
+    () => createSignInPage(sourceCommit),
+    [sourceCommit]
+  )
   return (
     <Admin
       basename={ADMIN_BASENAME}
       dataProvider={dataProvider}
+      authProvider={authProvider}
       i18nProvider={i18nProvider}
       layout={layout}
+      loginPage={signInPage}
+      // Without it ra-core would render the layout, the custom routes and
+      // the not-found screen to a visitor without a session, and check
+      // the session only on the dashboard and the resource pages.
+      requireAuth
       dashboard={Dashboard}
       title={i18nProvider.translate("app.title")}
       // The kit otherwise loads a tracking image from marmelab's server in

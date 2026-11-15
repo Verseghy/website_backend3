@@ -2,10 +2,18 @@
  * The admin served by backend3: loading, browser-history deep links and the
  * `index.html` fallback (ADR 0004 §3), under the admin CSP (ADR 0023 §6).
  * Every test also passes the CSP and console guard of `fixtures.ts`.
+ *
+ * Every page but the sign-in screen needs a session (ADR 0006), so each test
+ * signs the seed account in first; `sign-in.spec.ts` covers the sign-in
+ * itself and the pages without a session.
  */
-import { expect, test } from "./fixtures.ts"
+import { expect, signIn, test } from "./fixtures.ts"
 
 test.describe("the admin served by backend3", () => {
+  test.beforeEach(async ({ page }) => {
+    await signIn(page)
+  })
+
   test("loads /admin with the Hungarian dashboard and the admin CSP", async ({
     page,
   }) => {

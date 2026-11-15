@@ -12,6 +12,8 @@ licences (see `../THIRD_PARTY.md`).
 | `src/main.tsx` | composition root: the only place that reads the build environment |
 | `src/App.tsx`, `src/router.tsx` | the `<Admin>` root and its browser-history router under `/admin` |
 | `src/i18n/` | `hu.ts`, the single message file, and the provider (ADR 0021) |
+| `src/auth/` | the auth provider, the only client of `/api/admin/auth`, and the Hungarian sign-in screen (ADR 0006) |
+| `src/api/` | helpers shared by the auth and data providers: the same-origin API base path and the error-envelope reader (ADR 0021 §4) |
 | `src/data-provider/` | backend3's own ra-core data provider |
 | `src/update-prompt/` | the reload prompt after a deploy (ADR 0004 §5) |
 | `src/source-link/`, `src/about/`, `src/layout/` | the AGPL source link, the about page and the footer (ADR 0012 §4) |
@@ -20,12 +22,14 @@ licences (see `../THIRD_PARTY.md`).
 | `src/components/admin/`, `src/components/ui/` | vendored shadcn-admin-kit and shadcn/ui code, with `LICENSE` and `LOCAL_CHANGES.md` |
 | `e2e/` | Playwright tests against a running backend3 |
 | `eslint-rules/` | the `local/no-ui-literals` rule (ADR 0021 §7) |
-| `scripts/`, `license-policy.json` | the production-dependency licence check (ADR 0022 §4), and the Vite plugin that completes the licence notices of the bundled packages and copied code, `dist/licenses.txt` (ADR 0038) |
+| `scripts/`, `license-policy.json` | the production-dependency licence check (ADR 0022 §4), the Vite plugin that completes the licence notices of the bundled packages and copied code, `dist/licenses.txt` (ADR 0038), and the clean-room check that no `@react-admin/` (Enterprise) package is named (ADR 0011 §8, ADR 0018 §3.4) |
 
 Commands, rules and the gate are in `CLAUDE.md`. In short: `npm ci`, then
 `npm run dev` (Vite on port 5173, proxying `/api` and `/storage` to a local
 backend3 on port 5150), `npm run lint`, `npm run typecheck`, `npm test`,
-`npm run licenses`, `npm run build` and `npm run e2e`.
+`npm run licenses`, `npm run clean-room`, `npm run build` and `npm run e2e`.
+The E2E tests sign in with the seed account (`../AGENTS.md`, "The seed
+account"), which `LOCO_ENV=e2e cargo loco db seed` creates.
 
 ## The clipboard recorder
 

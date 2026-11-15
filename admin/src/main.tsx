@@ -12,6 +12,7 @@ import { I18nContextProvider } from "ra-core"
 
 import "./index.css"
 import { AdminApp } from "@/App"
+import { createAuthProvider } from "@/auth/auth-provider"
 import { createDataProvider } from "@/data-provider/data-provider"
 import { createI18nProvider } from "@/i18n/provider"
 import { shouldReportMissingKeys } from "@/i18n/report-missing-keys"
@@ -37,6 +38,12 @@ const i18nProvider = createI18nProvider({
 const dataProvider = createDataProvider({
   apiBaseUrl: "/api/admin",
   resources: {},
+})
+// The browser's fetch, bound to window: called unbound, it throws
+// "Illegal invocation" in Chromium.
+const authProvider = createAuthProvider({
+  apiBaseUrl: "/api/admin",
+  fetch: window.fetch.bind(window),
 })
 
 /**
@@ -79,6 +86,7 @@ const developmentRoutes = __CLIPBOARD_RECORDER__
 const router = createAdminRouter(
   <AdminApp
     dataProvider={dataProvider}
+    authProvider={authProvider}
     i18nProvider={i18nProvider}
     sourceCommit={import.meta.env.VITE_SOURCE_COMMIT}
     developmentRoutes={developmentRoutes}

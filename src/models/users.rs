@@ -32,6 +32,8 @@
 //! impl lets Loco's `JWTWithUser` extractor load the account a token names,
 //! and [`Model::session_state`] hands the admin extractor the columns that
 //! decide whether the session still holds (ADR 0006 §1).
+//! [`Model::seed_account`] creates the invented account of the development,
+//! test and E2E seed (`crate::domain::seed`).
 //!
 //! The entity derives no serde (`[package.metadata.db.entity]` in
 //! `Cargo.toml`), so a [`Model`] can be neither a response nor a request
@@ -48,6 +50,7 @@ pub use super::_entities::users::{self, ActiveModel, Column, Entity, Model};
 use crate::domain::{
     email_address,
     password_hash::{self, DUMMY_PASSWORD_HASH, PasswordHashKind},
+    seed::SeedAccount,
     session::{AUTH_TIME_CLAIM, AccountState, SCOPE_CLAIM, SessionScope, TOKEN_VERSION_CLAIM},
     totp::TotpSecret,
     totp_secret::{self, DecryptError, TotpEncryptionKey},
@@ -145,6 +148,16 @@ pub fn verify_stored_password(stored: Option<&str>, password: &str) -> bool {
             false
         }
     }
+}
+
+/// What [`Model::seed_account`] found.
+#[derive(Debug)]
+pub enum SeedOutcome {
+    /// No account had the seed account's address, so it was created.
+    Created(Model),
+    /// An account already has the address, in whatever state; the seed left
+    /// it as it is.
+    AlreadyPresent(Model),
 }
 
 /// Spends one Argon2id verification of `password` against
@@ -294,6 +307,58 @@ impl Model {
         let may_sign_in =
             user.active && user.totp_enabled_at.is_none() && !user.must_change_password;
         Ok((password_matches && may_sign_in).then_some(user))
+    }
+
+    /// Creates the seed account `account` unless an account already has its
+    /// address, for `Hooks::seed` (`crate::domain::seed`).
+    ///
+    /// - `db`: the connection or transaction to write to.
+    /// - `account`: the account to create; its password is hashed here, with
+    ///   [`hash_password`] and a fresh salt, so no hash of it is ever
+    ///   committed.
+    ///
+    /// The address is compared as sign-in compares it (`lower(email)`), over
+    /// every row, trashed ones included, because the unique index
+    /// `users_lower_email_key` covers them too. An account that has it is
+    /// left exactly as it is, whatever its state, so seeding twice gives the
+    /// result of seeding once, as `find_or_create_by` does in a Rails seed.
+    /// To start over, recreate the database (`AGENTS.md`, "Commands").
+    ///
+    /// The new account is active, has a password and no two-factor, and needs
+    /// no password change, so the browser sign-in gives it a full session.
+    /// `created_at` and `updated_at` come from PostgreSQL's clock, the
+    /// columns' default (research: DECISIONS R15 (D90)), and `created_by`
+    /// stays NULL: the system created it. No revision or activity entry is
+    /// written: the seed fills only local development, test and E2E
+    /// databases (`crate::domain::seed::check_environment`).
+    ///
+    /// The caller checks the environment first; this method does not see it.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::Any`] when hashing fails; [`ModelError::DbErr`] when a
+    /// query fails, including the unique violation of a concurrent seed that
+    /// inserted the same address first.
+    pub async fn seed_account<C>(db: &C, account: &SeedAccount) -> ModelResult<SeedOutcome>
+    where
+        C: ConnectionTrait,
+    {
+        if let Some(existing) = Entity::find()
+            .filter(lower_email_equals(account.email))
+            .one(db)
+            .await?
+        {
+            return Ok(SeedOutcome::AlreadyPresent(existing));
+        }
+        let created = ActiveModel {
+            email: ActiveValue::Set(Some(account.email.to_owned())),
+            name: ActiveValue::Set(account.name.to_owned()),
+            password_hash: ActiveValue::Set(Some(hash_password(account.password)?)),
+            ..Default::default()
+        }
+        .insert(db)
+        .await?;
+        Ok(SeedOutcome::Created(created))
     }
 
     /// Signs a full admin session token for this account (ADR 0006 §1).

@@ -150,7 +150,11 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    provider in `admin/src/data-provider/` (never `ra-data-json-server` or
    `ra-data-simple-rest`), every string from `admin/src/i18n/hu.ts` with the
    ADR 0021 section 6 terms, and the trash and history patterns of ADR 0011
-   section 8.
+   section 8, built clean-room: never an `@react-admin/` package
+   (`npm run clean-room` fails on one). Every screen sits behind the sign-in
+   (`requireAuth`, ADR 0006); a refused request shows its envelope's message
+   through `envelopeMessage` of `admin/src/api/error-envelope.ts` (ADR 0021
+   section 4), and the auth provider signs out on `401` only.
 10. **Importer step** for the feature's legacy tables: recipe 4.
 11. **Tests at every layer**: domain unit tests and proptests, in-module;
     domain tests that need fixture files (such as the image corpus in
@@ -158,11 +162,17 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
     not read files; model tests in `tests/models/`; request tests in
     `tests/requests/`; admin unit tests next to the components (`npm test`);
     one Playwright test of the main flow
-    (`npm run e2e`). Tests that a generator writes use `boot_test` and
-    `serial_test`, which backend3 does not depend on: rewrite them to
-    `tests/support::with_app` or `with_server`, which give each test its own
-    database and always drop it. A test of a time-dependent rule starts at a
-    chosen instant with `with_app_at` or `with_server_at` (recipe 7).
+    (`npm run e2e`), which signs the seed account in first with `signIn(page)`
+    of `admin/e2e/fixtures.ts` and lists any HTTP error answer it expects in
+    `expectedHttpErrors` (`admin/CLAUDE.md`, "The admin gate"). A fixture the
+    E2E flow needs in the database is created by `Hooks::seed` through the
+    models (`AGENTS.md`, "The seed account"), which refuses every environment
+    but development, test and e2e. Tests that a generator writes use
+    `boot_test` and `serial_test`, which backend3 does not depend on: rewrite
+    them to `tests/support::with_app` or `with_server`, which give each test
+    its own database and always drop it. A test of a time-dependent rule
+    starts at a chosen instant with `with_app_at` or `with_server_at`
+    (recipe 7).
 12. **Regenerate the contract**: run the test suite so ts-rs rewrites
     `admin/src/bindings/` and the OpenAPI snapshot updates, review both, and
     commit them (the `Contract` job fails on drift, ADR 0005 section 4). A

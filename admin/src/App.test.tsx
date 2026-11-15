@@ -1,18 +1,95 @@
 /**
  * The admin root mounted the way `main.tsx` mounts it, but on a memory router
- * built from the same route table (`adminRoutes`).
+ * built from the same route table (`adminRoutes`), with the real auth
+ * provider over a `fetch` stub that plays the admin API's `/auth` routes.
  */
 import type { ReactNode } from "react"
-import { render, screen, within } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { Route, RouterProvider, createMemoryRouter } from "react-router-dom"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { AdminApp } from "@/App"
+import { createAuthProvider } from "@/auth/auth-provider"
+import type { MeResponse } from "@/bindings/MeResponse"
 import { createDataProvider } from "@/data-provider/data-provider"
 import { createI18nProvider } from "@/i18n/provider"
 import { adminRoutes } from "@/router"
 
 const SHA = "fedcba9876543210fedcba9876543210fedcba98"
+
+const ME: MeResponse = {
+  pid: "0b7c4a52-7e3d-4c55-9a7f-4b3c2d1e0f9a",
+  name: "Próba Szerkesztő",
+  email: "proba@example.test",
+  scope: "admin",
+}
+
+/**
+ * A JSON answer.
+ *
+ * @param status - the HTTP status.
+ * @param body - the body.
+ * @returns a `Response`.
+ */
+function json(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  })
+}
+
+/**
+ * A stand-in for the admin API's `/auth` routes: `/auth/me` answers the
+ * account while `signedIn` is true and `401 unauthorized` otherwise, and
+ * `/auth/login` signs in with `password`.
+ */
+class FakeAuthApi {
+  /** Whether the browser holds a session cookie. */
+  signedIn: boolean
+  /** The `fetch` stub to hand to the auth provider. */
+  readonly fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+    const url = String(input)
+    if (url === "/api/admin/auth/me") {
+      return this.signedIn
+        ? json(200, ME)
+        : json(401, {
+            error: "unauthorized",
+            description: "d",
+            field: null,
+            params: {},
+          })
+    }
+    if (url === "/api/admin/auth/login" && init?.method === "POST") {
+      const { password } = JSON.parse(String(init.body)) as {
+        password: string
+      }
+      if (password !== "helyes jelszó") {
+        return json(401, {
+          error: "invalid_credentials",
+          description: "d",
+          field: null,
+          params: {},
+        })
+      }
+      this.signedIn = true
+      return json(200, { step: "done" })
+    }
+    return json(404, {
+      error: "not_found",
+      description: "d",
+      field: null,
+      params: {},
+    })
+  })
+
+  /**
+   * @param signedIn - whether the browser starts with a session.
+   */
+  constructor(signedIn: boolean) {
+    this.signedIn = signedIn
+  }
+}
 
 /**
  * Mounts the admin at `entry`.
@@ -20,15 +97,25 @@ const SHA = "fedcba9876543210fedcba9876543210fedcba98"
  * @param entry - the initial URL, path plus query.
  * @param developmentRoutes - routes a development build adds, as `main.tsx`
  *   passes them.
+ * @param api - the fake `/auth` routes; signed in unless the test says
+ *   otherwise.
  * @returns the memory router, to inspect its location.
  */
-function mountAdmin(entry: string, developmentRoutes?: ReactNode) {
+function mountAdmin(
+  entry: string,
+  developmentRoutes?: ReactNode,
+  api: FakeAuthApi = new FakeAuthApi(true)
+) {
   const router = createMemoryRouter(
     adminRoutes(
       <AdminApp
         dataProvider={createDataProvider({
           apiBaseUrl: "/api/admin",
           resources: {},
+        })}
+        authProvider={createAuthProvider({
+          apiBaseUrl: "/api/admin",
+          fetch: api.fetch,
         })}
         i18nProvider={createI18nProvider({ reportMissingKeys: true })}
         sourceCommit={SHA}
@@ -140,5 +227,125 @@ describe("AdminApp", () => {
     )
     expect(await screen.findByTestId("development-route")).toBeInTheDocument()
     expect(screen.getByRole("contentinfo")).toBeInTheDocument()
+  })
+})
+
+describe("AdminApp without a session", () => {
+  it("sends a visitor at /admin to the Hungarian sign-in page", async () => {
+    const router = mountAdmin("/admin", undefined, new FakeAuthApi(false))
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Bejelentkezés" })
+    ).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe("/admin/login")
+    expect(screen.queryByTestId("dashboard")).not.toBeInTheDocument()
+  })
+
+  it.each([
+    "/admin/about",
+    "/admin/posts/12/show",
+    "/admin/media?path=uploads/posts",
+  ])("renders no layout page at %s before the sign-in", async (entry) => {
+    const router = mountAdmin(entry, undefined, new FakeAuthApi(false))
+    await screen.findByTestId("sign-in-page")
+    expect(router.state.location.pathname).toBe("/admin/login")
+    expect(screen.queryByTestId("about-page")).not.toBeInTheDocument()
+    expect(screen.queryByText("Nem található")).not.toBeInTheDocument()
+    // The only footer is the sign-in page's own, with the source link only.
+    expect(
+      within(screen.getByRole("contentinfo")).queryByRole("link", {
+        name: "Névjegy",
+      })
+    ).not.toBeInTheDocument()
+  })
+
+  it("keeps a development route behind the sign-in too", async () => {
+    const router = mountAdmin(
+      "/admin/clipboard-recorder",
+      <Route
+        path="/clipboard-recorder"
+        element={<div data-testid="development-route" />}
+      />,
+      new FakeAuthApi(false)
+    )
+    await screen.findByTestId("sign-in-page")
+    expect(router.state.location.pathname).toBe("/admin/login")
+    expect(screen.queryByTestId("development-route")).not.toBeInTheDocument()
+  })
+
+  it("returns to the page the visitor asked for after the sign-in", async () => {
+    const api = new FakeAuthApi(false)
+    const router = mountAdmin("/admin/about", undefined, api)
+    await screen.findByTestId("sign-in-page")
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText(/E-mail-cím/), ME.email)
+    await user.type(screen.getByLabelText(/Jelszó/), "helyes jelszó")
+    await user.click(screen.getByRole("button", { name: "Bejelentkezés" }))
+
+    expect(await screen.findByTestId("about-page")).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe("/admin/about")
+    expect(api.signedIn).toBe(true)
+  })
+
+  it("lands on the dashboard after a sign-in from /admin", async () => {
+    const router = mountAdmin("/admin", undefined, new FakeAuthApi(false))
+    await screen.findByTestId("sign-in-page")
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText(/E-mail-cím/), ME.email)
+    await user.type(screen.getByLabelText(/Jelszó/), "helyes jelszó")
+    await user.click(screen.getByRole("button", { name: "Bejelentkezés" }))
+
+    expect(await screen.findByTestId("dashboard")).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe("/admin")
+  })
+
+  it("stays on the sign-in page with the generic message after a wrong password", async () => {
+    const router = mountAdmin("/admin", undefined, new FakeAuthApi(false))
+    await screen.findByTestId("sign-in-page")
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText(/E-mail-cím/), ME.email)
+    await user.type(screen.getByLabelText(/Jelszó/), "rossz jelszó")
+    await user.click(screen.getByRole("button", { name: "Bejelentkezés" }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Hibás e-mail-cím vagy jelszó."
+    )
+    expect(router.state.location.pathname).toBe("/admin/login")
+  })
+})
+
+describe("AdminApp with a session", () => {
+  it("asks /auth/me before it renders a page", async () => {
+    const api = new FakeAuthApi(true)
+    mountAdmin("/admin", undefined, api)
+    await screen.findByTestId("dashboard")
+    expect(api.fetch).toHaveBeenCalledWith(
+      "/api/admin/auth/me",
+      expect.objectContaining({ method: "GET" })
+    )
+  })
+
+  it("shows no user menu until the logout slice adds the server's sign-out", async () => {
+    mountAdmin("/admin")
+    await screen.findByTestId("dashboard")
+    // The kit's user menu is an avatar button with „Kijelentkezés” in it.
+    expect(document.querySelector('[data-slot="avatar"]')).toBeNull()
+    expect(screen.queryByText(ME.name)).not.toBeInTheDocument()
+  })
+
+  it("lets ra-core send the user to the sign-in page when the session ends", async () => {
+    const api = new FakeAuthApi(true)
+    const router = mountAdmin("/admin/about", undefined, api)
+    await screen.findByTestId("about-page")
+
+    // The session ends (expiry, deactivation); the next page checks it.
+    api.signedIn = false
+    await router.navigate("/admin/")
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/admin/login")
+    )
+    expect(await screen.findByTestId("sign-in-page")).toBeInTheDocument()
   })
 })

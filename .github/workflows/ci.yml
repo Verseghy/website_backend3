@@ -375,6 +375,11 @@ jobs:
       # The check reads the installed tree, so install it first (ADR 0022 section 4).
       - run: npm ci
       - run: npm run licenses
+      # The clean-room rule (ADR 0011 section 8, ADR 0018 section 3.4): fails
+      # when package.json or package-lock.json names any @react-admin/
+      # (Enterprise Edition) package. It reads the two committed files only.
+      - name: No react-admin Enterprise packages
+        run: npm run clean-room
 
   e2e:
     name: E2E
@@ -463,7 +468,10 @@ jobs:
           exit 1
       - name: Seed the E2E fixtures
         # Hooks::seed loads the E2E fixtures into backend3_e2e after the
-        # server has migrated it on boot (ADR 0022 section 3).
+        # server has migrated it on boot (ADR 0022 section 3): the invented
+        # account of src/domain/seed.rs, which the Playwright suite signs in
+        # with (admin/e2e/seed-account.ts). It runs only in development, test
+        # and e2e; production refuses `db seed`.
         run: target/debug/backend3-cli db seed
       - name: Install Playwright Chromium
         working-directory: admin
