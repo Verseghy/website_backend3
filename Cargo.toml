@@ -294,7 +294,7 @@ chrono-tz = "=0.10.4"
 # `/proc/self` reader, with its parser in `src/domain/`. The crate's default
 # features are empty in 0.25.1; `default-features = false` keeps them off
 # should a release turn on the protobuf encoders, which would add prost.
-prometheus-client = { version = "0.25.1", default-features = false }
+prometheus-client = { version = "0.26.0", default-features = false }
 # JPEG decode check and re-encode of image uploads (ADR 0015 §7): MozJPEG,
 # a fork of libjpeg-turbo, chosen by the measurement in
 # docs/design/image-encoders.md. The crate builds MozJPEG's C code with
