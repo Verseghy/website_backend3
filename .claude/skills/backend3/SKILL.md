@@ -165,7 +165,11 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
     chosen instant with `with_app_at` or `with_server_at` (recipe 7).
 12. **Regenerate the contract**: run the test suite so ts-rs rewrites
     `admin/src/bindings/` and the OpenAPI snapshot updates, review both, and
-    commit them (the `Contract` job fails on drift, ADR 0005 section 4).
+    commit them (the `Contract` job fails on drift, ADR 0005 section 4). A
+    slice that changes the rich-text policy also runs
+    `cargo loco task rich_text_manifest` and commits
+    `admin/src/rich-text/policy.json` and `css-vectors.jsonl`, which the same
+    job checks (editor.md §3.9).
 13. **Docs**: update the ADR or spec the slice changes, and `AGENTS.md`,
     `CLAUDE.md` or this skill if a rule, command or path changed.
 14. **Gate**: the "Before you call it done" block of `AGENTS.md`.

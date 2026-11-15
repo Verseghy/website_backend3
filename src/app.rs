@@ -88,12 +88,8 @@ use tower_http::normalize_path::{NormalizePath, NormalizePathLayer};
 // `cargo loco generate task` injects `tasks.register(tasks::<name>::<Task>);`
 // above the marker comment in `register_tasks` (loco-gen 1.2.0,
 // `templates/task/task.t`). The path `tasks::...` names this module, not the
-// `tasks` parameter (paths resolve in the type namespace), so it must be in
-// scope before the first task exists, as in Loco's own `app.rs` template.
-#[allow(
-    unused_imports,
-    reason = "used by the lines `cargo loco generate task` injects into register_tasks"
-)]
+// `tasks` parameter (paths resolve in the type namespace), so it stays in
+// scope, as in Loco's own `app.rs` template.
 use crate::tasks;
 use crate::{
     controllers::{
@@ -519,11 +515,11 @@ impl Hooks for App {
         Ok(())
     }
 
-    #[allow(unused_variables)]
     fn register_tasks(tasks: &mut Tasks) {
         // The legacy import exists only with its Cargo feature (data-migration.md §3.3).
         #[cfg(feature = "import-mysql")]
         tasks.register(tasks::import_mysql::ImportMysql);
+        tasks.register(tasks::rich_text_manifest::RichTextManifest);
         // tasks-inject (do not remove)
     }
 

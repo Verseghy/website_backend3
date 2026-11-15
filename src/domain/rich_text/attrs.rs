@@ -20,7 +20,7 @@
 use std::borrow::Cow;
 
 use super::css;
-use super::policy::{SanitizePolicy, ValueRule, element_rule};
+use super::policy::{IFRAME_FULL_WIDTH, SanitizePolicy, ValueRule, element_rule};
 use super::report::RemovalRule;
 use super::url_rules;
 
@@ -58,7 +58,7 @@ pub fn decide<'a>(
         ValueRule::Marker => Decision::Keep(Cow::Borrowed("")),
         ValueRule::Forced(canonical) => Decision::Keep(Cow::Borrowed(canonical)),
         ValueRule::Integer { min, max, default } => integer(value, min, max, default),
-        ValueRule::IntegerOrFull { .. } if value == "100%" => keep(value),
+        ValueRule::IntegerOrFull { .. } if value == IFRAME_FULL_WIDTH => keep(value),
         ValueRule::IntegerOrFull { min, max } => integer(value, min, max, None),
         ValueRule::Enumerated { default, .. } if Some(value) == default => {
             Decision::Drop(RemovalRule::DefaultValueOmitted)

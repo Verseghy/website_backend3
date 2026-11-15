@@ -11,6 +11,8 @@
 //! and therefore cannot live in the pure `src/domain/` (ADR 0008).
 
 mod css_vectors;
+mod manifest;
+mod oracle;
 mod properties;
 mod regressions;
 mod validate;

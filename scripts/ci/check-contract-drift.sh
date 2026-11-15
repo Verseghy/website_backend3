@@ -5,9 +5,12 @@
 # Why this exists: the Rust DTOs are the API contract (ADR 0005). The ts-rs
 # export tests rewrite admin/src/bindings/, and the insta snapshot tests pin
 # the OpenAPI document (and any other snapshot) under */snapshots/. The
-# "Contract" CI job (a required context, ADR 0022 section 3) runs those tests
-# and then this script. A DTO change without the regenerated bindings, or a
-# binding edited by hand, therefore fails the PR instead of drifting.
+# rich-text policy is a contract with the admin too: the rich_text_manifest
+# task writes admin/src/rich-text/policy.json and css-vectors.jsonl from it
+# (docs/design/editor.md §3.9). The "Contract" CI job (a required context,
+# ADR 0022 section 3) runs those tests and the task, and then this script. A
+# DTO or policy change without the regenerated files, or a generated file
+# edited by hand, therefore fails the PR instead of drifting.
 #
 # It uses `git status --porcelain --untracked-files=all` rather than
 # `git diff --exit-code`, because a new DTO produces a new, untracked binding
@@ -18,10 +21,14 @@
 # Exit codes: 0 no drift, 1 drift found, 2 usage error (not a git work tree).
 set -euo pipefail
 
-# The generated paths, as git pathspecs relative to the repository root.
+# The generated paths, as git pathspecs relative to the repository root. Of
+# admin/src/rich-text/, only the two manifest files are generated: the
+# admin's own rich-text code lives beside them.
 readonly -a CONTRACT_PATHS=(
   'admin/src/bindings'
   ':(glob)**/snapshots/**'
+  'admin/src/rich-text/policy.json'
+  'admin/src/rich-text/css-vectors.jsonl'
 )
 
 usage() {
@@ -51,7 +58,7 @@ main() {
   local status
   status=$(git -C "$top" status --porcelain=v1 --untracked-files=all -- "${CONTRACT_PATHS[@]}")
   if [[ -z $status ]]; then
-    echo "Contract OK: admin/src/bindings/ and the snapshots match the committed files."
+    echo "Contract OK: admin/src/bindings/, the rich-text manifest and the snapshots match the committed files."
     return 0
   fi
   {
@@ -65,8 +72,10 @@ main() {
     echo
     echo "Fix: run 'cargo test' locally (the ts-rs export tests rewrite admin/src/bindings/),"
     echo "review snapshot changes with 'cargo insta review', and commit the results."
-    echo "Never edit admin/src/bindings/ by hand. A changed OpenAPI snapshot is an API change:"
-    echo "say so in the PR and use the 'api' scope (ADR 0012 section 3)."
+    echo "For admin/src/rich-text/, run 'cargo loco task rich_text_manifest' from the"
+    echo "repository root and commit both files (docs/design/editor.md §3.9)."
+    echo "Never edit admin/src/bindings/ or the manifest files by hand. A changed OpenAPI"
+    echo "snapshot is an API change: say so in the PR and use the 'api' scope (ADR 0012 section 3)."
   } >&2
   return 1
 }

@@ -14,3 +14,4 @@
 
 #[cfg(feature = "import-mysql")]
 pub mod import_mysql;
+pub mod rich_text_manifest;

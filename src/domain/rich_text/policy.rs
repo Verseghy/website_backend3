@@ -4,13 +4,14 @@
 //! §7.2).
 //!
 //! The tables are `const` data rather than code so that the ammonia builder,
-//! the attribute filter, the removal report and, later, the policy manifest
-//! (editor.md §3.9) read one source. The per-element CSS grammar of editor.md
-//! §3.3 is the same kind of data and lives beside its parser, in
-//! [`super::css::grammar`]. Any change here or there is a policy change: it
-//! bumps [`POLICY_VERSION`] and ships with a `content_normalize` run
-//! (editor.md §3). The R11 hardening, made before any body was stored, is
-//! the one change that did not, and [`POLICY_VERSION`] records why.
+//! the attribute filter, the removal report and the policy manifest
+//! ([`super::manifest`], editor.md §3.9) read one source. The per-element
+//! CSS grammar of editor.md §3.3 is the same kind of data and lives beside
+//! its parser, in [`super::css::grammar`]. Any change here or there is a
+//! policy change: it bumps [`POLICY_VERSION`] and ships with a
+//! `content_normalize` run (editor.md §3). The R11 hardening, made before
+//! any body was stored, is the one change that did not, and
+//! [`POLICY_VERSION`] records why.
 //!
 //! [`SanitizePolicy`] holds what differs between deployments: the embed
 //! providers, the image path prefix, backend3's own hosts, and the bounds on
@@ -309,6 +310,18 @@ pub const IMAGE_PATH_PREFIX: &str = "/storage/uploads/";
 /// The path prefix of both embed providers.
 pub const EMBED_PATH_PREFIX: &str = "/embed/";
 
+/// The only scheme an embed URL may use (editor.md §3.6).
+pub const EMBED_SCHEME: &str = "https";
+
+/// The characters of an embed id (the part of the path after the provider's
+/// prefix) and of a `YouTube` `list` value: `[A-Za-z0-9_-]`, at least one
+/// (editor.md §3.6).
+pub const EMBED_ID_ALPHABET: &str =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+
+/// The one non-integer value of `iframe[width]` ([`ValueRule::IntegerOrFull`]).
+pub const IFRAME_FULL_WIDTH: &str = "100%";
+
 /// The default input limit, above the largest legacy body (editor.md §7.2).
 pub const DEFAULT_MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 
@@ -356,6 +369,49 @@ pub enum EmbedQuery {
     /// `start=<integer>` and `list=<id>`, each optional, in that order
     /// (the `youtube.com` hosts).
     StartAndList,
+}
+
+/// The kind of value an embed query parameter takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedQueryValue {
+    /// One or more ASCII digits (`start`, in seconds).
+    Digits,
+    /// One or more characters of [`EMBED_ID_ALPHABET`] (`list`).
+    Id,
+}
+
+/// One query parameter an embed URL may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbedQueryParameter {
+    /// The parameter name, as written before `=`.
+    pub name: &'static str,
+    /// What its value may be.
+    pub value: EmbedQueryValue,
+}
+
+impl EmbedQuery {
+    /// The parameters a URL under this rule may carry, in the order they
+    /// must appear. Each is optional, but a query that is present holds at
+    /// least one, and nothing else. This is the data form of the rule that
+    /// [`super::url_rules::embed_src`] applies, which the policy manifest
+    /// exports (editor.md §3.9); a test in [`super::manifest`] keeps the two
+    /// in step.
+    #[must_use]
+    pub const fn parameters(self) -> &'static [EmbedQueryParameter] {
+        match self {
+            Self::None => &[],
+            Self::StartAndList => &[
+                EmbedQueryParameter {
+                    name: "start",
+                    value: EmbedQueryValue::Digits,
+                },
+                EmbedQueryParameter {
+                    name: "list",
+                    value: EmbedQueryValue::Id,
+                },
+            ],
+        }
+    }
 }
 
 /// One embed provider: the hosts its iframes may load from.
@@ -658,6 +714,36 @@ mod tests {
         }
         assert_eq!(element_rule("div"), None);
         assert_eq!(element_rule("P"), None, "the parser lower-cases tag names");
+    }
+
+    #[test]
+    fn each_embed_query_lists_its_parameters_in_order() {
+        assert_eq!(EmbedQuery::None.parameters(), []);
+        let parameters: Vec<(&str, EmbedQueryValue)> = EmbedQuery::StartAndList
+            .parameters()
+            .iter()
+            .map(|parameter| (parameter.name, parameter.value))
+            .collect();
+        assert_eq!(
+            parameters,
+            [
+                ("start", EmbedQueryValue::Digits),
+                ("list", EmbedQueryValue::Id)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_embed_constants_are_the_editor_md_values() {
+        // editor.md §3.6: `https` only, ids of `[A-Za-z0-9_-]`.
+        assert_eq!(EMBED_SCHEME, "https");
+        let expected: String = ('A'..='Z')
+            .chain('a'..='z')
+            .chain('0'..='9')
+            .chain(['_', '-'])
+            .collect();
+        assert_eq!(EMBED_ID_ALPHABET, expected);
+        assert_eq!(IFRAME_FULL_WIDTH, "100%");
     }
 
     #[test]
