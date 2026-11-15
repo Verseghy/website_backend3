@@ -136,7 +136,7 @@ The admin UI (`admin/`, Node.js LTS major in `admin/.node-version`):
 cd admin
 npm ci                 # install exactly what package-lock.json pins
 npm run dev            # Vite dev server; proxies /api to http://localhost:5150
-npm run build          # writes admin/dist, which backend3 serves at /admin
+npm run build          # writes admin/dist, which backend3 serves at /admin, with its licence notices (licenses.txt, ADR 0038)
 npm run lint           # ESLint
 npm run typecheck      # tsc -b --noEmit, which also checks the generated bindings
 npm test               # Vitest unit tests (vitest run)

@@ -3,6 +3,11 @@ import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig, loadEnv } from "vite"
 
+import {
+  LICENCE_NOTICES_BANNER,
+  LICENCE_NOTICES_FILE,
+  licenceNotices,
+} from "./scripts/licence-notices.mjs"
 import { parseReportMissingKeys } from "./src/i18n/report-missing-keys.ts"
 import { includeClipboardRecorder } from "./src/recorder/recorder-flag.ts"
 import { parseSourceCommit } from "./src/source-link/source-commit.ts"
@@ -32,6 +37,13 @@ import { parseSourceCommit } from "./src/source-link/source-commit.ts"
  *   as on the variable, and is validated here first. In a build the constant
  *   is a literal, so the bundler drops the branch of `main.tsx` that it
  *   guards, with its dynamic import (`src/recorder/production-bundle.test.ts`).
+ * - `build.license` writes the licence notices of the bundled packages to
+ *   `dist/licenses.txt`, which backend3 serves at `/admin/licenses.txt`
+ *   (ADR 0038). Vite lists the packages of the JavaScript chunks; the
+ *   `licenceNotices` plugin adds those that arrive through a stylesheet
+ *   `@import` or as an asset, then the licence files of the code copied into
+ *   `src/`, and every chunk starts with a comment that names the file
+ *   (`scripts/licence-notices.mjs`).
  */
 export default defineConfig(({ command, mode }) => {
   // loadEnv reads `.env*` files and the process environment; only `VITE_`
@@ -46,7 +58,20 @@ export default defineConfig(({ command, mode }) => {
 
   return {
     base: "/admin/",
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      licenceNotices({ fileName: LICENCE_NOTICES_FILE }),
+    ],
+    build: {
+      // Vite's default is `.vite/license.md`; the dist root keeps the URL
+      // plain, and `.txt` makes every browser show the file (ADR 0038).
+      license: { fileName: LICENCE_NOTICES_FILE },
+      rolldownOptions: {
+        // Added after minification, so the comment survives it.
+        output: { postBanner: LICENCE_NOTICES_BANNER },
+      },
+    },
     define: {
       __CLIPBOARD_RECORDER__: JSON.stringify(clipboardRecorder),
     },

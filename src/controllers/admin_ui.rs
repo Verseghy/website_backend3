@@ -17,7 +17,14 @@
 //! | any other method | 405 | none |
 //!
 //! The path decision is the pure function [`crate::domain::admin_path`]. This
-//! module only does the file serving and sets the headers.
+//! module only does the file serving and sets the headers. A text file is
+//! answered with `charset=utf-8` in its `Content-Type`, because the file
+//! services send the bare media type and the build writes UTF-8 only.
+//!
+//! The licence notices of the code bundled into the admin (ADR 0038) are
+//! `dist/licenses.txt`, which the Vite build writes. The root-file row of the
+//! table serves it at `/admin/licenses.txt`, as `text/plain; charset=utf-8`
+//! with `no-cache`; the router needs no route of its own for it.
 //!
 //! `App::before_routes` mounts the router, so Loco wraps it in its whole
 //! middleware stack: request id, logging, compression and the global secure
@@ -260,9 +267,29 @@ async fn serve(State(ui): State<AdminUi>, request: Request) -> Response {
     let response = if response.status() == StatusCode::NOT_FOUND {
         not_found()
     } else {
-        response
+        with_utf8_charset(response)
     };
     with_cache_control(response, class)
+}
+
+/// States `charset=utf-8` on a text response of the file services.
+///
+/// `ServeDir` and `ServeFile` send the bare media type of the file name, so
+/// the licence notices file `licenses.txt` (ADR 0038) would otherwise reach a
+/// browser as `text/plain` without a charset and be decoded with a
+/// locale-dependent default rather than UTF-8.
+/// [`admin_path::utf8_text_content_type`] says which values change and why
+/// every text file of the build is UTF-8.
+fn with_utf8_charset(mut response: Response) -> Response {
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(admin_path::utf8_text_content_type);
+    if let Some(value) = content_type.and_then(|value| HeaderValue::from_str(&value).ok()) {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
 }
 
 /// Converts a tower-http file response into an axum response.
@@ -368,6 +395,22 @@ mod tests {
         };
         assert!(router::<()>(&settings, DistRequirement::Required).is_err());
         assert!(router::<()>(&settings, DistRequirement::Optional).is_ok());
+    }
+
+    #[test]
+    fn text_responses_state_the_utf8_charset() {
+        let text = with_utf8_charset(([(CONTENT_TYPE, "text/plain")], "notices").into_response());
+        assert_eq!(text.headers()[CONTENT_TYPE], "text/plain; charset=utf-8");
+
+        // Another type, or a response that names its charset, keeps its value.
+        for value in ["image/svg+xml", "text/plain; charset=utf-8"] {
+            let response = with_utf8_charset(([(CONTENT_TYPE, value)], "body").into_response());
+            assert_eq!(response.headers()[CONTENT_TYPE], value);
+        }
+
+        // A response without a Content-Type (a 304) gets none.
+        let not_modified = with_utf8_charset(StatusCode::NOT_MODIFIED.into_response());
+        assert!(not_modified.headers().get(CONTENT_TYPE).is_none());
     }
 
     #[test]
