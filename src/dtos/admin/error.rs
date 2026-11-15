@@ -17,7 +17,10 @@
 //! `unauthorized` for a request without a valid admin session (ADR 0006 §1,
 //! ADR 0021 §4's 401 row), and `forbidden` for a signed-in account that the
 //! route's requirement refuses (the route table's guard, ADR 0007 §5,
-//! ADR 0021 §4's 403 row). The seven codes of a refused rich-text body
+//! ADR 0021 §4's 403 row). `origin_mismatch` answers a write that carries
+//! the session cookie but not the admin's own origin in its `Origin` header
+//! (ADR 0006 §3, as amended by ADR 0044), also from the route table's guard,
+//! before the session is opened. The seven codes of a refused rich-text body
 //! (editor.md §7.6) came with the validator that finds them,
 //! `domain::rich_text::validate_content`, before the post and page writes
 //! that answer them: each finding is a [`super::content::ContentError`],
@@ -96,6 +99,13 @@ pub enum ErrorCode {
     /// valid, so the user is not signed out. A list the account may not see
     /// answers this, never an empty list.
     Forbidden,
+    /// `403`: a write that carries the admin session cookie (or the
+    /// two-factor step's cookie) did not come with the admin's own origin in
+    /// its `Origin` header: it came from another site or a sibling host, or
+    /// through a client or extension that drops the header (ADR 0006 §3, as
+    /// amended by ADR 0044). Nothing was done and the session stays valid, so
+    /// the user is not signed out.
+    OriginMismatch,
     /// `422`: the upload is not a JPEG, PNG, GIF or WebP image. Its file
     /// name has another extension or none, or its content is not an image
     /// at all (an SVG or HTML file renamed to `.png`, for example). `field`
@@ -133,8 +143,10 @@ impl ErrorCode {
             // ADR 0021 §4: 401 is "no valid session"; a failed sign-in is one.
             Self::InvalidCredentials | Self::Unauthorized => 401,
             // ADR 0021 §4: 403 is a permission or record-level refusal
-            // (ADR 0007 §5).
-            Self::Forbidden => 403,
+            // (ADR 0007 §5). ADR 0006 §3 answers a write from a foreign
+            // origin with 403 as well (ADR 0044): the session is valid or
+            // not looked at, so it is no 401, which would sign the admin out.
+            Self::Forbidden | Self::OriginMismatch => 403,
             // ADR 0021 §4 has no row for it; 413 with the JSON envelope
             // follows ADR 0015 §6, whose upload limit answers it (D74).
             Self::BodyTooLarge => 413,
@@ -195,6 +207,10 @@ impl ErrorCode {
             // script with a Bearer token knows that signing in again does
             // not help.
             Self::Forbidden => "The signed-in account may not perform this operation",
+            Self::OriginMismatch => {
+                "The request does not come from the admin's origin; a write with the session \
+                 cookie must carry it in the Origin header"
+            }
             Self::ImageNotAllowed => "Only JPEG, PNG, GIF and WebP images are accepted",
             Self::ImageTypeMismatch => "The file content does not match its extension",
             Self::ImageCorrupt => "The image is corrupt",
@@ -304,6 +320,7 @@ mod tests {
             ),
             (ErrorCode::Unauthorized, 401, "unauthorized"),
             (ErrorCode::Forbidden, 403, "forbidden"),
+            (ErrorCode::OriginMismatch, 403, "origin_mismatch"),
             (ErrorCode::ImageNotAllowed, 422, "image_not_allowed"),
             (ErrorCode::ImageTypeMismatch, 422, "image_type_mismatch"),
             (ErrorCode::ImageCorrupt, 422, "image_corrupt"),
@@ -362,10 +379,19 @@ mod tests {
     }
 
     #[test]
+    fn the_origin_envelope_serializes_exactly() {
+        assert_eq!(
+            serde_json::to_string(&ErrorEnvelope::new(ErrorCode::OriginMismatch))
+                .expect("serializes"),
+            r#"{"error":"origin_mismatch","description":"The request does not come from the admin's origin; a write with the session cookie must carry it in the Origin header","field":null,"params":{}}"#
+        );
+    }
+
+    #[test]
     fn typescript_declarations() {
         assert_eq!(
             ErrorCode::decl(&ts_rs::Config::default()),
-            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";"#
+            r#"type ErrorCode = "not_found" | "invalid_credentials" | "invalid_body" | "body_too_large" | "image_alt_missing" | "image_src_rejected" | "embed_rejected" | "iframe_content" | "content_too_large" | "content_too_deep" | "content_not_normalisable" | "unauthorized" | "forbidden" | "origin_mismatch" | "image_not_allowed" | "image_type_mismatch" | "image_corrupt" | "image_too_many_pixels" | "image_animation_too_large" | "image_too_many_scans" | "insufficient_storage";"#
         );
         let envelope = ErrorEnvelope::decl(&ts_rs::Config::default());
         assert!(envelope.contains("error: ErrorCode"), "{envelope}");

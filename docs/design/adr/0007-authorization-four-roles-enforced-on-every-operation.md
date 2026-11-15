@@ -1,6 +1,6 @@
 # 0007. Authorization: four roles, enforced on every operation
 
-- Status: Accepted (2026-10-24)
+- Status: Amended by [0044](0044-cookie-authenticated-admin-writes-need-the-admin-origin.md) (2026-11-15)
 - Decision questions: Q6. Related answers that change the permission list: Q11 and 11b ([ADR 0011](0011-safety-net-soft-delete-revisions-and-an-activity-log-for-eve.md)), Q26 ([ADR 0015](0015-media-separate-static-server-media-library-image-optimisatio.md)), Q28, Q29 and Q30 ([ADR 0019](0019-scope-parity-tracking-retired-features-release-1-additions.md))
 
 ## Context

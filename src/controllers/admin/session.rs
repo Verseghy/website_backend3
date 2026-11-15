@@ -725,6 +725,7 @@ mod tests {
                 "reset_link_ttl_secs": 1,
                 "temp_password_ttl_secs": 1,
                 "force_change_short_legacy_password": true,
+                "origin": "http://localhost:5150",
             },
             "image_optimisation": {
                 "pixel_budget": 50_000_000,

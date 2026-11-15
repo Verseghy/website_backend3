@@ -15,7 +15,7 @@
 
 use axum::http::{
     Method, StatusCode,
-    header::{ALLOW, COOKIE},
+    header::{ALLOW, COOKIE, ORIGIN},
 };
 use axum_test::{TestResponse, TestServer};
 use backend3::{
@@ -31,6 +31,7 @@ use loco_rs::{
 use serde_json::{Map, Value, json};
 
 use crate::support::{
+    ADMIN_ORIGIN,
     session_refresh::{place_session, renewed_cookie},
     with_server, with_server_at,
 };
@@ -127,11 +128,13 @@ fn session_cookie_header(token: &str) -> String {
     format!("theme=dark; {SESSION_COOKIE_NAME}={token}")
 }
 
-/// `POST /auth/logout` with `token` in the session cookie.
+/// `POST /auth/logout` with `token` in the session cookie, from the admin
+/// origin, as the admin UI sends it (ADR 0006 §3, ADR 0044).
 async fn logout_with_cookie(server: &TestServer, token: &str) -> TestResponse {
     server
         .post(LOGOUT)
         .add_header(COOKIE, session_cookie_header(token))
+        .add_header(ORIGIN, ADMIN_ORIGIN)
         .await
 }
 

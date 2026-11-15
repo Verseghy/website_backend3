@@ -26,7 +26,10 @@
 
 use std::{net::IpAddr, time::Duration};
 
-use axum::http::{HeaderMap, StatusCode, header::COOKIE};
+use axum::http::{
+    HeaderMap, StatusCode,
+    header::{COOKIE, ORIGIN},
+};
 use axum_test::{TestResponse, TestServer};
 use backend3::{
     domain::{
@@ -50,7 +53,7 @@ use sea_orm::{
 };
 use serde_json::{Value, json};
 
-use crate::support::with_server;
+use crate::support::{ADMIN_ORIGIN, with_server};
 
 const LOGIN: &str = "/api/admin/auth/login";
 const LOGOUT: &str = "/api/admin/auth/logout";
@@ -142,12 +145,14 @@ fn session_token(response: &TestResponse) -> String {
         .to_owned()
 }
 
-/// `POST /auth/logout` with `token` in the session cookie, from behind the
+/// `POST /auth/logout` with `token` in the session cookie, from the admin
+/// origin as the admin UI sends it (ADR 0006 §3, ADR 0044), from behind the
 /// router, with the caller's own `x-request-id`.
 async fn logout(server: &TestServer, token: &str) -> TestResponse {
     server
         .post(LOGOUT)
         .add_header(COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+        .add_header(ORIGIN, ADMIN_ORIGIN)
         .add_header("x-forwarded-for", FORWARDED_FOR)
         .add_header("x-request-id", CALLER_REQUEST_ID)
         .await

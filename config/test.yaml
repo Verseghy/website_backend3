@@ -137,6 +137,11 @@ settings:
     # A legacy password shorter than 12 characters yields only a
     # password_change session (§6).
     force_change_short_legacy_password: true
+    # The admin origin (ADR 0006 §3, ADR 0044): a cookie-authenticated write
+    # to /api/admin must carry exactly this value in its Origin header. The
+    # request tests send it with every cookie-authenticated write
+    # (tests/support ADMIN_ORIGIN); e2e and development use the same value.
+    origin: "http://localhost:5150"
   # How uploaded images are optimised (ADR 0015 §7, ADR 0033).
   # `pixel_budget`: the largest pixel count decoded for one image, 50
   # megapixels (ADR 0015 §7). `png`: the oxipng preset by image size

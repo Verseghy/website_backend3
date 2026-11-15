@@ -50,6 +50,13 @@
 //! password. The task decides whether it is set and usable, so a bad value
 //! there never stops the server.
 //!
+//! The admin origin (`settings.admin_auth.origin`, ADR 0006 §3 as amended by
+//! ADR 0044) is checked in full here: it must be an origin exactly as
+//! browsers send it in the `Origin` header, because the check of
+//! cookie-authenticated admin writes compares the two byte for byte. A value
+//! that no header could match would refuse every admin write, so it stops the
+//! boot instead, with the spelling to write.
+//!
 //! The media settings (`settings.media`, ADR 0015 §3) are checked from their
 //! text only: the public base URL must be absolute and canonical without a
 //! trailing slash (public-api.md §2.3), and the three directories may not
@@ -71,6 +78,7 @@ use crate::domain::{
     image_optimise::{PixelBudget, PngEffort},
     import_mysql::source::{SOURCE_DATABASE_URL_ENV, SOURCE_DATABASE_URL_KEY, SourceDatabaseUrl},
     media_rules::{MediaDirsError, check_media_dirs},
+    origin::AdminOrigin,
     session::AbsoluteLimit,
     session_jwt::{
         ExpirationError, JwtSecret, LocationsError, TokenLocation, check_expiration,
@@ -90,7 +98,7 @@ pub struct Settings {
     pub admin_ui: AdminUiSettings,
     /// Where the `/metrics` listener listens (ADR 0023 §9).
     pub metrics: MetricsSettings,
-    /// Admin sign-in (ADR 0006 §6, §8).
+    /// Admin sign-in and the admin session (ADR 0006 §3, §6, §8).
     pub admin_auth: AdminAuthSettings,
     /// How uploaded images are optimised (ADR 0015 §7, ADR 0033).
     pub image_optimisation: ImageOptimisationSettings,
@@ -168,14 +176,15 @@ fn public_base_url<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BaseUrl
     })
 }
 
-/// Settings of admin sign-in (ADR 0006).
+/// Settings of admin sign-in and of the admin session (ADR 0006).
 ///
 /// The four values of ADR 0006 §8 have no serde default: every committed
 /// configuration writes them out with the ADR's defaults, which the
 /// maintainer kept (research: DECISIONS R9, D07), so a missing or misspelt
 /// key stops the boot instead of falling back to a value nobody chose. The
 /// durations are checked here: each is at least one second, and the
-/// absolute session limit at least the two-hour session lifetime.
+/// absolute session limit at least the two-hour session lifetime. The admin
+/// origin has no default either (ADR 0044).
 ///
 /// `Debug` never shows the key: [`TotpEncryptionKey`] prints as redacted.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -207,6 +216,15 @@ pub struct AdminAuthSettings {
     /// shorter than 12 characters yields only a `password_change` session
     /// (ADR 0006 §6, §8); `true` in every committed configuration.
     pub force_change_short_legacy_password: bool,
+    /// The origin the admin UI is served from, written as browsers send it
+    /// in the `Origin` header: a cookie-authenticated admin write must carry
+    /// exactly this value (ADR 0006 §3, ADR 0044). Production reads it from
+    /// `HOST`, the public URL of the app, which ADR 0014 sets to the admin
+    /// origin `https://backend3.microshift.verseghy-gimnazium.net`; staging
+    /// sets `HOST` to its own host. The local environments write the origin
+    /// of their own server (`http://localhost:5150`).
+    #[serde(deserialize_with = "admin_origin")]
+    pub origin: AdminOrigin,
 }
 
 /// The full key of [`AdminAuthSettings::session_absolute_max_secs`], for
@@ -222,6 +240,13 @@ pub const TEMP_PASSWORD_TTL_SECS_KEY: &str = "settings.admin_auth.temp_password_
 /// for error messages.
 pub const FORCE_CHANGE_SHORT_LEGACY_PASSWORD_KEY: &str =
     "settings.admin_auth.force_change_short_legacy_password";
+
+/// The full key of [`AdminAuthSettings::origin`], for error messages.
+pub const ADMIN_ORIGIN_KEY: &str = "settings.admin_auth.origin";
+
+/// The environment variable that `config/production.yaml` reads
+/// [`AdminAuthSettings::origin`] from, named in error messages.
+pub const ADMIN_ORIGIN_ENV: &str = "HOST";
 
 /// Reads `settings.admin_auth.session_absolute_max_secs` and checks it with
 /// [`AbsoluteLimit::new`], whose message says what to set. The error goes
@@ -246,6 +271,24 @@ fn positive_secs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NonZeroU6
             "is 0 seconds; a lifetime must be at least 1 second (ADR 0006 §8; see \
              config/production.yaml for the defaults)",
         )
+    })
+}
+
+/// Reads [`AdminAuthSettings::origin`] and checks it with
+/// [`AdminOrigin::parse`]. The error goes back through serde, so
+/// [`Settings::from_section`] reports it at the key's full path.
+///
+/// - `deserializer`: the deserializer at that key.
+///
+/// A value that is not an origin as browsers send it stops the boot: no
+/// `Origin` header would ever match it, so every cookie-authenticated admin
+/// write would be refused.
+fn admin_origin<'de, D: Deserializer<'de>>(deserializer: D) -> Result<AdminOrigin, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    AdminOrigin::parse(&text).map_err(|error| {
+        D::Error::custom(format!(
+            "the admin origin ({ADMIN_ORIGIN_ENV} in production) {error}"
+        ))
     })
 }
 
@@ -730,13 +773,17 @@ mod tests {
         json!({ "binding": "127.0.0.1", "port": 9464 })
     }
 
-    /// A valid `admin_auth` value, with the local environments' key.
+    /// The admin origin of the committed test configuration.
+    const ORIGIN: &str = "http://localhost:5150";
+
+    /// A valid `admin_auth` value, with the local environments' key and
+    /// the test configuration's admin origin.
     fn admin_auth() -> Value {
         admin_auth_with_key(&json!(PUBLISHED_LOCAL_KEY))
     }
 
     /// The `admin_auth` value of the committed configurations, with the TOTP
-    /// key `key`.
+    /// key `key` and the test configuration's admin origin.
     fn admin_auth_with_key(key: &Value) -> Value {
         json!({
             "totp_encryption_key": key,
@@ -744,6 +791,7 @@ mod tests {
             "reset_link_ttl_secs": 86_400,
             "temp_password_ttl_secs": 259_200,
             "force_change_short_legacy_password": true,
+            "origin": ORIGIN,
         })
     }
 
@@ -923,6 +971,7 @@ mod tests {
                     reset_link_ttl_secs: NonZeroU64::new(86_400).expect("positive"),
                     temp_password_ttl_secs: NonZeroU64::new(259_200).expect("positive"),
                     force_change_short_legacy_password: true,
+                    origin: AdminOrigin::parse(ORIGIN).expect("valid"),
                 },
                 image_optimisation: ImageOptimisationSettings {
                     pixel_budget: PixelBudget::DEFAULT,
@@ -1410,14 +1459,7 @@ mod tests {
                 "settings.admin_auth",
             ),
             (
-                json!({
-                    "admin_ui": { "dist_dir": "x" },
-                    "metrics": metrics(),
-                    "admin_auth": { "totp_encryption_key": PUBLISHED_LOCAL_KEY, "extra": 1 },
-                    "image_optimisation": image_optimisation(),
-                    "import": import(),
-                    "media": media(),
-                }),
+                with_admin_auth("extra", Some(json!(1))),
                 "settings.admin_auth.extra",
             ),
             (with_totp_key(&json!("")), TOTP_ENCRYPTION_KEY_KEY),
@@ -1426,6 +1468,69 @@ mod tests {
             let (path, message) = invalid(&section);
             assert_eq!(path, expected_path, "{section}: {message}");
         }
+    }
+
+    /// A complete section with the admin origin replaced by `origin`.
+    fn with_origin(origin: &Value) -> Value {
+        with_admin_auth("origin", Some(origin.clone()))
+    }
+
+    #[test]
+    fn the_admin_origin_is_kept_as_browsers_send_it() {
+        for origin in [
+            "https://backend3.microshift.verseghy-gimnazium.net",
+            "http://localhost",
+            "http://localhost:5150",
+            "http://[::1]:5150",
+        ] {
+            let settings = Settings::from_section(Some(&with_origin(&json!(origin))))
+                .unwrap_or_else(|error| panic!("{origin}: {error}"));
+            assert_eq!(settings.admin_auth.origin.as_str(), origin);
+        }
+    }
+
+    #[test]
+    fn an_admin_origin_that_no_browser_sends_names_the_key_and_what_to_write() {
+        for (origin, problem) in [
+            (json!(""), "is empty".to_owned()),
+            (
+                json!("backend3.example.org"),
+                "is not an absolute URL".to_owned(),
+            ),
+            (
+                json!("ftp://example.org"),
+                "uses the scheme `ftp`".to_owned(),
+            ),
+            (
+                json!("https://backend3.microshift.verseghy-gimnazium.net/"),
+                "is not an origin; write only the scheme, the host and the port, as \
+                 https://backend3.microshift.verseghy-gimnazium.net"
+                    .to_owned(),
+            ),
+            (
+                json!("https://backend3.microshift.verseghy-gimnazium.net/admin"),
+                "is not an origin".to_owned(),
+            ),
+            (
+                json!("https://Backend3.example.org:443"),
+                "write it as https://backend3.example.org".to_owned(),
+            ),
+        ] {
+            let (path, message) = invalid(&with_origin(&origin));
+            assert_eq!(path, ADMIN_ORIGIN_KEY, "{origin}: {message}");
+            assert!(message.contains(&problem), "{origin}: {message}");
+            assert!(
+                message.contains(&format!("({ADMIN_ORIGIN_ENV} in production)")),
+                "{origin}: {message}"
+            );
+        }
+        // Not a string at all: serde's own type error, at the key.
+        let (path, _) = invalid(&with_origin(&json!(5150)));
+        assert_eq!(path, ADMIN_ORIGIN_KEY);
+        // No origin at all: every committed configuration writes one.
+        let (path, message) = invalid(&with_admin_auth("origin", None));
+        assert_eq!(path, "settings.admin_auth", "{message}");
+        assert_eq!(message, "missing field `origin`");
     }
 
     #[test]

@@ -12,12 +12,14 @@
 //!   handles ([`MediaUploads`]: the media settings and the process's one
 //!   image optimiser permit, ADR 0015 §7), which upload handlers take from
 //!   there, the handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]:
-//!   the media settings and the file-owner registry, ADR 0011 §6), and the
+//!   the media settings and the file-owner registry, ADR 0011 §6), the
 //!   session limits ([`SessionLimits`]: the absolute limit of ADR 0006 §8),
-//!   which the sliding refresh of the admin session reads. It checks the
-//!   file-owner registry before storing it and refuses to start on a name
-//!   that is not a plain identifier, because the worker writes the names
-//!   into SQL.
+//!   which the sliding refresh of the admin session reads, and the admin
+//!   origin (`settings.admin_auth.origin`), which the admin route table's
+//!   guard reads for the `Origin` check of cookie-authenticated writes
+//!   (ADR 0006 §3, ADR 0044). It checks the file-owner registry before
+//!   storing it and refuses to start on a name that is not a plain
+//!   identifier, because the worker writes the names into SQL.
 //! - `load_config` runs the database-target guard of ADR 0024 §4 (layer 3)
 //!   and validates the typed settings, including that `settings.metrics.port`
 //!   is not `server.port`, and the admin session's `auth.jwt` section
@@ -112,7 +114,7 @@ use crate::tasks;
 use crate::{
     controllers::{
         self,
-        admin::{media::MediaUploads, session::SessionLimits},
+        admin::{media::MediaUploads, origin::set_admin_origin, session::SessionLimits},
         admin_ui::{self, DistRequirement},
         metrics::{self, HttpMetrics, Metrics, runtime::RuntimeMetrics},
         not_found, storage,
@@ -411,8 +413,9 @@ impl Hooks for App {
     /// unused one costs a few allocations. Last, it stores the upload
     /// handles ([`MediaUploads`]), one optimiser permit per process, and the
     /// handles of the `DeleteOwnedFiles` worker ([`OwnedFiles`]), whose
-    /// file-owner registry it checks, and the session limits that the
-    /// sliding refresh reads ([`SessionLimits`]).
+    /// file-owner registry it checks, the session limits that the sliding
+    /// refresh reads ([`SessionLimits`]), and the admin origin of
+    /// `settings.admin_auth.origin` ([`set_admin_origin`]).
     async fn after_context(ctx: AppContext) -> Result<AppContext> {
         set_clock(&ctx, Arc::new(SystemClock));
         let mut registry = Registry::default();
@@ -437,6 +440,10 @@ impl Hooks for App {
         // The session refresh's absolute limit (ADR 0006 §1, §8), from the
         // same validated settings.
         ctx.shared_store.insert(SessionLimits::new(&settings));
+        // The admin origin, which the route table's guard compares with the
+        // `Origin` of every cookie-authenticated write (ADR 0006 §3,
+        // ADR 0044).
+        set_admin_origin(&ctx, settings.admin_auth.origin.clone());
         Ok(ctx)
     }
 

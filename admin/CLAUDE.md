@@ -110,6 +110,17 @@ ADR 0005 (bindings) before changing anything here.
   starts no call while one is open, so `refreshSession` gives up after
   `REFRESH_TIMEOUT_MS` (30 seconds): a stalled request must never stop the
   refresh for good (`src/test/hanging-fetch.ts` stands in for one).
+  backend3 refuses a write that carries the session cookie unless its
+  `Origin` header is exactly the admin origin (`403 origin_mismatch`,
+  ADR 0044); a `403`, so the user stays signed in and sees
+  `errors.origin_mismatch`. The admin's own writes always pass: its pages
+  are served with a referrer policy under which same-origin writes carry
+  their origin, and in development the Vite dev server's proxy gives the
+  requests of its own pages backend3's origin (`scripts/dev-proxy.mjs`),
+  passing every other origin through unchanged. Never make the proxy rewrite
+  any other `Origin`, and never serve the admin with `no-referrer`: either
+  would let a page on another origin write, or refuse the admin's own
+  writes.
 - **Access (ADR 0007 §7).** `authProvider.canAccess` answers from the
   access map of the last `/auth/me` answer, which the provider keeps, and
   never asks the server per question: `decideAccess` in

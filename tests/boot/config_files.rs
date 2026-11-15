@@ -113,6 +113,118 @@ fn static_and_fallback_middlewares_are_disabled_and_headers_enabled() {
     }
 }
 
+/// Every configuration file the repository commits, sorted: each YAML file
+/// in `config/` but the personal overrides that `.gitignore` keeps out of
+/// the repository, `local.yaml` and `<anything>.local.yaml`, which loco-rs
+/// 1.2.0 merges over `<env>.yaml` (the rule of `published_keys.rs`).
+fn committed_config_files() -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(repository_root().join("config"))
+        .expect("config/")
+        .map(|entry| entry.expect("config/ entry").path())
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            path.extension()
+                .is_some_and(|extension| extension == "yaml" || extension == "yml")
+                && name != "local.yaml"
+                && !name.ends_with(".local.yaml")
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// `line` of a YAML file without its comment: the text before the first `#`
+/// that starts the line or follows whitespace, where YAML starts a comment.
+/// A `#` after whitespace inside a quoted value ends the line early here,
+/// which can only hide text from the caller's check, never invent any.
+///
+/// - `line`: one line of the file.
+fn without_comment(line: &str) -> &str {
+    let mut previous = None;
+    for (index, character) in line.char_indices() {
+        if character == '#' && previous.is_none_or(char::is_whitespace) {
+            return &line[..index];
+        }
+        previous = Some(character);
+    }
+    line
+}
+
+#[test]
+fn no_committed_config_turns_on_loco_s_cors_middleware() {
+    // ADR 0044 §2, as the maintainer answered on 2026-11-15 (research:
+    // DECISIONS R35 (D152)): a sign-in without a credential cookie is not
+    // checked, and no page on another origin can send one, in part because
+    // `/api/admin` answers no CORS preflight. Loco's global `cors`
+    // middleware would answer preflights on every route, so it stays off in
+    // every committed file, production.yaml included (ADR 0014: the one
+    // CORS layer sits on /api/v1). Loco leaves it off when the key is absent
+    // (loco-rs 1.2.0 `default_middleware_stack`), which
+    // `routes_outside_the_public_api_never_send_cors_headers` in
+    // tests/requests/public_router.rs shows under config/test.yaml, so no
+    // file names the key at all, not even with `enable: false`.
+    for environment in local_environments() {
+        let middlewares = load(&environment).server.middlewares;
+        assert!(
+            middlewares.cors.is_none(),
+            "{environment}: server.middlewares.cors (ADR 0044 §2, ADR 0014)"
+        );
+    }
+    // config/production.yaml loads only with its variables set, so every
+    // committed file, that one included, is also read as text: no line names
+    // `cors` outside a comment, as a block key, in a flow mapping or quoted.
+    let files = committed_config_files();
+    assert!(
+        files
+            .iter()
+            .any(|file| file.ends_with("config/production.yaml")),
+        "production.yaml must be among {files:?}"
+    );
+    for file in files {
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        let naming: Vec<(usize, &str)> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| without_comment(line).to_ascii_lowercase().contains("cors"))
+            .map(|(index, line)| (index + 1, line))
+            .collect();
+        assert!(
+            naming.is_empty(),
+            "{}: Loco's cors middleware stays off (ADR 0044 §2), but these lines name it: \
+             {naming:?}",
+            file.display()
+        );
+    }
+}
+
+#[test]
+fn the_comment_strip_keeps_every_way_of_naming_a_key() {
+    // The text check above sees a key however it is written, and only a
+    // comment is dropped.
+    for (line, kept) in [
+        ("    cors:", "    cors:"),
+        ("    cors: # off", "    cors: "),
+        (
+            "  middlewares: {cors: {enable: true}}",
+            "  middlewares: {cors: {enable: true}}",
+        ),
+        (r#"    "cors": {}"#, r#"    "cors": {}"#),
+        ("    # cors: stays off", "    "),
+        ("# cors", ""),
+        (
+            "    key: value#with-hash # cors",
+            "    key: value#with-hash ",
+        ),
+        ("", ""),
+    ] {
+        assert_eq!(without_comment(line), kept, "{line:?}");
+    }
+}
+
 #[test]
 fn test_config_is_safe_and_deterministic() {
     let config = load(&Environment::Test);
@@ -294,6 +406,57 @@ fn production_reads_the_totp_key_from_the_environment_without_a_default() {
 }
 
 #[test]
+fn local_configs_give_their_own_server_as_the_admin_origin() {
+    // ADR 0044: the admin is loaded from http://localhost:5150 in every local
+    // environment (the E2E run, `cargo loco start`, and the Vite dev server,
+    // whose proxy gives its own pages' requests that origin), so a browser
+    // at the admin sends it with every write. The E2E server's `HOST` is
+    // that origin too, as production's is (ADR 0014). Development reads its
+    // port from PORT (5150 by default, another one for a second server), so
+    // its origin is pinned to its own port; test and e2e fix both.
+    for environment in local_environments() {
+        let config = load(&environment);
+        let settings = Settings::from_section(config.settings.as_ref())
+            .unwrap_or_else(|error| panic!("{environment}: {error}"));
+        let expected = match environment {
+            Environment::Development => format!("http://localhost:{}", config.server.port),
+            _ => "http://localhost:5150".to_owned(),
+        };
+        assert_eq!(
+            settings.admin_auth.origin.as_str(),
+            expected,
+            "{environment}"
+        );
+    }
+    let e2e = load(&Environment::Any("e2e".to_owned()));
+    assert_eq!(e2e.server.host, "http://localhost:5150");
+}
+
+#[test]
+fn production_reads_the_admin_origin_from_host() {
+    // ADR 0014 sets HOST to the admin origin, and `server.host` reads the
+    // same variable, so the two cannot drift apart. The escaping filters are
+    // those of the other values read into a string, so any value reaches the
+    // typed check (tests/cli/admin_origin.rs runs it end to end).
+    let source = std::fs::read_to_string(repository_root().join("config/production.yaml"))
+        .expect("config/production.yaml");
+    let lines: Vec<&str> = source
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            line.starts_with("origin:") || line.starts_with("host:")
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            r#"  host: <%= get_env(name="HOST") %>"#,
+            r#"    origin: "<%= get_env(name='HOST') | replace(from='\\', to='\\\\') | replace(from='\"', to='\\\"') %>""#,
+        ]
+    );
+}
+
+#[test]
 fn test_and_e2e_configure_no_import_source() {
     // data-migration.md §4.1: these files never read
     // IMPORT_SOURCE_DATABASE_URL, so a variable left in a shell cannot point
@@ -452,8 +615,9 @@ fn production_media_settings_are_the_volume_and_its_base_url_has_no_default() {
     assert!(source.contains("\n    pixel_budget: 50000000\n"));
 }
 
-/// The lines of `settings.admin_auth` in `source` other than comments and
-/// the TOTP key, whose value differs between the files on purpose.
+/// The lines of `settings.admin_auth` in `source` other than comments, the
+/// TOTP key and the admin origin, whose values differ between the files on
+/// purpose (the admin origin has tests of its own above).
 fn admin_auth_values(source: &str) -> Vec<&str> {
     source
         .lines()
@@ -462,7 +626,9 @@ fn admin_auth_values(source: &str) -> Vec<&str> {
         .take_while(|line| line.starts_with("    "))
         .filter(|line| {
             let line = line.trim_start();
-            !line.starts_with('#') && !line.starts_with("totp_encryption_key:")
+            !line.starts_with('#')
+                && !line.starts_with("totp_encryption_key:")
+                && !line.starts_with("origin:")
         })
         .collect()
 }

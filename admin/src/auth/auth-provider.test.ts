@@ -855,17 +855,30 @@ describe("logout", () => {
       ).display
     ).toEqual({ kind: "key", key: "errors.invalid_body", values: {} })
 
+    // A logout from a page the server does not take for the admin's own
+    // (ADR 0006 §3, ADR 0044): the session holds, and the user is told why.
+    const foreign = providerAnswering(json(403, envelope("origin_mismatch")))
+    const refused = (await rejection(
+      foreign.provider.logout(SIGN_OUT_PARAMS)
+    )) as SignOutError
+    expect(refused.status).toBe(403)
+    expect(refused.display).toEqual({
+      kind: "key",
+      key: "errors.origin_mismatch",
+      values: {},
+    })
+
     // A code this build does not know shows the server's text (ADR 0021 §4).
-    const unknown = providerAnswering(json(403, envelope("origin_mismatch")))
+    const unknown = providerAnswering(json(403, envelope("session_conflict")))
     const error = (await rejection(
       unknown.provider.logout(SIGN_OUT_PARAMS)
     )) as SignOutError
     expect(error.status).toBe(403)
     expect(error.display).toEqual({
       kind: "text",
-      text: "English text for origin_mismatch.",
+      text: "English text for session_conflict.",
     })
-    expect(error.message).toBe("English text for origin_mismatch.")
+    expect(error.message).toBe("English text for session_conflict.")
   })
 
   it("rejects with auth.sign_out.failed when the request never reaches the server", async () => {

@@ -172,6 +172,10 @@ describe("hu.ts", () => {
     // never asks for a new sign-in.
     expect(hu.errors.forbidden).toBe("Nincs jogosultságod ehhez a művelethez.")
     expect(hu.errors.forbidden).not.toMatch(/jelentkezz/i)
+    // A write from another origin (ADR 0044): the session holds too, so the
+    // message asks for the admin's usual address, not a new sign-in.
+    expect(hu.errors.origin_mismatch).toMatch(/szerkesztőfelület/)
+    expect(hu.errors.origin_mismatch).not.toMatch(/jelentkezz/i)
     // The editor's wording of editor.md §10.1 for a file that is no image.
     expect(hu.errors.image_not_allowed).toBe(
       "Csak JPEG, PNG, GIF vagy WebP kép tölthető fel."
@@ -198,6 +202,7 @@ describe("hu.ts", () => {
       content_not_normalisable: ["passes"],
       unauthorized: [],
       forbidden: [],
+      origin_mismatch: [],
       ...UPLOAD_REFUSAL_PARAMS,
     }
     const unknown = Object.entries(hu.errors).flatMap(([code, message]) =>
