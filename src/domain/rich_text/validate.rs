@@ -85,6 +85,7 @@ use super::report::{
     RemovalReport, RemovalRule, parse_like_ammonia, removed_with_content, url_outcome,
 };
 use super::sanitize::{SanitizeError, SanitizedHtml};
+use crate::domain::input::is_trimmed;
 
 /// The most characters of an attribute value that a finding repeats from
 /// the input; a longer value is cut there and ends in `…`. A rejected image
@@ -379,37 +380,14 @@ pub fn validate_content(
     }
 }
 
-/// Whether ECMAScript's `String.prototype.trim` removes `c`: its
-/// `WhiteSpace` and `LineTerminator` code points (ECMA-262, "White Space"
-/// and "Line Terminators"; the `Zs` category as of Unicode 16).
-///
-/// The editor checks alt text in TypeScript (ADR 0013 §2), where trimming
-/// is that `trim`, so the server trims the same code points. Rust's
-/// `char::is_whitespace` differs by two: U+0085, which it trims and `trim`
-/// does not, and U+FEFF, the other way round. With Rust's set, an alt text
-/// the editor accepted could be refused here, or one it blocked accepted.
-///
-/// - `c`: the character.
-#[must_use]
-pub const fn is_trimmed(c: char) -> bool {
-    matches!(
-        c,
-        '\u{9}'..='\u{d}'
-            | ' '
-            | '\u{a0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200a}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202f}'
-            | '\u{205f}'
-            | '\u{3000}'
-            | '\u{feff}'
-    )
-}
-
 /// Whether an alt text is blank: empty, or only characters that
 /// [`is_trimmed`] removes.
+///
+/// The editor checks alt text in TypeScript (ADR 0013 §2), where trimming
+/// is `String.prototype.trim`, so the server trims the same code points,
+/// with the set every admin input shares (`domain::input`): an alt text the
+/// editor accepted is never refused here, and one it blocked never
+/// accepted.
 ///
 /// - `alt`: the `alt` value, after character references are decoded.
 #[must_use]
@@ -1221,19 +1199,13 @@ mod tests {
     }
 
     #[test]
-    fn trimmed_characters_are_ecmascripts() {
-        for c in [
-            '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '\u{a0}', '\u{1680}', '\u{2000}', '\u{200a}',
-            '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}', '\u{feff}',
-        ] {
-            assert!(is_trimmed(c), "{c:?}");
-        }
-        for c in ['\u{85}', '\u{200b}', '\u{180e}', 'a', '\0'] {
-            assert!(!is_trimmed(c), "{c:?}");
-        }
+    fn a_blank_alt_holds_only_characters_the_editor_trims() {
+        // The trim set itself is tested where it lives, in `domain::input`.
         assert!(is_blank(""));
         assert!(is_blank(" \u{feff}\u{a0}"));
         assert!(!is_blank(" a "));
+        // `String.prototype.trim` keeps U+0085, so an alt of it is text.
+        assert!(!is_blank("\u{85}"));
     }
 
     #[test]
@@ -1497,14 +1469,6 @@ mod tests {
                 refusal(&SanitizeError::OutputTooLarge { limit, actual }),
                 Some(ContentError::ContentTooLarge { measured: Measured::Output, limit, actual })
             );
-        }
-
-        // ECMAScript's trim set is Rust's white space without U+0085, plus
-        // U+FEFF.
-        #[test]
-        fn the_trim_set_differs_from_rusts_by_two(c in any::<char>()) {
-            let expected = (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}';
-            prop_assert_eq!(is_trimmed(c), expected, "{:?}", c);
         }
 
         #[test]

@@ -53,6 +53,37 @@ describe("lookupMessage", () => {
     expect(lookupMessage(tree, "ra.toString")).toBeUndefined()
     expect(lookupMessage(tree, "constructor")).toBeUndefined()
   })
+
+  it("finds a leaf whose own name holds dots, as polyglot does", () => {
+    // ADR 0021 §4's dotted codes are one leaf of `errors`.
+    const withCodes = {
+      errors: {
+        not_found: "Nincs ilyen.",
+        "label.name_taken": "Foglalt név.",
+        "menu.max_depth": "Túl mély.",
+      },
+      label: { name: "Címke" },
+    }
+    expect(lookupMessage(withCodes, "errors.label.name_taken")).toBe(
+      "Foglalt név."
+    )
+    expect(lookupMessage(withCodes, "errors.menu.max_depth")).toBe("Túl mély.")
+    expect(lookupMessage(withCodes, "errors.not_found")).toBe("Nincs ilyen.")
+    // A nested path that only looks alike is still its own key.
+    expect(lookupMessage(withCodes, "label.name")).toBe("Címke")
+    expect(lookupMessage(withCodes, "errors.label")).toBeUndefined()
+    expect(lookupMessage(withCodes, "errors.label.name")).toBeUndefined()
+    expect(
+      lookupMessage(withCodes, "errors.label.name_taken.x")
+    ).toBeUndefined()
+  })
+
+  it("lists a dotted leaf under the key that finds it", () => {
+    const withCodes = { errors: { "label.name_taken": "Foglalt név." } }
+    for (const key of messageKeys(withCodes)) {
+      expect(lookupMessage(withCodes, key), key).toBe("Foglalt név.")
+    }
+  })
 })
 
 describe("mergeMessages", () => {

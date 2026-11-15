@@ -23,9 +23,12 @@
 //!   a route table as each role, as no role, as each single grant and as
 //!   each all-but-one set, against what the route's requirement says
 //!   (ADR 0007 §5).
+//! - [`concurrent`]: a second pool and a wait for a lock, for the model
+//!   tests that run two saves at the same time.
 
 pub mod admin_probe;
 pub mod authz_matrix;
+pub mod concurrent;
 pub mod fixtures;
 pub mod openapi_schema;
 pub mod owned_file_probes;

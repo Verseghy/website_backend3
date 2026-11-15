@@ -14,8 +14,6 @@
 //! (`tests/support/probe_notes.rs`). The SQL rules of the triggers are
 //! tested in `tests/migration/revisions.rs`; every account is invented.
 
-use std::{panic::AssertUnwindSafe, time::Duration};
-
 use backend3::{
     app::App,
     domain::{
@@ -33,16 +31,17 @@ use backend3::{
         },
     },
 };
-use futures_util::{FutureExt, future::join_all};
+use futures_util::future::join_all;
 use loco_rs::{app::Hooks, model::ModelError};
 use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DatabaseTransaction, DbBackend,
-    EntityTrait, IsolationLevel, Statement, TransactionTrait,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, EntityTrait,
+    IsolationLevel, Statement, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::support::{
+    concurrent::{commit_once_one_waits, with_second_pool},
     probe_notes::{self, ProbeNoteRevision, first_note, insert_row, next_note, update_row},
     with_app,
 };
@@ -499,44 +498,6 @@ async fn append_reports_an_unknown_table_or_account_as_a_database_error() {
     .await;
 }
 
-/// Runs `test` with a pool of its own on the test's database, with room for
-/// `connections` sessions at once (the test configuration's pool has two),
-/// and closes that pool afterwards, also when `test` panics: `with_app`
-/// can drop the test's database only once no session is left on it.
-///
-/// - `uri`: the test's database, `ctx.config.database.uri`.
-/// - `connections`: the pool's size.
-/// - `test`: the test body; it gets the pool.
-async fn with_second_pool<F, Fut>(uri: &str, connections: u32, test: F)
-where
-    F: FnOnce(DatabaseConnection) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let mut options = ConnectOptions::new(uri.to_owned());
-    options
-        .max_connections(connections)
-        .min_connections(1)
-        .sqlx_logging(false);
-    let pool = Database::connect(options)
-        .await
-        .expect("open a second pool");
-    let outcome = AssertUnwindSafe(test(pool.clone())).catch_unwind().await;
-    pool.close().await.expect("close the second pool");
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic);
-    }
-}
-
-/// How many sessions wait for a lock on a row of the test's database.
-async fn row_lock_waiters(db: &DatabaseConnection) -> i64 {
-    value(
-        db,
-        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
-         AND wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple')",
-    )
-    .await
-}
-
 #[tokio::test]
 async fn a_concurrent_save_of_the_same_record_waits_and_takes_the_next_number() {
     with_app(|_router, ctx| async move {
@@ -613,24 +574,6 @@ async fn many_concurrent_saves_of_one_record_take_distinct_consecutive_numbers()
         assert_eq!(numbers(db, id).await, (1..=8).collect::<Vec<_>>());
     })
     .await;
-}
-
-/// Polls until one session of the test's database waits for a row lock,
-/// then commits `first`, the transaction it waits for; panics after about
-/// five seconds.
-///
-/// - `db`: a connection to the test's database for the poll, outside the
-///   pool whose sessions take part.
-/// - `first`: the transaction that holds the lock.
-async fn commit_once_one_waits(db: &DatabaseConnection, first: DatabaseTransaction) {
-    for _ in 0..500 {
-        if row_lock_waiters(db).await == 1 {
-            first.commit().await.expect("commit the first transaction");
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no session ever waited for the first transaction's row lock");
 }
 
 #[tokio::test]

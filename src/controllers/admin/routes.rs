@@ -168,6 +168,13 @@ pub fn table() -> Vec<AdminRoute> {
             .serving("labels", &[AccessAction::List]),
         AdminRoute::get("/labels/{id}", labels::READ, labels::show)
             .serving("labels", &[AccessAction::Show]),
+        // The label writes (LBL-02; the write contract, SHR-10, SHR-13):
+        // `edit labels` only (ADR 0007 §4), so the picker's `edit posts`
+        // reads labels but never writes one.
+        AdminRoute::post("/labels", labels::WRITE, labels::create)
+            .serving("labels", &[AccessAction::Create]),
+        AdminRoute::put("/labels/{id}", labels::WRITE, labels::update)
+            .serving("labels", &[AccessAction::Edit]),
     ]
 }
 
@@ -662,6 +669,22 @@ mod tests {
                     crate::domain::authz::Permission::EditLabels,
                     crate::domain::authz::Permission::EditPosts,
                 ]),
+                &[SessionScope::Admin][..],
+                RequestBody::Json,
+            ),
+            // ADR 0007 §4: labels are written with `edit labels` only, as
+            // JSON bodies under the 4 MiB limit.
+            (
+                Method::POST,
+                "/api/admin/labels".to_owned(),
+                Requirement::Permission(crate::domain::authz::Permission::EditLabels),
+                &[SessionScope::Admin][..],
+                RequestBody::Json,
+            ),
+            (
+                Method::PUT,
+                "/api/admin/labels/{id}".to_owned(),
+                Requirement::Permission(crate::domain::authz::Permission::EditLabels),
                 &[SessionScope::Admin][..],
                 RequestBody::Json,
             ),

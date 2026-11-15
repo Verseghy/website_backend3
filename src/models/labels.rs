@@ -1,6 +1,7 @@
-//! Labels, „címkék” (parity LBL-01), on top of the generated `labels`
-//! entity: the live-row finders that every read of labels goes through
-//! (ADR 0011 §3).
+//! Labels, „címkék” (parity LBL-01, LBL-02), on top of the generated
+//! `labels` entity: the live-row finders that every read of labels goes
+//! through (ADR 0011 §3), and the create and the edit, which write a label
+//! under the safety net (ADR 0011 §7).
 //!
 //! A label in the trash has `deleted_at` set. [`Model::find_live`] is the one
 //! place that leaves such rows out, and every other finder here starts from
@@ -11,34 +12,75 @@
 //! of the project skill). The admin list reads live rows too; the trash
 //! filter comes with the trash (ADR 0011 §8).
 //!
-//! The writes (create, update, delete, restore, purge) come with their
-//! slices, through the safety net of ADR 0011 §7. The audit instants are
-//! PostgreSQL's (`CURRENT_TIMESTAMP` defaults, and `Expr::current_timestamp()`
-//! in an UPDATE; research: DECISIONS R15, D90), never the app clock's, so
-//! the hook below stamps nothing.
+//! **The writes** ([`Model::create`], [`ActiveModel::edit`]) take the
+//! transaction, the actor and a checked
+//! [`crate::domain::labels::LabelInput`], the only value they write, so a
+//! save can set the name and the colour and nothing else (parity SHR-10).
+//! Each writes the row, then the label's next revision
+//! ([`LabelRevision`], built from the stored row) and the `create` or
+//! `update` entry that names it and, for an update, its changed fields,
+//! through `revisions::record_save`, in the caller's transaction (ADR 0011
+//! §4, §5, §7): a failure of any part fails the save, and the caller's
+//! rollback leaves nothing behind. Delete, restore and purge come with the
+//! trash.
 //!
-//! [`Model::seed_labels`] is the one write so far: the development, test and
-//! E2E seed's invented labels (`crate::domain::seed::SEED_LABELS`), which the
-//! E2E suite lists. Like the seed account, it writes no revision and no
-//! activity entry: only local databases ever hold those rows (ADR 0040).
+//! **The audit columns** (ADR 0011 §2): `created_by` and `updated_by` are
+//! the actor's user id, NULL for the system; the instants are PostgreSQL's
+//! (research: DECISIONS R15, D90): an insert leaves `created_at` and
+//! `updated_at` to their `CURRENT_TIMESTAMP` defaults, and an edit sets
+//! `updated_at` to `Expr::current_timestamp()`, so the row, its revision and
+//! its entry carry one instant, the start of the transaction. The hook below
+//! therefore stamps nothing.
+//!
+//! **A name that a live label already has** is refused by the partial
+//! unique index [`LIVE_NAME_INDEX`] on `lower(name)` among live rows
+//! (ADR 0009, "Constraints"; ADR 0011 §3), never by a lookup that a
+//! concurrent save could race: the write's refusal becomes
+//! [`ModelError::EntityAlreadyExists`] (`super::unique_index`), which the
+//! handler answers `409 label.name_taken`. A trashed label's name is free,
+//! and a label may change the case of its own name.
+//!
+//! **The seed's labels** come from [`Model::seed_labels`], the one write
+//! outside the safety net: the development, test and E2E seed's invented
+//! labels (`crate::domain::seed::SEED_LABELS`), which the E2E suite lists.
+//! Like the seed account, it writes no revision and no activity entry: only
+//! local databases ever hold those rows (ADR 0040).
 //!
 //! The entity derives no serde (`[package.metadata.db.entity]` in
 //! `Cargo.toml`): a label goes out only through
 //! `crate::dtos::admin::labels::LabelResponse`.
 
 use loco_rs::prelude::*;
-use sea_orm::{DatabaseConnection, Select, TransactionSession, sea_query::Func};
+use sea_orm::{
+    DatabaseConnection, DatabaseTransaction, Select, TransactionSession, sea_query::Func,
+};
 
 pub use super::_entities::labels::{ActiveModel, Column, Entity, Model};
-use super::list_page::{self, Page};
-use crate::domain::{list_query::ListQuery, seed::SeedLabel};
+use super::{
+    list_page::{self, Page},
+    revisions::{self, Save},
+    unique_index,
+};
+use crate::domain::{
+    activity::Actor,
+    labels::{LabelInput, LabelRevision},
+    list_query::ListQuery,
+    revision::Reason,
+    seed::SeedLabel,
+};
 
 /// The `labels` entity, under the name Loco's generated models use.
 pub type Labels = Entity;
 
+/// The partial unique index that keeps the names of live labels apart,
+/// compared without regard to case: `lower(name)` among the rows with
+/// `deleted_at IS NULL` (the migration `m20261115_090000_labels`). Its
+/// refusal of a write is the `409` of a label save.
+pub const LIVE_NAME_INDEX: &str = "labels_live_lower_name_key";
+
 /// `lower(name) = lower($1)`: whether a label's name equals `name` but for
 /// case, the comparison of the live labels' unique index on `lower(name)`
-/// (the labels migration).
+/// ([`LIVE_NAME_INDEX`]).
 ///
 /// - `name`: the name to compare with, bound as a parameter.
 ///
@@ -48,6 +90,18 @@ pub type Labels = Entity;
 fn lower_name_equals(name: &str) -> Expr {
     use sea_orm::sea_query::ExprTrait as _;
     Func::lower(Expr::col(Column::Name)).eq(Func::lower(name))
+}
+
+/// Why [`ActiveModel::edit`] refused a label before it wrote anything. A
+/// programming error of the caller, never of the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EditLabelError {
+    /// The active model has no `id`, so no row can be addressed.
+    #[error(
+        "edit needs the label's id: build the active model from a stored row \
+         (`into_active_model`)"
+    )]
+    NoId,
 }
 
 #[async_trait::async_trait]
@@ -176,4 +230,162 @@ impl Model {
         txn.commit().await?;
         Ok(created)
     }
+
+    /// Creates a label as `actor`: the row, then its revision 1 and its
+    /// `create` entry, in `txn` (ADR 0011 §7), and returns the stored row.
+    ///
+    /// - `txn`: the save's transaction; the caller commits it, or rolls it
+    ///   back on any error.
+    /// - `actor`: who creates it: the signed-in account
+    ///   ([`Actor::User`]), whose id becomes `created_by` and `updated_by`,
+    ///   or [`Actor::System`], which leaves both NULL (ADR 0011 §2).
+    /// - `input`: the checked name and colour.
+    /// - `request_id`: Loco's request id, written on the revision and the
+    ///   entry; `None` outside a request.
+    ///
+    /// `id`, `created_at` and `updated_at` come from the database: the
+    /// identity and the `CURRENT_TIMESTAMP` defaults, the start of `txn`. The
+    /// entry is labelled with the name, so the log stays readable after a
+    /// purge (ADR 0011 §5).
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::EntityAlreadyExists`] when a live label already has
+    ///   the name, compared without regard to case ([`LIVE_NAME_INDEX`]);
+    ///   `txn` is aborted then, and only a rollback is left to do.
+    /// - every error of `revisions::record_save`, among them a refused
+    ///   activity entry;
+    /// - [`ModelError::DbErr`] when another statement fails.
+    pub async fn create(
+        txn: &DatabaseTransaction,
+        actor: Actor,
+        input: &LabelInput,
+        request_id: Option<String>,
+    ) -> ModelResult<Self> {
+        let user_id = actor.user_id();
+        let label = ActiveModel {
+            name: ActiveValue::Set(input.name().to_owned()),
+            color: ActiveValue::Set(input.color().to_owned()),
+            created_by: ActiveValue::Set(user_id),
+            updated_by: ActiveValue::Set(user_id),
+            // `id`, the instants and the trash columns stay unset: the
+            // INSERT leaves them out, and the database fills them in.
+            ..Default::default()
+        }
+        .insert(txn)
+        .await
+        .map_err(|error| unique_index::conflict_or_error(error, LIVE_NAME_INDEX))?;
+        record_save(txn, actor, &label, Reason::Create, request_id).await?;
+        Ok(label)
+    }
+
+    /// The label's revision snapshot: its editable fields as stored
+    /// (ADR 0011 §4).
+    #[must_use]
+    pub fn revision_snapshot(&self) -> LabelRevision {
+        LabelRevision {
+            name: self.name.clone(),
+            color: self.color.clone(),
+        }
+    }
+}
+
+impl ActiveModel {
+    /// Saves `input` over this live label as `actor`: the row, then its
+    /// next revision and the `update` entry with the names of the fields
+    /// that changed since the latest revision, in `txn` (ADR 0011 §7), and
+    /// returns the stored row.
+    ///
+    /// - `self`: the label, from a stored row (`into_active_model`). Only
+    ///   its `id` is read: the columns the edit writes come from `input`, so
+    ///   a column set on `self` is never written (parity SHR-10).
+    /// - `txn`: the save's transaction; the caller commits it, or rolls it
+    ///   back on any error.
+    /// - `actor`: who saves it; its user id becomes `updated_by`, NULL for
+    ///   [`Actor::System`]. `created_at` and `created_by` stay as they are.
+    /// - `input`: the checked name and colour.
+    /// - `request_id`: Loco's request id, written on the revision and the
+    ///   entry; `None` outside a request.
+    ///
+    /// One `UPDATE ... WHERE id = $id AND deleted_at IS NULL RETURNING *`
+    /// writes the row, with `updated_at` set to `CURRENT_TIMESTAMP`, the
+    /// start of `txn`. A label that was moved to the trash after the caller
+    /// read it matches nothing. A save that changes nothing still writes a
+    /// revision and an entry that lists no field: ADR 0011 §4 writes one
+    /// revision per update.
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::Any`] with [`EditLabelError::NoId`] when `self` has
+    ///   no `id`, before any query;
+    /// - [`ModelError::EntityNotFound`] when no live label has the id;
+    /// - [`ModelError::EntityAlreadyExists`] when another live label already
+    ///   has the name, compared without regard to case ([`LIVE_NAME_INDEX`]);
+    ///   `txn` is aborted then, and only a rollback is left to do;
+    /// - every error of `revisions::record_save`, among them a refused
+    ///   activity entry;
+    /// - [`ModelError::DbErr`] when another statement fails.
+    pub async fn edit(
+        self,
+        txn: &DatabaseTransaction,
+        actor: Actor,
+        input: &LabelInput,
+        request_id: Option<String>,
+    ) -> ModelResult<Model> {
+        let id = match self.id {
+            ActiveValue::Set(id) | ActiveValue::Unchanged(id) => id,
+            ActiveValue::NotSet => return Err(ModelError::wrap(EditLabelError::NoId)),
+        };
+        // The id addresses the row and is never part of the `SET` list.
+        let changes = Self {
+            name: ActiveValue::Set(input.name().to_owned()),
+            color: ActiveValue::Set(input.color().to_owned()),
+            updated_by: ActiveValue::Set(actor.user_id()),
+            ..Default::default()
+        };
+        let label = Entity::update_many()
+            .set(changes)
+            .col_expr(Column::UpdatedAt, Expr::current_timestamp())
+            .filter(Column::Id.eq(id))
+            .filter(Column::DeletedAt.is_null())
+            .exec_with_returning(txn)
+            .await
+            .map_err(|error| unique_index::conflict_or_error(error, LIVE_NAME_INDEX))?
+            .into_iter()
+            .next()
+            .ok_or(ModelError::EntityNotFound)?;
+        record_save(txn, actor, &label, Reason::Update, request_id).await?;
+        Ok(label)
+    }
+}
+
+/// Writes the revision of a save of `label` and its activity entry, labelled
+/// with the name (ADR 0011 §4, §5): the second half of [`Model::create`] and
+/// [`ActiveModel::edit`].
+///
+/// - `txn`: the save's transaction, which wrote `label`.
+/// - `actor`: who saved it.
+/// - `label`: the stored row after the write; the snapshot is built from
+///   it, so the revision is the record as the database holds it.
+/// - `reason`: [`Reason::Create`] or [`Reason::Update`].
+/// - `request_id`: Loco's request id, if any.
+async fn record_save(
+    txn: &DatabaseTransaction,
+    actor: Actor,
+    label: &Model,
+    reason: Reason,
+    request_id: Option<String>,
+) -> ModelResult<()> {
+    let snapshot = label.revision_snapshot();
+    revisions::record_save(
+        txn,
+        actor,
+        Save {
+            label: Some(label.name.clone()),
+            request_id,
+            ..Save::new(label.id, reason, &snapshot)
+        },
+    )
+    .await?;
+    Ok(())
 }

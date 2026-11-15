@@ -1,11 +1,11 @@
 ---
 name: backend3
-description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, a queue worker, an admin API route with its requirement, or an admin list endpoint and its list screen (paging, sorting, filtering). Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
+description: Use when adding a feature to website_backend3 — a vertical slice, a new admin-editable entity (soft delete, revisions, activity log), a public /api/v1 endpoint with its test fixtures, a step of the legacy MySQL importer, a Rust dependency, a Loco task, code that needs the current time, an activity-log entry, a queue worker, an admin API route with its requirement, an admin list endpoint and its list screen (paging, sorting, filtering), or an admin create or update (the write contract: request DTOs, field errors, conflicts). Gives backend3's own recipes on top of the vendored Loco skill, with the ADRs and file paths each step follows.
 ---
 
 # backend3 recipes
 
-These recipes are backend3's way of doing its eleven repeated tasks. They sit on
+These recipes are backend3's way of doing its twelve repeated tasks. They sit on
 top of the vendored Loco skill (`.claude/skills/loco/`, which says how Loco
 works) and under the project rules in `CLAUDE.md` (which win where the two
 disagree). The ADRs in `docs/design/adr/` are the source of truth: each step
@@ -118,7 +118,9 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    with a visitor that has only `visit_map` and hands the map to the derived
    fields (`deny_unknown_fields`) through
    `serde::de::value::MapAccessDeserializer`, as
-   `dtos::admin::auth::LoginRequest` does. Never read a `serde_json::Map` or
+   `dtos::admin::auth::LoginRequest` does; a new request DTO calls
+   `dtos::admin::write::deserialize_object`, which is that visitor for any
+   derived field struct (recipe 12). Never read a `serde_json::Map` or
    `Value` first: that builds the whole body in memory before any member is
    checked, and keeps the last of two members with the same name. A calendar
    day (`posts.date`, a canteen day) is a `dtos::shared::CalendarDate` and an
@@ -141,7 +143,8 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
 7. **Admin API**: thin handlers in `src/controllers/admin/<name>.rs`, each
    mounted by one entry of the admin route table with its requirement
    (deny by default, ADR 0007 sections 4-5): recipe 10; a list and its
-   record follow the shared list contract: recipe 11. Errors use the
+   record follow the shared list contract: recipe 11, and a create or an
+   update the shared write contract: recipe 12. Errors use the
    envelope and `ErrorCode` of ADR 0021 section 4
    (`controllers::admin::error_response`).
    A handler that reads a JSON body takes `Result<Json<T>, JsonRejection>`
@@ -1377,3 +1380,131 @@ answer. The record of a resource is `GET /api/admin/<resource>/{id}`.
    alphabet against the server (`e2e/labels.spec.ts`); the rows it lists
    come from the seed (`SEED_LABELS` in `src/domain/seed.rs`, mirrored in
    `admin/e2e/seed-labels.ts`, which `tests/seed/mod.rs` checks).
+
+---
+
+## 12. Add an admin write endpoint (the write contract)
+
+Every admin create and update reads its body, refuses what it cannot store
+and writes the same way, which the labels settled first (parity SHR-09,
+SHR-10, SHR-13, SHR-18; ADR 0005, ADR 0009, ADR 0011 §7, ADR 0021 §4):
+`POST /api/admin/<resource>` creates, `PUT /api/admin/<resource>/{id}`
+updates, and both answer the saved record as the record route sends it.
+
+1. **The field rules** in the resource's domain module
+   (`src/domain/<resource>.rs`): a constant per writable field, spelt as the
+   request DTO spells it, which is the envelope's `field`
+   (`domain::labels::NAME_FIELD`); a constant per limit, from parity.md and
+   ADR 0009 (`NAME_MAX_CHARS`); and a checked input type whose fields are
+   private and whose only constructor is its `check` function
+   (`LabelInput::check`), so a value that reaches the model has passed every
+   rule. `check` calls the shared rules of `src/domain/input.rs` in the
+   order the form shows the fields, and returns the first refusal:
+   `required_text` and `optional_text` trim (SHR-09) with `input::trim`,
+   which removes what the admin's `String.prototype.trim` removes, never
+   with Rust's `str::trim` (the two differ at U+0085 and U+FEFF, and the
+   admin and the server must agree on what is empty), and an optional text
+   that is absent, empty or only white space is `None`, stored as NULL, never
+   `''`; `color` takes `#rrggbb` as the CHECK of ADR 0009 does. Every limit
+   of the table is checked there, lengths in characters as PostgreSQL's
+   `length()` counts them, and U+0000, which no `text` value holds, in
+   every text field, so the database never refuses a checked value and the
+   editor sees a field error, never a `500` (SHR-13). A new kind of field
+   rule (a date, an enum, a number range) is a `FieldRule` variant with its
+   tests in `src/domain/input.rs`, an `ErrorCode` with its arm in
+   `dtos::admin::write::field_error_envelope`, and a Hungarian message; the
+   codes of these shared rules are `snake_case` (`field_required`,
+   `field_too_long` with `max`, `field_invalid_character`,
+   `field_invalid_color`). A rule of one resource only (`post.date_required`)
+   is a dotted code of its own. Unit tests and proptests, as recipe 1 step 4;
+   the revision snapshot type (recipe 2 step 6) goes in the same module.
+2. **The request DTO** in `src/dtos/admin/<resource>.rs`: a struct of the
+   writable fields only, with `ts_rs::TS` and a hand-written `Deserialize`
+   that reads a private derived struct with `#[serde(deny_unknown_fields)]`
+   through `dtos::admin::write::deserialize_object`, which takes a JSON
+   object and nothing else (recipe 1 step 6), as `LabelRequest` does. One DTO
+   serves the create and the update when both write the same fields. A body
+   with another member (the record's `id`, an audit column, a typo), a
+   repeated, missing or mistyped member, or a body that is not an object is
+   refused whole as `422 invalid_body` before any field is checked (SHR-10),
+   so the admin's data provider sends the DTO's members only, never
+   ra-core's whole `data`: the resource's `create` and `update` handlers
+   sit beside its list handlers in the one `ResourceHandlers` of
+   `resources/handlers.ts` (recipe 11 step 7), and send that body as a JSON
+   string through the provider's `request` (recipe 1 step 9). Test that it
+   reads exactly its members and refuses each of those, and that its member
+   names are the domain's field constants.
+3. **The model** (recipe 2 step 3): the create on `impl Model`
+   (`labels::Model::create(txn, actor, &input, request_id)`), the update on
+   `impl ActiveModel`, consuming `self` and reading only its `id`
+   (`label.into_active_model().edit(txn, actor, &input, request_id)`). Both
+   take the checked input type and write its fields and the audit columns,
+   nothing else. The insert leaves `created_at` and `updated_at` to their
+   defaults; the update is one `UPDATE ... WHERE id = $id AND deleted_at IS
+   NULL RETURNING *` through `update_many().set(...)` with
+   `col_expr(Column::UpdatedAt, Expr::current_timestamp())` (recipe 7 step
+   6), and a row that matches nothing is `ModelError::EntityNotFound`. Then
+   both call `revisions::record_save` with the snapshot built from the
+   stored row and, for a content record, the entry's label. A uniqueness
+   rule over live rows is decided by its partial unique index, never by a
+   lookup before the write, which a concurrent save could race: map the
+   write's error with `models::unique_index::conflict_or_error(error,
+   INDEX)`, which turns that index's refusal, and only that one, into
+   `ModelError::EntityAlreadyExists` (the labels: `LIVE_NAME_INDEX`). The
+   transaction is aborted then, and the caller only rolls it back.
+4. **The handlers** take `AdminSession` (the actor,
+   `Actor::User(session.user.id)`), Loco's request id as
+   `Option<Extension<LocoRequestId>>` (it goes to the revision and the
+   entry, as `controllers::admin::labels` reads it; a content entry holds no
+   address), for an update the id as `Result<Path<String>, PathRejection>`
+   read with `domain::v1_params::id` (an id that cannot name a row is `404`
+   before the body is looked at), and `Result<Json<Request>, JsonRejection>`
+   last. In this order: `json_rejection_response` (`422 invalid_body`, `413
+   body_too_large`); the domain check, answered with
+   `envelope_response(field_error_envelope(&error))`; then one transaction,
+   in which an update reads the live row (`find_live_by_id(&txn, id)`) and
+   edits it. `EntityNotFound` answers `404 not_found` and
+   `EntityAlreadyExists` the resource's `409` code
+   (`<resource>.<value>_taken`, with `field` and the value as sent, trimmed,
+   in `params`, as `dtos::admin::labels::name_taken_envelope`), each after
+   `txn.rollback()`. A success commits and answers the record's DTO: `201
+   Created` for a create, `200` for an update. Any other error is the
+   `500` of `?`, and the dropped transaction rolls the row, the revision and
+   the entry back together.
+5. **The routes** (recipe 10): both with the resource's own write
+   permission (`labels::WRITE`), never the read routes' picker "or", marked
+   `.serving("<resource>", &[AccessAction::Create])` and
+   `&[AccessAction::Edit]`. Add the `create` and `edit` rules to the
+   resource's access row, update the `access` of its cases in
+   `tests/fixtures/authz_cases.json`, and add a case that allows and one
+   that refuses each action.
+6. **Messages**: every new `ErrorCode` gets its Hungarian `errors.<code>`
+   message in `admin/src/i18n/hu.ts`, filled only with the `params` the
+   server sends, which `hu.test.ts` lists per code
+   (`WRITE_REFUSAL_PARAMS`). A field message is shown at its input, so it
+   says „ez a mező” and never names the field. A dotted code is one quoted
+   leaf of `errors` (`"label.name_taken"`), which polyglot and
+   `lookupMessage` reach as `errors.label.name_taken`.
+7. **Tests**: the domain rules' unit tests and proptests; the DTO's tests
+   (step 2); model tests (`tests/models/labels_write.rs`): the safety-net
+   helper for a user and for the system (its `SafetyNetEntity` gives each
+   create a new value where a live value must be unique, since the helper
+   creates more than one record), the conflict whatever the case, a save
+   that meets the value in another save's uncommitted row (it waits, then
+   is the conflict once the other commits and is saved once it rolls back;
+   `with_second_pool` and `until_one_waits` of `tests/support/concurrent.rs`
+   end the first save only once the database shows the second waiting),
+   the value of a trashed row free again, a record that may keep its own
+   value, the update of a missing or trashed row, a save that changes
+   nothing (it still writes a revision, whose entry lists no field), and
+   that only the named index is a conflict; request tests
+   (`tests/requests/admin_labels_write.rs`, every request with
+   `Origin: ADMIN_ORIGIN`, recipe 10 step 4): `401`; `403` for every account
+   without the write permission, the picker's included, before the body is
+   read; the `201` and `200` with the trimmed values; the audit columns,
+   the revision and the entry with the response's request id; each field
+   rule's `422` with its `field` and `params` on both routes; each refused
+   body as `invalid_body`, and `413`, on both routes; the `409`; the
+   update's `404`s; and that every refusal writes nothing. The end-to-end
+   NULL of an empty optional text is pinned by the first resource that has
+   one (the authors' description).

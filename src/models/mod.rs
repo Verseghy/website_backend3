@@ -10,8 +10,9 @@
 //! - [`activity_log`]: the append-only activity log (ADR 0011 §5).
 //! - [`job_queue`]: Loco's job queue table, read for `/metrics`; a model
 //!   module without an entity.
-//! - [`labels`]: the post labels (parity LBL-01), with the live-row finders
-//!   every read of them goes through (ADR 0011 §3).
+//! - [`labels`]: the post labels (parity LBL-01, LBL-02), with the live-row
+//!   finders every read of them goes through (ADR 0011 §3), and the create
+//!   and edit that write a label under the safety net (ADR 0011 §7).
 //! - [`list_page`]: one page of an admin list and its total, read in one
 //!   snapshot (the shared admin list contract); a model module without an
 //!   entity.
@@ -27,6 +28,9 @@
 //! - [`roles`]: the four roles that a migration seeds (ADR 0007 §3).
 //! - [`task_lock`]: the advisory lock every task runs under (ADR 0016 §4); a
 //!   model module without an entity.
+//! - [`unique_index`]: which unique index refused a write, the conflict
+//!   that an admin write answers `409` (the write contract); a model module
+//!   without an entity.
 //! - [`user_permissions`]: each account's extra grants (ADR 0007 §3).
 //! - [`user_roles`]: the roles each account holds (ADR 0007 §3).
 //! - [`users`]: the admin accounts (ADR 0006), with the roles and grants
@@ -55,6 +59,7 @@ pub mod owned_files;
 pub mod revisions;
 pub mod roles;
 pub mod task_lock;
+pub mod unique_index;
 pub mod user_permissions;
 pub mod user_roles;
 pub mod users;

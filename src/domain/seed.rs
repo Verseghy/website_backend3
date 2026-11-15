@@ -9,11 +9,13 @@
 //! through the users model.
 //!
 //! The E2E suite also needs rows to list: the label list's tests page
-//! through, sort and order labels (parity SHR-02, SHR-03; ADR 0020 §4), and
-//! no route writes one yet. So the seed also creates the invented labels of
-//! [`SEED_LABELS`] through the labels model, in the same environments
-//! (recipe 1 step 11 of the project skill: an E2E fixture comes from the
-//! seed).
+//! through, sort and order labels (parity SHR-02, SHR-03; ADR 0020 §4). So
+//! the seed also creates the invented labels of [`SEED_LABELS`] through the
+//! labels model, in the same environments (recipe 1 step 11 of the project
+//! skill: an E2E fixture comes from the seed, through the models). Each of
+//! them also passes the rules of a label save
+//! ([`super::labels::LabelInput::check`]), so the admin can edit a seeded
+//! label like any other.
 //!
 //! The account is invented. Its name and address belong to no person
 //! (`example.org` is reserved for examples, RFC 2606), and its password,
@@ -108,6 +110,12 @@ const fn label(name: &'static str, color: &'static str) -> SeedLabel {
 ///   that only the id breaks (SHR-03);
 /// - ADR 0020's ten words, whose Hungarian order (`hu_icu`) no other
 ///   collation gives, and 20 numbered „Próbacímke” labels.
+///
+/// Every label also passes the rules of a label save as written
+/// ([`super::labels::LabelInput::check`]: a trimmed name of 1 to
+/// [`super::labels::NAME_MAX_CHARS`] characters, a `#rrggbb` colour), so
+/// an edit that changes nothing saves it unchanged instead of answering
+/// `422` (parity LBL-02, SHR-13).
 ///
 /// Every name is invented and belongs to no person or real label.
 pub const SEED_LABELS: &[SeedLabel] = &[
@@ -302,6 +310,22 @@ mod tests {
             // The live labels' unique index is on lower(name) (labels
             // migration), so no two names may differ only in case.
             assert!(names.insert(label.name.to_lowercase()), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn every_seed_label_passes_the_label_save_rules_unchanged() {
+        // The admin saves a seeded label through the same rules as any other
+        // (`LabelInput::check`, parity LBL-02, SHR-13). A seed label that
+        // broke them would answer `422` to an edit that changes nothing, and
+        // one that the check rewrites (trims) would change on that save.
+        for label in SEED_LABELS {
+            let checked = crate::domain::labels::LabelInput::check(label.name, label.color);
+            assert_eq!(
+                checked.as_ref().map(|input| (input.name(), input.color())),
+                Ok((label.name, label.color)),
+                "{label:?}"
+            );
         }
     }
 

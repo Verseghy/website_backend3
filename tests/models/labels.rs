@@ -3,8 +3,9 @@
 //! Hungarian alphabet with the id tie-break, filtered and windowed as the
 //! checked query asks, with the total of the whole list; `App::truncate`
 //! empties the table; and the seed's labels are created once each. Rows are
-//! written in SQL, because the label writes (and their safety net) come with
-//! a later slice. Every name is invented.
+//! written in SQL, mostly with explicit ids, as the importer will write them;
+//! the label writes and their safety net have their own tests
+//! (`labels_write.rs`). Every name is invented.
 
 use backend3::{
     app::App,
