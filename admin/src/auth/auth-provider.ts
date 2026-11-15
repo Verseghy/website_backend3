@@ -24,11 +24,22 @@
  *   answer without a readable envelope (Loco's own `500` body, a proxy's
  *   page, an empty answer, a `200` with a step this build does not know),
  *   shows `auth.sign_in.failed`.
- * - `logout` ends nothing on the server yet: `POST /auth/logout` and the
- *   user menu's „Kijelentkezés” arrive with the logout slice. ra-core calls
- *   `logout` here only after `checkAuth` or `checkError` found the session
- *   gone, so there is nothing to end, and the layout shows no user menu until
- *   then (`src/layout/AppLayout.tsx`).
+ * - `logout` ends the session on the server only when the user asked to sign
+ *   out: the user menu's „Kijelentkezés” passes {@link SIGN_OUT_PARAMS}
+ *   (`use-sign-out.ts`), and `logout` then posts `/auth/logout`, which
+ *   revokes every session of the account and deletes the cookie (ADR 0006
+ *   §2). ra-core also calls `logout`, with `{}`, after `checkAuth` or
+ *   `checkError` found no session, and on a route a visitor without one may
+ *   not see; the server then has nothing to end, so `logout` only lets
+ *   ra-core clear its caches and show the sign-in page. Posting there too
+ *   would send a request, and log a `401`, before every sign-in page.
+ * - A sign-out ends only on the server's word: `204`, or `401`, which says
+ *   that the session had ended already (expired, or revoked from another
+ *   tab or device). Any other answer, and a network failure, rejects with a
+ *   {@link SignOutError}, so ra-core keeps the user on the page, signed in,
+ *   and the user menu shows why: the cookie still holds a valid session, and
+ *   a sign-out that only looked done would leave it to the next person at a
+ *   shared computer.
  *
  * Configuration arrives as explicit options ({@link AuthProviderOptions}),
  * the `fetch` function included, so tests drive the provider against a stub
@@ -53,6 +64,8 @@ import type { MessageKey } from "@/i18n/keys"
 export const LOGIN_PATH = "/auth/login"
 /** The signed-in account's endpoint, relative to the API base path. */
 export const ME_PATH = "/auth/me"
+/** The sign-out endpoint, relative to the API base path. */
+export const LOGOUT_PATH = "/auth/logout"
 
 /** The message of a sign-in that failed for any reason but a refusal. */
 export const SIGN_IN_FAILED_KEY = "auth.sign_in.failed" satisfies MessageKey
@@ -69,6 +82,34 @@ export const CHECK_FAILED_KEY =
   "ra.notification.http_error" satisfies MessageKey
 /** What ra-core shows when `checkError` ends a session that expired. */
 export const SESSION_ENDED_KEY = "errors.unauthorized" satisfies MessageKey
+/**
+ * The message of a sign-out that the server did not confirm and that
+ * carries no readable error envelope.
+ */
+export const SIGN_OUT_FAILED_KEY = "auth.sign_out.failed" satisfies MessageKey
+
+/**
+ * The `params` that ask `logout` to end the session on the server: what the
+ * user menu's „Kijelentkezés” passes through ra-core's `useLogout`, which
+ * hands them to `authProvider.logout` unchanged. ra-core's own calls pass
+ * `{}` (see the module documentation).
+ */
+export const SIGN_OUT_PARAMS = Object.freeze({ endSession: true } as const)
+
+/**
+ * Whether ra-core's `logout` call is the user's sign-out.
+ *
+ * @param params - what `useLogout` passed on.
+ * @returns `true` only for an object whose `endSession` is exactly `true`,
+ *   as {@link SIGN_OUT_PARAMS} has it.
+ */
+export function isSignOutRequest(params: unknown): boolean {
+  return (
+    typeof params === "object" &&
+    params !== null &&
+    (params as { endSession?: unknown }).endSession === true
+  )
+}
 
 /** Options of {@link createAuthProvider}. */
 export interface AuthProviderOptions {
@@ -117,6 +158,30 @@ export class SignInError extends Error {
   constructor(status: number | null, display: UiMessage) {
     super(display.kind === "key" ? display.key : display.text)
     this.name = "SignInError"
+    this.status = status
+    this.display = display
+  }
+}
+
+/**
+ * The rejection of a sign-out that the server did not confirm. The user
+ * menu shows {@link SignOutError.display}; `message` is the same text, as for
+ * {@link SignInError}.
+ */
+export class SignOutError extends Error {
+  /** The HTTP status, or `null` when no answer arrived. */
+  readonly status: number | null
+  /** What the user menu shows. */
+  readonly display: UiMessage
+
+  /**
+   * @param status - the HTTP status of the answer, or `null` when the request
+   *   failed before an answer arrived.
+   * @param display - the message to show.
+   */
+  constructor(status: number | null, display: UiMessage) {
+    super(display.kind === "key" ? display.key : display.text)
+    this.name = "SignOutError"
     this.status = status
     this.display = display
   }
@@ -248,6 +313,22 @@ export function signInFailureMessage(status: number, body: unknown): UiMessage {
 }
 
 /**
+ * The message the user menu shows for a sign-out that the server did not
+ * confirm.
+ *
+ * @param body - the parsed JSON body of the answer, or `undefined` when it
+ *   was not JSON or no answer arrived.
+ * @returns the envelope's message when the body is an error envelope (a
+ *   refusal such as a foreign `Origin`), otherwise `auth.sign_out.failed`.
+ */
+export function signOutFailureMessage(body: unknown): UiMessage {
+  const envelope = parseErrorEnvelope(body)
+  return envelope === undefined
+    ? keyMessage(SIGN_OUT_FAILED_KEY)
+    : envelopeMessage(envelope)
+}
+
+/**
  * The status of an error that ra-core hands to `checkError`: the data
  * provider's `HttpError` carries it as `status`.
  *
@@ -363,10 +444,34 @@ export function createAuthProvider(options: AuthProviderOptions): AuthProvider {
       return undefined
     },
 
-    async logout() {
-      // Nothing to end on the server yet (see the module documentation);
-      // ra-core then shows the sign-in page.
-      return undefined
+    async logout(params: unknown) {
+      // ra-core's own calls come after it found no session: nothing to end
+      // on the server (see the module documentation).
+      if (!isSignOutRequest(params)) {
+        return undefined
+      }
+      let response: Response
+      try {
+        response = await fetch(`${apiBaseUrl}${LOGOUT_PATH}`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        })
+      } catch {
+        throw new SignOutError(null, keyMessage(SIGN_OUT_FAILED_KEY))
+      }
+      // 204: every session of the account ended, and the cookie is gone.
+      // 401: there was no session left to end. Either way the user is
+      // signed out, and ra-core shows the sign-in page.
+      if (response.status === 204 || response.status === 401) {
+        return undefined
+      }
+      // Anything else, a 2xx other than 204 included, is not the server's
+      // confirmation: the session may still hold.
+      throw new SignOutError(
+        response.status,
+        signOutFailureMessage(await readJson(response))
+      )
     },
 
     async checkAuth() {

@@ -35,9 +35,10 @@
  * other strings of the copied kit and shadcn/ui files, which upstream
  * hard-codes in English (ADR 0021 §3); `app.*` holds backend3's application
  * shell (title, footer, about page, update prompt, data-provider notice);
- * `dashboard.*` holds the dashboard; `auth.*` holds the sign-in screens of
- * ADR 0006; `recorder.*` holds the development-only clipboard recorder
- * (editor.md §13.1). ADR 0030 §3 says which namespace a new key belongs to.
+ * `dashboard.*` holds the dashboard; `auth.*` holds the sign-in screens and the
+ * sign-out of ADR 0006; `recorder.*` holds the development-only clipboard
+ * recorder (editor.md §13.1). ADR 0030 §3 says which namespace a new key
+ * belongs to.
  * Vertical slices add `resources.*`, `enums.*`, `errors.*` and their own
  * screens' namespaces in the same PR as the screen. A top-level
  * key that the namespace list of `key-usage.test.ts` (ADR 0030 §2's table)
@@ -355,9 +356,9 @@ export const hu = {
     placeholder:
       "Az irányítópult a statisztikákkal és a teendőkkel egy későbbi kiadásban érkezik.",
   },
-  // The sign-in screens of ADR 0006 (ADR 0021 §2's `auth.*` row). A wrong
-  // address or password shows `errors.invalid_credentials`, the one generic
-  // message of every failed sign-in (ADR 0006 §4).
+  // The sign-in screens and the sign-out of ADR 0006 (ADR 0021 §2's `auth.*`
+  // row). A wrong address or password shows `errors.invalid_credentials`, the
+  // one generic message of every failed sign-in (ADR 0006 §4).
   auth: {
     sign_in: {
       title: "Bejelentkezés",
@@ -368,6 +369,15 @@ export const hu = {
       // A network failure, or an answer without a readable error envelope
       // (a server error without one, a proxy's page, an unknown step).
       failed: "A bejelentkezés most nem sikerült. Próbáld újra később!",
+    },
+    // The user menu's „Kijelentkezés” (`ra.auth.logout`), which ends every
+    // session of the account on the server (ADR 0006 §2).
+    sign_out: {
+      // The server did not confirm the sign-out (a network failure, a
+      // server error without an envelope): the session still holds, so the
+      // user stays signed in and is told so.
+      failed:
+        "A kijelentkezés nem sikerült, továbbra is be vagy jelentkezve. Próbáld újra!",
     },
   },
   // The development-only clipboard recorder (editor.md §13.1). Its route is

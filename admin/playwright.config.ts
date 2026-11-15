@@ -12,7 +12,19 @@ import { defineConfig, devices } from "@playwright/test"
  * `baseURL` is the admin's root. The tests navigate with root-absolute paths
  * (`/admin/about`): a relative `about` would resolve against a base without a
  * trailing slash to `/about`, outside the admin.
+ *
+ * Two projects, both Chromium. Every test signs in with the one seed account
+ * (ADR 0040), in parallel, and a sign-out ends every session of that account
+ * (ADR 0006 §2). A sign-out among the other tests would therefore end their
+ * sessions mid-test. So the files that sign out (`SIGN_OUT_SPECS`) run in the
+ * `sign-out` project, which Playwright starts only after every test of the
+ * `chromium` project has passed, and each of them runs its tests one after
+ * another (`mode: "serial"`).
  */
+
+/** The spec files whose tests end the seed account's sessions. */
+const SIGN_OUT_SPECS = /[/\\]sign-out\.spec\.ts$/
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
@@ -26,5 +38,18 @@ export default defineConfig({
     timezoneId: "Europe/Budapest",
     trace: "retain-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      testIgnore: SIGN_OUT_SPECS,
+    },
+    {
+      name: "sign-out",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: SIGN_OUT_SPECS,
+      // After every other test: see the documentation above.
+      dependencies: ["chromium"],
+    },
+  ],
 })

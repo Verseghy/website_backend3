@@ -85,7 +85,13 @@ slice it feeds. A slice that needs a new crate adds it with recipe 5.
    `before_save` reads the system time: change it as recipe 7 step 5 says.
    The `users` model's `before_save` only gives a new account its `pid` and
    never stamps `updated_at`, because account events leave it alone (ADR 0011
-   §4).
+   §4). An event that ends the account's sessions (ADR 0006 §2: logout,
+   password change and reset, deactivation and soft delete, two-factor
+   changes) moves `token_version` only through
+   `users::ActiveModel::revoke_sessions`: one `UPDATE` that increments it in
+   PostgreSQL and writes the event's other changed (set) columns with it.
+   Never set `token_version` yourself; a read-then-write loses a concurrent
+   increment and can leave a revoked session valid.
 4. **Pure logic** (validation rules, orderings, conversions) goes in
    `src/domain/<name>.rs` with unit tests and at least one proptest property
    per function with a non-trivial input space (ADR 0008 rule 1).

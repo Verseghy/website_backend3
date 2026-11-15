@@ -3,9 +3,11 @@
 //! hook, a hash that round-trips through the table, `App::truncate`, which
 //! leaves the accounts alone, sign-in and its cost, the session token, the
 //! session state the admin extractor checks, the `Authenticable` impl, the
-//! seed account, which the seed creates once and never changes, and the
+//! seed account, which the seed creates once and never changes, the
 //! stored TOTP secret, which decrypts only for its own row (ADR 0006
-//! §6). Every account, password and secret is invented.
+//! §6), and the revocation of every session, one atomic increment of
+//! `token_version` that leaves `updated_at` alone (ADR 0006 §2, ADR 0011
+//! §4). Every account, password and secret is invented.
 
 use std::time::{Duration, Instant};
 
@@ -618,6 +620,152 @@ async fn a_stored_totp_secret_decrypts_for_its_own_row_only() {
             other.totp_secret(&key).map(|found| found.is_some()),
             Err(DecryptError::Authentication)
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn revoke_sessions_increments_the_version_and_changes_nothing_else() {
+    // ADR 0006 §2: logout increments `token_version`; ADR 0011 §4: as an
+    // account event it leaves `updated_at` and `updated_by` alone.
+    with_app(|_router, ctx| async move {
+        let user = insert(&ctx.db, "kilep@example.test", |new| {
+            new.token_version = ActiveValue::Set(4);
+            new.updated_at = ActiveValue::Set(instant());
+        })
+        .await;
+        let revoked = user
+            .clone()
+            .into_active_model()
+            .revoke_sessions(&ctx.db)
+            .await
+            .expect("revoke");
+        assert_eq!(revoked.token_version, 5);
+        // The returned row is the stored one, and it differs from the old
+        // row in the version alone.
+        let stored = Model::find_by_pid(&ctx.db, &user.pid.to_string())
+            .await
+            .expect("stored");
+        assert_eq!(revoked, stored);
+        assert_eq!(
+            Model {
+                token_version: user.token_version,
+                ..revoked.clone()
+            },
+            user
+        );
+
+        // Each revocation moves the version by one more.
+        let again = revoked
+            .into_active_model()
+            .revoke_sessions(&ctx.db)
+            .await
+            .expect("revoke again");
+        assert_eq!((again.token_version, again.updated_at), (6, instant()));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn revoke_sessions_writes_the_pending_changes_in_the_same_update() {
+    // A deactivation ends the account's sessions in the statement that
+    // switches it off (ADR 0006 §2, §7).
+    with_app(|_router, ctx| async move {
+        let user = insert(&ctx.db, "kikapcsol@example.test", |_| {}).await;
+        let other = insert(&ctx.db, "marad@example.test", |_| {}).await;
+        let mut active = user.into_active_model();
+        active.active = ActiveValue::Set(false);
+        let revoked = active.revoke_sessions(&ctx.db).await.expect("revoke");
+        assert_eq!((revoked.active, revoked.token_version), (false, 1));
+        // Only the addressed row changed.
+        let untouched = Model::find_by_pid(&ctx.db, &other.pid.to_string())
+            .await
+            .expect("stored");
+        assert_eq!(untouched, other);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn revoke_sessions_refuses_a_model_without_id_or_with_a_version_of_its_own() {
+    with_app(|_router, ctx| async move {
+        let user = insert(&ctx.db, "hibas@example.test", |_| {}).await;
+        let no_id = ActiveModel {
+            name: ActiveValue::Set("Próba Felhasználó".to_owned()),
+            ..Default::default()
+        };
+        let mut own_version = user.clone().into_active_model();
+        own_version.token_version = ActiveValue::Set(9);
+        for (case, active, expected) in [
+            ("no id", no_id, users::RevokeSessionsError::NoId),
+            (
+                "a version of its own",
+                own_version,
+                users::RevokeSessionsError::TokenVersionSet,
+            ),
+        ] {
+            let error = active
+                .revoke_sessions(&ctx.db)
+                .await
+                .expect_err("refused before any query");
+            // The message says what to fix.
+            assert_eq!(error.to_string(), expected.to_string(), "{case}");
+        }
+        assert!(
+            users::RevokeSessionsError::NoId
+                .to_string()
+                .contains("into_active_model")
+        );
+        assert!(
+            users::RevokeSessionsError::TokenVersionSet
+                .to_string()
+                .contains("leave it unset")
+        );
+        // Nothing was written.
+        let stored = Model::find_by_pid(&ctx.db, &user.pid.to_string())
+            .await
+            .expect("stored");
+        assert_eq!(stored.token_version, 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn revoke_sessions_of_a_row_that_does_not_exist_is_not_found() {
+    with_app(|_router, ctx| async move {
+        let user = insert(&ctx.db, "nincs@example.test", |_| {}).await;
+        let mut gone = user.into_active_model();
+        gone.id = ActiveValue::Unchanged(i64::MAX);
+        assert_not_found(&gone.revoke_sessions(&ctx.db).await, "an unknown id");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn concurrent_revocations_never_lose_an_increment() {
+    // One `UPDATE ... SET token_version = token_version + 1` per call, not a
+    // read and a write: with eight calls in flight from the same stale row
+    // (the test pool's two connections run two of them at a time), the
+    // version still moves eight times, and the eight returned versions are
+    // 1 to 8. A read-then-write would return a repeated version here.
+    with_app(|_router, ctx| async move {
+        let user = insert(&ctx.db, "parhuzamos@example.test", |_| {}).await;
+        let calls = (0..8).map(|_| {
+            let active = user.clone().into_active_model();
+            let db = ctx.db.clone();
+            async move { active.revoke_sessions(&db).await }
+        });
+        let mut versions: Vec<i32> = futures_util::future::join_all(calls)
+            .await
+            .into_iter()
+            .map(|revoked| revoked.expect("revoke").token_version)
+            .collect();
+        versions.sort_unstable();
+        assert_eq!(versions, (1..=8).collect::<Vec<_>>());
+        let stored = Model::find_by_pid(&ctx.db, &user.pid.to_string())
+            .await
+            .expect("stored");
+        assert_eq!(stored.token_version, 8);
     })
     .await;
 }

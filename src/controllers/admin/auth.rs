@@ -1,5 +1,6 @@
-//! The browser sign-in, `POST /api/admin/auth/login` (ADR 0006 §4), and the
-//! signed-in account, `GET /api/admin/auth/me` (ADR 0007 §7).
+//! The browser sign-in, `POST /api/admin/auth/login` (ADR 0006 §4), the
+//! signed-in account, `GET /api/admin/auth/me` (ADR 0007 §7), and logout,
+//! `POST /api/admin/auth/logout` (ADR 0006 §2).
 //!
 //! A correct e-mail address and password answer `200 {"step": "done"}` and
 //! set the `__Host-admin_session` cookie with a full `admin` session token
@@ -22,8 +23,28 @@
 //! three routes that a `password_change` session may reach (ADR 0006 §4), so
 //! the admin UI can tell such a session to set a new password. Without a
 //! valid session it answers `401 unauthorized`.
+//!
+//! Logout ends every session of the account, not only the one it is sent
+//! with (ADR 0006 §2, "Logout therefore signs the user out on every
+//! device"): it increments `token_version`
+//! ([`users::ActiveModel::revoke_sessions`]), so every token issued before
+//! it fails on its next request, and answers `204 No Content` with a
+//! `Set-Cookie` that deletes the session cookie in this browser
+//! ([`crate::domain::session_cookie::cleared_session_cookie`]). It is
+//! `POST` only: a `GET` would let a link or an image sign the user out, so
+//! every other method answers axum's `405` with `Allow: POST`. It is the
+//! third route that a `password_change` session may reach (ADR 0006 §4).
+//! Without a valid session it answers the extractor's `401 unauthorized`
+//! (ADR 0006 §1 refuses every such session with 401, and ADR 0007 §5 gives
+//! "No valid session: 401" for every admin route), sets no cookie and
+//! touches no account; the admin UI treats that answer as already signed
+//! out. A request body, if any, is not read.
 
-use axum::{Json, extract::rejection::JsonRejection, http::header::SET_COOKIE};
+use axum::{
+    Json,
+    extract::rejection::JsonRejection,
+    http::{StatusCode, header::SET_COOKIE},
+};
 use loco_rs::prelude::*;
 
 use super::{
@@ -32,7 +53,7 @@ use super::{
 };
 use crate::{
     app::clock,
-    domain::session_cookie::session_cookie,
+    domain::session_cookie::{cleared_session_cookie, session_cookie},
     dtos::admin::{
         auth::{LoginRequest, LoginResponse, LoginStep, MeResponse},
         error::ErrorCode,
@@ -108,4 +129,48 @@ pub async fn me(session: AdminSession<AdminOrPasswordChange>) -> Result<Response
     let me =
         MeResponse::new(user.pid, user.name, user.email, session.scope).map_err(Error::wrap)?;
     format::json(me)
+}
+
+/// `POST /api/admin/auth/logout`: ends every session of the signed-in
+/// account and deletes the session cookie (ADR 0006 §2).
+///
+/// - `ctx`: the application context; the handler takes the database from
+///   it.
+/// - `session`: the checked admin session; an `admin` or a
+///   `password_change` one (ADR 0006 §4). Without one the extractor has
+///   already answered `401 unauthorized`.
+///
+/// The answer is `204 No Content` with the cookie-clearing `Set-Cookie`,
+/// also when the token came as a Bearer header: the browser that sent no
+/// cookie ignores it. It is the answer's only `Set-Cookie`, also for a
+/// token close to its expiry: the passive sliding refresh of ADR 0006 §1
+/// must leave this route out, because a browser keeps the last cookie of a
+/// name that an answer sets, so a refreshed token after the clearing value
+/// would keep a cookie behind the logout. The request test
+/// `logout_near_expiry_sets_only_the_clearing_cookie` pins it. The activity
+/// entry of the logout (ADR 0011 §5) is written here once the activity log
+/// exists.
+///
+/// # Errors
+///
+/// An internal error (`500`) when the database fails, never a `401`, which
+/// would sign the admin UI out while the sessions still hold (ADR 0006,
+/// follow-up work). A failed account lookup is the extractor's `500`.
+#[debug_handler]
+pub async fn logout(
+    State(ctx): State<AppContext>,
+    session: AdminSession<AdminOrPasswordChange>,
+) -> Result<Response> {
+    // An account event: no revision, and `updated_at` stays as it is
+    // (ADR 0011 §4). The active model holds no change, so the `UPDATE`
+    // writes `token_version` alone.
+    session
+        .user
+        .into_active_model()
+        .revoke_sessions(&ctx.db)
+        .await?;
+    format::render()
+        .status(StatusCode::NO_CONTENT)
+        .header(SET_COOKIE, cleared_session_cookie())
+        .empty()
 }

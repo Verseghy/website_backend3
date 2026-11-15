@@ -84,9 +84,15 @@ ADR 0005 (bindings) before changing anything here.
   kit's login page and carries the source link. A refused request's message
   comes from its error envelope through `src/api/error-envelope.ts`
   (`errors.<code>`, or the server's text for an unknown code, ADR 0021 §4).
-  The kit's user menu stays hidden (`userMenu={null}` in
-  `src/layout/AppLayout.tsx`) until the logout slice adds the server's
-  sign-out.
+  Signing out ends every session of the account on the server
+  (`POST /auth/logout`, ADR 0006 §2): the header shows backend3's
+  `src/layout/AppUserMenu.tsx` instead of the kit's `UserMenu`, and its
+  „Kijelentkezés” calls `useSignOut` (`src/auth/use-sign-out.ts`), which
+  passes `SIGN_OUT_PARAMS` to `logout`. Only that call posts: ra-core calls
+  `logout({})` by itself whenever it finds no session, and then there is
+  nothing to end. A sign-out that the server did not confirm (`204`, or
+  `401` for a session that had ended already) keeps the user signed in and
+  says so; it never looks done while the cookie still holds a session.
 - **Clean room (ADR 0011 §8, ADR 0018 §3.4).** Never install an
   `@react-admin/` package (react-admin's Enterprise Edition), and never read
   or copy Enterprise source, types, styles or examples. `npm run clean-room`
@@ -108,6 +114,10 @@ ADR 0005 (bindings) before changing anything here.
   change to them is listed in that directory's `LOCAL_CHANGES.md`, and adding or
   re-syncing vendored files updates `THIRD_PARTY.md` at the repository root in
   the same PR. They keep their upstream formatting (Prettier ignores them).
+  backend3's own files that adapt kit code, such as `src/layout/AppUserMenu.tsx`
+  (from the kit's `user-menu.tsx`), are not vendored: backend3 owns and
+  formats them, but `THIRD_PARTY.md` lists each one with the kit's licence
+  file and what changed.
 - **Installing kit or shadcn components.** Run the shadcn CLI from `admin/`
   with `HOME` set to a throwaway directory, never against a real home
   directory: the template's post-init step runs `git init` and `git commit`,
@@ -201,4 +211,7 @@ of a page with a session calls `signIn(page)` from `e2e/fixtures.ts` first. A
 test that expects an HTTP error answer, such as the `401` of `/auth/me`
 before the sign-in, lists it in `expectedHttpErrors` (status and path):
 Chromium logs every such answer as a console error, and the guard ignores
-only the listed ones.
+only the listed ones. A test that signs out ends every session of the seed
+account, which the other tests share in parallel, so it goes into
+`e2e/sign-out.spec.ts`: `playwright.config.ts` runs that file in its own
+`sign-out` project, after every other test has passed, one test at a time.
