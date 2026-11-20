@@ -27,7 +27,7 @@ The pinned image runs nginx 1.26.3 as user 1001 in group 0 and exposes port
 family (<https://github.com/sclorg/nginx-container/blob/master/1.26/README.md>,
 read 2026-10-25). The configuration does not rely on the image's own user
 or its s2i scripts. Its nginx is built with `stub_status` (`nginx -V` in the
-pinned image lists `--with-http_stub_status_module`, read 2026-10-31), and the
+pinned image lists `--with-http_stub_status_module`, read 2026-11-20), and the
 image ships `curl`.
 
 ## The contract suite
