@@ -67,13 +67,13 @@ jobs:
           shared-key: registry
           cache-targets: "false"
           save-if: "false"
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-deny@0.20.2
           fallback: none
       - name: cargo deny check bans licenses sources
         run: cargo deny --locked --workspace --all-features check bans licenses sources
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           # The version that the Containerfile pins (ARG CARGO_ABOUT_VERSION;
           # scripts/ci/check-toolchain.sh rule 5 keeps the two equal). The
@@ -100,7 +100,7 @@ jobs:
           shared-key: registry
           cache-targets: "false"
           save-if: "false"
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-deny@0.20.2
           fallback: none
